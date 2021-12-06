@@ -18,7 +18,7 @@
 
 -brand-shorter-name = Firedoge
 -brand-short-name = Firedoge
--brand-full-name = Firedoge
+-brand-full-name = Plasmozill Firedoge
 # This brand name can be used in messages where the product name needs to
 # remain unchanged across different versions (Nightly, Beta, etc.).
 -brand-product-name = Firedoge
