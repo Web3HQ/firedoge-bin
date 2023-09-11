@@ -2,6 +2,8 @@
 Settings
 ========
 
+.. _tool-toolbox-settings:
+
 Opening Settings
 ****************
 
@@ -106,6 +108,7 @@ Inspector
    - Hex
    - HSL(A)
    - RGB(A)
+   - HWB
    - color name
    - As authored.
 
@@ -214,10 +217,12 @@ Advanced settings
   Enable you to use developer tools in the context of the browser itself, and not only web content.
 
 *Enable remote debugging*
-  Enable the developer tools to :doc:`debug remote Firefox instances <../remote_debugging/d>`.
+  Enable the developer tools debug remote Firefox instances.
 
 *Enable worker debugging*
   Enable a panel within the debugger to debug workers.
 
   Note: This option got removed from the UI in Firefox 56, because this version ships with a :doc:`new Debugger UI <../debugger/index>`, but it can still be enabled for the old UI by setting the preference ``devtools.debugger.workers`` to ``true``.
 
+*Enable custom formatters*
+  Allow websites to define :doc:`custom formatters <../custom_formatters/index>` for JavaScript objects.

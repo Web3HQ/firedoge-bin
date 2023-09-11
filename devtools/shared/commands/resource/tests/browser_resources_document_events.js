@@ -5,16 +5,13 @@
 
 // Test the ResourceCommand API around DOCUMENT_EVENT
 
-add_task(async function() {
+add_task(async function () {
   await testDocumentEventResources();
   await testDocumentEventResourcesWithIgnoreExistingResources();
   await testDomCompleteWithOverloadedConsole();
   await testIframeNavigation();
   await testBfCacheNavigation();
-
-  // Enable server side target switching for next test
-  // as the regression it tracks only occurs with server side target switching enabled
-  await pushPref("devtools.target-switching.server.enabled", true);
+  await testDomCompleteWithWindowStop();
   await testCrossOriginNavigation();
 });
 
@@ -229,20 +226,22 @@ async function testIframeNavigation() {
 
   info("Navigate the iframe to another process (if fission is enabled)");
   documentEvents = [];
-  await SpecialPowers.spawn(gBrowser.selectedBrowser, [secondPageUrl], function(
-    url
-  ) {
-    const iframe = content.document.querySelector("iframe");
-    iframe.src = url;
-  });
+  await SpecialPowers.spawn(
+    gBrowser.selectedBrowser,
+    [secondPageUrl],
+    function (url) {
+      const iframe = content.document.querySelector("iframe");
+      iframe.src = url;
+    }
+  );
 
   // We are switching to a new target only when fission is enabled...
   if (isFissionEnabled() || isEveryFrameTargetEnabled()) {
-    await waitFor(() => documentEvents.length >= 4);
+    await waitFor(() => documentEvents.length >= 3);
     is(
       documentEvents.length,
-      4,
-      "With fission/EFT, we switch to a new target and get a will-navigate followed by a new set of events: dom-loading, dom-interactive, dom-complete"
+      3,
+      "With fission/EFT, we switch to a new target and get: dom-loading, dom-interactive, dom-complete (but no will-navigate as that's only for the top BrowsingContext)"
     );
     const [, newIframeTarget] = await commands.targetCommand.getAllTargets([
       commands.targetCommand.TYPES.FRAME,
@@ -250,7 +249,7 @@ async function testIframeNavigation() {
     assertEvents({
       commands,
       targetBeforeNavigation: iframeTarget,
-      documentEvents,
+      documentEvents: [null /* no will-navigate */, ...documentEvents],
       expectedTargetFront: newIframeTarget,
       expectedNewURI: secondPageUrl,
     });
@@ -282,7 +281,7 @@ async function testBfCacheNavigation() {
   const secondLocation = "data:text/html,<title>second</title>second page";
   const tab = await addTab(firstLocation);
   const onLoaded = BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
-  BrowserTestUtils.loadURI(gBrowser.selectedBrowser, secondLocation);
+  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, secondLocation);
   await onLoaded;
 
   const { commands } = await initResourceCommand(tab);
@@ -335,12 +334,8 @@ async function testBfCacheNavigation() {
     4,
     "There is no duplicated event and only the 4 expected DOCUMENT_EVENT states"
   );
-  const [
-    willNavigateEvent,
-    loadingEvent,
-    interactiveEvent,
-    completeEvent,
-  ] = documentEvents;
+  const [willNavigateEvent, loadingEvent, interactiveEvent, completeEvent] =
+    documentEvents;
 
   is(
     willNavigateEvent.name,
@@ -424,7 +419,7 @@ async function testCrossOriginNavigation() {
     "https://example.net/document-builder.sjs?html=<head><title>titleNet</title></head>net";
   const onLoaded = BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
   const targetBeforeNavigation = commands.targetCommand.targetFront;
-  BrowserTestUtils.loadURI(gBrowser.selectedBrowser, netUrl);
+  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, netUrl);
   await onLoaded;
 
   // We are switching to a new target only when fission is enabled...
@@ -446,12 +441,8 @@ async function testCrossOriginNavigation() {
     4,
     "There is no duplicated event and only the 4 expected DOCUMENT_EVENT states"
   );
-  const [
-    willNavigateEvent,
-    loadingEvent,
-    interactiveEvent,
-    completeEvent,
-  ] = documentEvents;
+  const [willNavigateEvent, loadingEvent, interactiveEvent, completeEvent] =
+    documentEvents;
 
   is(
     willNavigateEvent.name,
@@ -540,6 +531,43 @@ async function testDomCompleteWithOverloadedConsole() {
   await client.close();
 }
 
+async function testDomCompleteWithWindowStop() {
+  info("Test dom-complete with a page calling window.stop()");
+
+  const tab = await addTab("data:text/html,foo");
+
+  const { commands, client, resourceCommand, targetCommand } =
+    await initResourceCommand(tab);
+
+  info("Check that all DOCUMENT_EVENTS are fired for the already loaded page");
+  let documentEvents = [];
+  await resourceCommand.watchResources([resourceCommand.TYPES.DOCUMENT_EVENT], {
+    onAvailable: resources => documentEvents.push(...resources),
+  });
+  is(documentEvents.length, 3, "Existing document events are fired");
+  documentEvents = [];
+
+  const html = `<!DOCTYPE html><html>
+  <head>
+    <title>stopped page</title>
+    <script>window.stop();</script>
+  </head>
+  <body>Page content that shouldn't be displayed</body>
+</html>`;
+  const secondLocation = "data:text/html," + encodeURIComponent(html);
+  const targetBeforeNavigation = commands.targetCommand.targetFront;
+  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, secondLocation);
+  info(
+    "Wait for will-navigate, dom-loading, dom-interactive and dom-complete events"
+  );
+  await waitFor(() => documentEvents.length === 4);
+
+  assertEvents({ commands, targetBeforeNavigation, documentEvents });
+
+  targetCommand.destroy();
+  await client.close();
+}
+
 async function assertPromises(
   commands,
   targetBeforeNavigation,
@@ -572,12 +600,8 @@ function assertEvents({
   expectedNewURI = gBrowser.selectedBrowser.currentURI.spec,
   ignoreWillNavigateTimestamp = false,
 }) {
-  const [
-    willNavigateEvent,
-    loadingEvent,
-    interactiveEvent,
-    completeEvent,
-  ] = documentEvents;
+  const [willNavigateEvent, loadingEvent, interactiveEvent, completeEvent] =
+    documentEvents;
   if (willNavigateEvent) {
     is(willNavigateEvent.name, "will-navigate", "Received the will-navigate");
     is(
@@ -602,38 +626,38 @@ function assertEvents({
     is(
       typeof willNavigateEvent.time,
       "number",
-      "Type of time attribute for will-navigate event is correct"
+      `Type of time attribute for will-navigate event is correct (${willNavigateEvent.time})`
     );
   }
   is(
     typeof loadingEvent.time,
     "number",
-    "Type of time attribute for loading event is correct"
+    `Type of time attribute for loading event is correct (${loadingEvent.time})`
   );
   is(
     typeof interactiveEvent.time,
     "number",
-    "Type of time attribute for interactive event is correct"
+    `Type of time attribute for interactive event is correct (${interactiveEvent.time})`
   );
   is(
     typeof completeEvent.time,
     "number",
-    "Type of time attribute for complete event is correct"
+    `Type of time attribute for complete event is correct (${completeEvent.time})`
   );
 
   if (willNavigateEvent && !ignoreWillNavigateTimestamp) {
     ok(
-      willNavigateEvent.time < loadingEvent.time,
-      "Timestamp for dom-loading event is greater than will-navigate event"
+      willNavigateEvent.time <= loadingEvent.time,
+      `Timestamp for dom-loading event is greater than will-navigate event (${willNavigateEvent.time} <= ${loadingEvent.time})`
     );
   }
   ok(
-    loadingEvent.time < interactiveEvent.time,
-    "Timestamp for interactive event is greater than loading event"
+    loadingEvent.time <= interactiveEvent.time,
+    `Timestamp for interactive event is greater than loading event (${loadingEvent.time} <= ${interactiveEvent.time})`
   );
   ok(
-    interactiveEvent.time < completeEvent.time,
-    "Timestamp for complete event is greater than interactive event"
+    interactiveEvent.time <= completeEvent.time,
+    `Timestamp for complete event is greater than interactive event (${interactiveEvent.time} <= ${completeEvent.time}).`
   );
 
   if (willNavigateEvent) {

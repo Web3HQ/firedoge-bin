@@ -2,8 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, # You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function, unicode_literals
-
 import requests
 
 from mozbuild.vendor.host_base import BaseHost
@@ -27,9 +25,6 @@ class GoogleSourceHost(BaseHost):
 
             info = json.loads(req.text[4:])
         return (info["commit"], info["committer"]["time"])
-
-    def upstream_tag(self):
-        pass
 
     def upstream_snapshot(self, revision):
         return "/".join(

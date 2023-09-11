@@ -12,6 +12,8 @@
 #include <winnt.h>
 #include <winternl.h>
 #include <objbase.h>
+#include <shlwapi.h>
+#undef ParseURL
 #include <stdlib.h>
 #include <tuple>
 
@@ -21,7 +23,6 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/ResultVariant.h"
 #include "mozilla/UniquePtr.h"
-#include "mozilla/WindowsVersion.h"
 #include "nsWindowsHelpers.h"
 
 #if defined(MOZILLA_INTERNAL_API)
@@ -520,15 +521,13 @@ class FileUniqueId final {
  private:
   void GetId(const nsAutoHandle& aFile) {
     FILE_ID_INFO fileIdInfo = {};
-    if (IsWin8OrLater()) {
-      if (::GetFileInformationByHandleEx(aFile.get(), FileIdInfo, &fileIdInfo,
-                                         sizeof(fileIdInfo))) {
-        mId = fileIdInfo;
-        return;
-      }
-      // Only NTFS and ReFS support FileIdInfo. So we have to fallback if
-      // GetFileInformationByHandleEx failed.
+    if (::GetFileInformationByHandleEx(aFile.get(), FileIdInfo, &fileIdInfo,
+                                       sizeof(fileIdInfo))) {
+      mId = fileIdInfo;
+      return;
     }
+    // Only NTFS and ReFS support FileIdInfo. So we have to fallback if
+    // GetFileInformationByHandleEx failed.
 
     BY_HANDLE_FILE_INFORMATION info = {};
     if (!::GetFileInformationByHandle(aFile.get(), &info)) {
@@ -626,6 +625,18 @@ inline UniquePtr<wchar_t[]> GetFullModulePath(HMODULE aModule) {
 
 inline UniquePtr<wchar_t[]> GetFullBinaryPath() {
   return GetFullModulePath(nullptr);
+}
+
+// Generates the install directory without a trailing path separator.
+inline bool GetInstallDirectory(UniquePtr<wchar_t[]>& installPath) {
+  installPath = GetFullBinaryPath();
+  // It's not safe to use PathRemoveFileSpecW with strings longer than MAX_PATH
+  // (including null terminator).
+  if (wcslen(installPath.get()) >= MAX_PATH) {
+    return false;
+  }
+  ::PathRemoveFileSpecW(installPath.get());
+  return true;
 }
 
 class ModuleVersion final {
@@ -737,10 +748,6 @@ inline LauncherResult<TOKEN_ELEVATION_TYPE> GetElevationType(
 }
 
 inline bool HasPackageIdentity() {
-  if (!IsWin8OrLater()) {
-    return false;
-  }
-
   HMODULE kernel32Dll = ::GetModuleHandleW(L"kernel32");
   if (!kernel32Dll) {
     return false;
@@ -787,6 +794,35 @@ inline UniquePtr<wchar_t[]> GetPackageFamilyName() {
   }
 
   return packageIdentity;
+}
+
+// This implementation is equivalent to PathGetDriveNumber[AW].
+// We define our own version because using PathGetDriveNumber
+// delay-loads shlwapi.dll, which may fail when the process is
+// sandboxed.
+template <typename T>
+int MozPathGetDriveNumber(const T* aPath) {
+  const auto ToDriveNumber = [](const T* aPath) -> int {
+    if (*aPath == '\0' || *(aPath + 1) != ':') {
+      return -1;
+    }
+
+    T c = *aPath;
+    return (c >= 'A' && c <= 'Z')   ? c - 'A'
+           : (c >= 'a' && c <= 'z') ? c - 'a'
+                                    : -1;
+  };
+
+  if (!aPath) {
+    return -1;
+  }
+
+  if (*aPath == '\\' && *(aPath + 1) == '\\' && *(aPath + 2) == '?' &&
+      *(aPath + 3) == '\\') {
+    return ToDriveNumber(aPath + 4);
+  }
+
+  return ToDriveNumber(aPath);
 }
 
 }  // namespace mozilla

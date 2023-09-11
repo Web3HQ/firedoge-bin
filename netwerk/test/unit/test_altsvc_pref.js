@@ -27,10 +27,7 @@ function run_next_test() {
 }
 
 function run_test() {
-  let env = Cc["@mozilla.org/process/environment;1"].getService(
-    Ci.nsIEnvironment
-  );
-  h3Port = env.get("MOZHTTP3_PORT");
+  h3Port = Services.env.get("MOZHTTP3_PORT");
   Assert.notEqual(h3Port, null);
   Assert.notEqual(h3Port, "");
   h3AltSvc = ":" + h3Port;
@@ -39,7 +36,7 @@ function run_test() {
   do_get_profile();
   prefs = Services.prefs;
 
-  prefs.setBoolPref("network.http.http3.enabled", true);
+  prefs.setBoolPref("network.http.http3.enable", true);
   prefs.setCharPref("network.dns.localDomains", "foo.example.com");
   prefs.setBoolPref("network.dns.disableIPv6", true);
 
@@ -55,7 +52,7 @@ function run_test() {
   run_next_test();
 }
 
-let Http3CheckListener = function() {};
+let Http3CheckListener = function () {};
 
 Http3CheckListener.prototype = {
   expectedRoute: "",
@@ -131,7 +128,7 @@ function test_altsvc_pref() {
 }
 
 function testsDone() {
-  prefs.clearUserPref("network.http.http3.enabled");
+  prefs.clearUserPref("network.http.http3.enable");
   prefs.clearUserPref("network.dns.localDomains");
   prefs.clearUserPref("network.dns.disableIPv6");
   prefs.clearUserPref("network.http.http3.alt-svc-mapping-for-testing");

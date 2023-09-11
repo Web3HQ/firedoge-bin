@@ -7,11 +7,10 @@
  * Tests if requests render correct information in the details UI.
  */
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  await pushPref("dom.security.https_first", false);
-
-  const { L10N } = require("devtools/client/netmonitor/src/utils/l10n");
+add_task(async function () {
+  const {
+    L10N,
+  } = require("resource://devtools/client/netmonitor/src/utils/l10n.js");
 
   const { monitor } = await initNetMonitor(SIMPLE_SJS, {
     requestCount: 1,

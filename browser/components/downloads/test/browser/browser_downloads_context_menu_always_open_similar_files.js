@@ -11,12 +11,8 @@ let gHandlerSvc = Cc["@mozilla.org/uriloader/handler-service;1"].getService(
 let gDownloadDir;
 const TestFiles = {};
 let downloads = [];
-const {
-  handleInternally,
-  saveToDisk,
-  useSystemDefault,
-  alwaysAsk,
-} = Ci.nsIHandlerInfo;
+const { handleInternally, saveToDisk, useSystemDefault, alwaysAsk } =
+  Ci.nsIHandlerInfo;
 
 function ensureMIMEState({ preferredAction, alwaysAskBeforeHandling = false }) {
   const mimeInfo = gMimeSvc.getFromTypeAndExtension("text/plain", "txt");
@@ -31,7 +27,7 @@ async function createDownloadFile() {
   }
   info("Created download directory: " + gDownloadDir);
   TestFiles.txt = await createDownloadedFile(
-    OS.Path.join(gDownloadDir, "downloaded.txt"),
+    PathUtils.join(gDownloadDir, "downloaded.txt"),
     "Test file"
   );
   info("Created downloaded text file at:" + TestFiles.txt.path);
@@ -39,7 +35,8 @@ async function createDownloadFile() {
   info("Setting path for download file");
   // Set target for download file. Otherwise, file will default to .file instead of txt
   // when we prepare our downloads - particularly in task_addDownloads().
-  let target = FileUtils.getFile("TmpD", ["downloaded.txt"]);
+  let targetPath = PathUtils.join(PathUtils.tempDir, "downloaded.txt");
+  let target = new FileUtils.File(targetPath);
   target.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, FileUtils.PERMS_FILE);
   downloads.push({
     state: DownloadsCommon.DOWNLOAD_FINISHED,
@@ -56,9 +53,9 @@ async function prepareDownloadFiles(downloadList) {
   info("Download target exists? " + download.target.exists);
 }
 
-add_task(async function setup() {
+add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
-    set: [["browser.download.improvements_to_download_panel", true]],
+    set: [["browser.download.always_ask_before_handling_new_types", false]],
   });
   const originalOpenDownload = DownloadsCommon.openDownload;
   // overwrite DownloadsCommon.openDownload to prevent file from opening during tests
@@ -86,11 +83,11 @@ add_task(async function test_checkbox_useSystemDefault() {
   ensureMIMEState({ preferredAction: useSystemDefault });
 
   await task_openPanel();
-  await TestUtils.waitForCondition(
-    () =>
-      document.getElementById("downloadsListBox").childElementCount ==
-      downloads.length
-  );
+  await TestUtils.waitForCondition(() => {
+    let downloadsListBox = document.getElementById("downloadsListBox");
+    downloadsListBox.removeAttribute("disabled");
+    return downloadsListBox.childElementCount == downloads.length;
+  });
 
   info("trigger the context menu");
   let itemTarget = document.querySelector(
@@ -125,11 +122,11 @@ add_task(async function test_checkbox_saveToDisk() {
   ensureMIMEState({ preferredAction: saveToDisk });
 
   await task_openPanel();
-  await TestUtils.waitForCondition(
-    () =>
-      document.getElementById("downloadsListBox").childElementCount ==
-      downloads.length
-  );
+  await TestUtils.waitForCondition(() => {
+    let downloadsListBox = document.getElementById("downloadsListBox");
+    downloadsListBox.removeAttribute("disabled");
+    return downloadsListBox.childElementCount == downloads.length;
+  });
 
   info("trigger the context menu");
   let itemTarget = document.querySelector(
@@ -165,11 +162,11 @@ add_task(async function test_preferences_enable_alwaysOpenSimilarFiles() {
 
   // open panel
   await task_openPanel();
-  await TestUtils.waitForCondition(
-    () =>
-      document.getElementById("downloadsListBox").childElementCount ==
-      downloads.length
-  );
+  await TestUtils.waitForCondition(() => {
+    let downloadsListBox = document.getElementById("downloadsListBox");
+    downloadsListBox.removeAttribute("disabled");
+    return downloadsListBox.childElementCount == downloads.length;
+  });
 
   info("trigger the context menu");
   let itemTarget = document.querySelector(
@@ -204,11 +201,11 @@ add_task(async function test_preferences_disable_alwaysOpenSimilarFiles() {
   ensureMIMEState({ preferredAction: useSystemDefault });
 
   await task_openPanel();
-  await TestUtils.waitForCondition(
-    () =>
-      document.getElementById("downloadsListBox").childElementCount ==
-      downloads.length
-  );
+  await TestUtils.waitForCondition(() => {
+    let downloadsListBox = document.getElementById("downloadsListBox");
+    downloadsListBox.removeAttribute("disabled");
+    return downloadsListBox.childElementCount == downloads.length;
+  });
 
   info("trigger the context menu");
   let itemTarget = document.querySelector(

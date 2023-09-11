@@ -1,4 +1,4 @@
-use crate::{Error, HFrame, Header, Res};
+use crate::{frames::HFrame, Error, Header, Res};
 use neqo_transport::StreamId;
 use sfv::{BareItem, Item, ListEntry, Parser};
 use std::convert::TryFrom;
@@ -39,7 +39,7 @@ impl Priority {
                 urgency: 3,
                 incremental: false,
             } => None,
-            other => Some(Header::new("priority", format!("{}", other))),
+            other => Some(Header::new("priority", format!("{other}"))),
         }
     }
 
@@ -85,11 +85,11 @@ impl fmt::Display for Priority {
             Priority {
                 urgency,
                 incremental: false,
-            } => write!(f, "u={}", urgency),
+            } => write!(f, "u={urgency}"),
             Priority {
                 urgency,
                 incremental: true,
-            } => write!(f, "u={},i", urgency),
+            } => write!(f, "u={urgency},i"),
         }
     }
 }
@@ -111,9 +111,9 @@ impl PriorityHandler {
         }
     }
 
-    pub fn priority(&self) -> Priority {
+    /*pub fn priority(&self) -> Priority {
         self.priority
-    }
+    }*/
 
     /// Returns if an priority update will be issued
     pub fn maybe_update_priority(&mut self, priority: Priority) -> bool {

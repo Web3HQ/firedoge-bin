@@ -23,13 +23,6 @@ MOCHITEST_CHROME_MANIFESTS += [
 
 BROWSER_CHROME_MANIFESTS += ["test/browser.ini"]
 
-XPIDL_SOURCES += [
-    "nsIFormSubmitObserver.idl",
-    "nsIMenuBuilder.idl",
-]
-
-XPIDL_MODULE = "content_html"
-
 EXPORTS += [
     "nsGenericHTMLElement.h",
     "nsGenericHTMLFrameElement.h",
@@ -50,6 +43,7 @@ EXPORTS.mozilla += [
 EXPORTS.mozilla.dom += [
     "ConstraintValidation.h",
     "ElementInternals.h",
+    "FetchPriority.h",
     "HTMLAllCollection.h",
     "HTMLAnchorElement.h",
     "HTMLAreaElement.h",
@@ -86,7 +80,6 @@ EXPORTS.mozilla.dom += [
     "HTMLMarqueeElement.h",
     "HTMLMediaElement.h",
     "HTMLMenuElement.h",
-    "HTMLMenuItemElement.h",
     "HTMLMetaElement.h",
     "HTMLMeterElement.h",
     "HTMLModElement.h",
@@ -122,6 +115,7 @@ EXPORTS.mozilla.dom += [
     "HTMLUnknownElement.h",
     "HTMLVideoElement.h",
     "ImageDocument.h",
+    "MediaDocument.h",
     "MediaError.h",
     "nsBrowserElement.h",
     "PlayPromise.h",
@@ -134,6 +128,7 @@ EXPORTS.mozilla.dom += [
 UNIFIED_SOURCES += [
     "ConstraintValidation.cpp",
     "ElementInternals.cpp",
+    "FetchPriority.cpp",
     "HTMLAllCollection.cpp",
     "HTMLAnchorElement.cpp",
     "HTMLAreaElement.cpp",
@@ -170,7 +165,6 @@ UNIFIED_SOURCES += [
     "HTMLMarqueeElement.cpp",
     "HTMLMediaElement.cpp",
     "HTMLMenuElement.cpp",
-    "HTMLMenuItemElement.cpp",
     "HTMLMetaElement.cpp",
     "HTMLMeterElement.cpp",
     "HTMLModElement.cpp",
@@ -225,14 +219,6 @@ UNIFIED_SOURCES += [
     "VideoDocument.cpp",
 ]
 
-EXTRA_JS_MODULES += [
-    "HTMLMenuBuilder.jsm",
-]
-
-XPCOM_MANIFESTS += [
-    "components.conf",
-]
-
 include("/ipc/chromium/chromium-config.mozbuild")
 
 LOCAL_INCLUDES += [
@@ -251,6 +237,7 @@ LOCAL_INCLUDES += [
     "/layout/tables",
     "/layout/xul",
     "/netwerk/base",
+    "/parser/htmlparser",
 ]
 
 FINAL_LIBRARY = "xul"

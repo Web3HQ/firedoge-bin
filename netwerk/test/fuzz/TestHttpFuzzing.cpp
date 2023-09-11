@@ -38,7 +38,7 @@ static int FuzzingInitNetworkHttp(int* argc, char*** argv) {
   Preferences::SetBool("network.dns.native-is-localhost", true);
   Preferences::SetBool("fuzzing.necko.enabled", true);
   Preferences::SetInt("network.http.speculative-parallel-limit", 0);
-  Preferences::SetInt("network.http.spdy.default-concurrent", 1);
+  Preferences::SetInt("network.http.http2.default-concurrent", 1);
 
   if (httpSpec.IsEmpty()) {
     httpSpec = "http://127.0.0.1/";
@@ -56,7 +56,7 @@ static int FuzzingInitNetworkHttp2(int* argc, char*** argv) {
 
 static int FuzzingInitNetworkHttp3(int* argc, char*** argv) {
   Preferences::SetBool("fuzzing.necko.http3", true);
-  Preferences::SetBool("network.http.http3.enabled", true);
+  Preferences::SetBool("network.http.http3.enable", true);
   Preferences::SetCString("network.http.http3.alt-svc-mapping-for-testing",
                           "fuzz.bad.tld;h3=:443");
   httpSpec = "https://fuzz.bad.tld/";

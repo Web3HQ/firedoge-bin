@@ -141,34 +141,37 @@ async function callRequestStorageAccess(callback, expectFail) {
     window.location.search != "?disableWaitUntilPermission" &&
     origin != TEST_ANOTHER_3RD_PARTY_ORIGIN
   ) {
+    let protocol = isSecureContext ? "https" : "http";
     // Wait until the permission is visible in parent process to avoid race
     // conditions. We don't need to wait the permission to be visible in content
     // processes since the content process doesn't rely on the permission to
     // know the storage access is updated.
+    let originURI = SpecialPowers.Services.io.newURI(window.origin);
+    let site = SpecialPowers.Services.eTLD.getSite(originURI);
     await waitUntilPermission(
-      "http://example.net/browser/toolkit/components/antitracking/test/browser/page.html",
-      "3rdPartyStorage^" + window.origin
+      `${protocol}://example.net/browser/toolkit/components/antitracking/test/browser/page.html`,
+      "3rdPartyFrameStorage^" + site
     );
   }
 
   return [threw, rejected];
 }
 
-async function waitUntilPermission(url, name) {
+async function waitUntilPermission(
+  url,
+  name,
+  value = SpecialPowers.Services.perms.ALLOW_ACTION
+) {
   let originAttributes = SpecialPowers.isContentWindowPrivate(window)
     ? { privateBrowsingId: 1 }
     : {};
   await new Promise(resolve => {
     let id = setInterval(async _ => {
       if (
-        await SpecialPowers.testPermission(
-          name,
-          SpecialPowers.Services.perms.ALLOW_ACTION,
-          {
-            url,
-            originAttributes,
-          }
-        )
+        await SpecialPowers.testPermission(name, value, {
+          url,
+          originAttributes,
+        })
       ) {
         clearInterval(id);
         resolve();

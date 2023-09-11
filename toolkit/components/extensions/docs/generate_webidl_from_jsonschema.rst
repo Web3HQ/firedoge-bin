@@ -35,13 +35,13 @@ this command will generates a `.webdil` file named `dom/webidl/ExtensionRuntime.
     one that ends ``mach python`` own command line options.
 
 * If a webidl file with the same name already exist, the python script will ask confirmation and
-  offer to print a diff of the changes (or just continue without changin the existing webidl file
+  offer to print a diff of the changes (or just continue without changing the existing webidl file
   if the content is exactly the same):
 
 .. code-block::
 
     $ mach python $SCRIPT_DIR/GenerateWebIDLBindings.py -- runtime
-    
+
     Generating webidl definition for 'runtime' => dom/webidl/ExtensionRuntime.webidl
     Found existing dom/webidl/ExtensionRuntime.webidl.
 
@@ -66,7 +66,7 @@ this command will generates a `.webdil` file named `dom/webidl/ExtensionRuntime.
     Overwrite dom/webidl/ExtensionRuntime.webidl? (Yes/No/Diff)
 
 * By convention each WebExtensions API WebIDL binding is expected to be paired with C++ files
-  named ``ExtensionMyNamespace.h`` and ``ExtensionMyNamespace.cpp`` and located in 
+  named ``ExtensionMyNamespace.h`` and ``ExtensionMyNamespace.cpp`` and located in
   ``toolkit/components/extensions/webidl-api``:
 
   * if no files with the expected names is found the python script will generate an initial
@@ -75,7 +75,7 @@ this command will generates a `.webdil` file named `dom/webidl/ExtensionRuntime.
     to apply the necessary changes (if any) when the webidl definitions are updated because
     of changes to the WebExtensions APIs JSONSchema.
 
-``ExtensionWebIDL.conf`` config file 
+``ExtensionWebIDL.conf`` config file
 ------------------------------------
 
 TODO:
@@ -92,5 +92,3 @@ TODO:
 TODO:
 
 * mention the special webidl extended attribute used in the WebIDL definitions
-
-

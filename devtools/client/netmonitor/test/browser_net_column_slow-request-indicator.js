@@ -7,12 +7,7 @@
  * Tests that the slow request indicator is visible for slow requests.
  */
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  // We always get a waiting time of 0ms for requests coming from httpd.js in
-  // https.
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   // The script sjs_slow-script-server.sjs takes about 2s which is
   // definately above the slow threshold set here.
   const SLOW_THRESHOLD = 450;

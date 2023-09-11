@@ -7,10 +7,7 @@
  * Tests if Use as Fetch works.
  */
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   const { tab, monitor, toolbox } = await initNetMonitor(CURL_URL, {
     requestCount: 1,
   });
@@ -48,7 +45,7 @@ add_task(async function() {
           payload_: payload,
         },
       ],
-      async function({ url, method_, payload_ }) {
+      async function ({ url, method_, payload_ }) {
         content.wrappedJSObject.performRequest(url, method_, payload_);
       }
     );
@@ -66,18 +63,16 @@ add_task(async function() {
     );
 
     /* Ensure that the use as fetch option is always visible */
-    const useAsFetchNode = getContextMenuItem(
-      monitor,
-      "request-list-context-use-as-fetch"
-    );
     is(
-      !!useAsFetchNode,
+      !!getContextMenuItem(monitor, "request-list-context-use-as-fetch"),
       true,
       'The "Use as Fetch" context menu item should not be hidden.'
     );
 
-    useAsFetchNode.click();
-    await toolbox.once("split-console");
+    const split = toolbox.once("split-console");
+    await selectContextMenuItem(monitor, "request-list-context-use-as-fetch");
+
+    await split;
     const hud = toolbox.getPanel("webconsole").hud;
     await hud.jsterm.once("set-input-value");
 

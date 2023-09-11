@@ -77,7 +77,11 @@ class GPUProcessHost final : public mozilla::ipc::GeckoChildProcessHost {
   // GPUProcessHost.
   //
   // After this returns, the attached Listener is no longer used.
-  void Shutdown();
+  //
+  // Setting aUnexpectedShutdown = true indicates that this is being called to
+  // clean up resources in response to an unexpected shutdown having been
+  // detected.
+  void Shutdown(bool aUnexpectedShutdown = false);
 
   // Return the actor for the top-level actor of the process. If the process
   // has not connected yet, this returns null.
@@ -96,13 +100,15 @@ class GPUProcessHost final : public mozilla::ipc::GeckoChildProcessHost {
   TimeStamp GetLaunchTime() const { return mLaunchTime; }
 
   // Called on the IO thread.
-  void OnChannelConnected(int32_t peer_pid) override;
-  void OnChannelError() override;
+  void OnChannelConnected(base::ProcessId peer_pid) override;
 
   void SetListener(Listener* aListener);
 
-  // Used for tests and diagnostics
+  // Kills the GPU process. Used for tests and diagnostics
   void KillProcess();
+
+  // Causes the GPU process to crash. Used for tests and diagnostics
+  void CrashProcess();
 
 #ifdef MOZ_WIDGET_ANDROID
   java::CompositorSurfaceManager::Param GetCompositorSurfaceManager();
@@ -134,7 +140,7 @@ class GPUProcessHost final : public mozilla::ipc::GeckoChildProcessHost {
   enum class LaunchPhase { Unlaunched, Waiting, Complete };
   LaunchPhase mLaunchPhase;
 
-  UniquePtr<GPUChild> mGPUChild;
+  RefPtr<GPUChild> mGPUChild;
   uint64_t mProcessToken;
 
   UniquePtr<mozilla::ipc::SharedPreferenceSerializer> mPrefSerializer;

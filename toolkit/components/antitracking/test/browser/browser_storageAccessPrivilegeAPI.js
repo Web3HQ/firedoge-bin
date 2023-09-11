@@ -93,7 +93,7 @@ function triggerSecondaryCommand() {
   triggerCommand("secondaryButton");
 }
 
-add_task(async function setup() {
+add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
     set: [
       ["dom.storage_access.auto_grants", true],
@@ -178,8 +178,14 @@ add_task(async function test_privilege_api_with_reject_tracker() {
     "https://tracking.example.org"
   );
 
+  // Verify if the prompt has been shown.
+  let shownPromise = BrowserTestUtils.waitForEvent(
+    PopupNotifications.panel,
+    "popupshown"
+  );
+
   // Call the privilege API.
-  await SpecialPowers.spawn(browser, [], async _ => {
+  let callAPIPromise = SpecialPowers.spawn(browser, [], async _ => {
     // The privilege API requires user activation. So, we set the user
     // activation flag before we call the API.
     content.document.notifyUserGestureActivation();
@@ -194,6 +200,13 @@ add_task(async function test_privilege_api_with_reject_tracker() {
 
     content.document.clearUserGestureActivation();
   });
+
+  await shownPromise;
+
+  // Accept the prompt
+  triggerMainCommand();
+
+  await callAPIPromise;
 
   // Verify if the storage access permission is set correctly.
   await storagePermissionPromise;
@@ -252,7 +265,7 @@ add_task(async function test_privilege_api_with_dFPI() {
   );
   let browser = tab.linkedBrowser;
 
-  await insertSubFrame(browser, TEST_4TH_PARTY_PAGE, "test");
+  await insertSubFrame(browser, TEST_4TH_PARTY_PAGE_HTTPS, "test");
 
   // Verify that the third-party context doesn't have storage access at
   // beginning.
@@ -269,18 +282,24 @@ add_task(async function test_privilege_api_with_dFPI() {
   });
 
   let storagePermissionPromise = waitStoragePermission(
-    "http://not-tracking.example.com"
+    "https://not-tracking.example.com"
+  );
+
+  // Verify if the prompt has been shown.
+  let shownPromise = BrowserTestUtils.waitForEvent(
+    PopupNotifications.panel,
+    "popupshown"
   );
 
   // Call the privilege API.
-  await SpecialPowers.spawn(browser, [], async _ => {
+  let callAPIPromise = SpecialPowers.spawn(browser, [], async _ => {
     // The privilege API requires a user gesture. So, we set the user handling
     // flag before we call the API.
     content.document.notifyUserGestureActivation();
 
     try {
       await content.document.requestStorageAccessForOrigin(
-        "http://not-tracking.example.com/"
+        "https://not-tracking.example.com/"
       );
     } catch (e) {
       ok(false, "The API shouldn't throw.");
@@ -288,6 +307,13 @@ add_task(async function test_privilege_api_with_dFPI() {
 
     content.document.clearUserGestureActivation();
   });
+
+  await shownPromise;
+
+  // Accept the prompt
+  triggerMainCommand();
+
+  await callAPIPromise;
 
   // Verify if the storage access permission is set correctly.
   await storagePermissionPromise;
@@ -302,7 +328,7 @@ add_task(async function test_privilege_api_with_dFPI() {
   });
 
   // Insert another third-party content iframe and check if it has storage access.
-  await insertSubFrame(browser, TEST_4TH_PARTY_PAGE, "test2");
+  await insertSubFrame(browser, TEST_4TH_PARTY_PAGE_HTTPS, "test2");
   await runScriptInSubFrame(browser, "test2", async _ => {
     await hasStorageAccessInitially();
 
@@ -324,7 +350,7 @@ add_task(async function test_privilege_api_with_dFPI() {
     is(document.cookie, "name=value", "Setting cookie to partitioned context.");
   });
 
-  await clearStoragePermission("http://not-tracking.example.com");
+  await clearStoragePermission("https://not-tracking.example.com");
   Services.cookies.removeAll();
   BrowserTestUtils.removeTab(tab);
 });

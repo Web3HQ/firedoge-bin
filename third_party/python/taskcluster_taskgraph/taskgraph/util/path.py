@@ -12,8 +12,8 @@ Also contains a few additional utilities not found in :py:mod:`os.path`.
 # https://searchfox.org/mozilla-central/rev/c3ebaf6de2d481c262c04bb9657eaf76bf47e2ac/python/mozbuild/mozpack/path.py
 
 
-import posixpath
 import os
+import posixpath
 import re
 
 
@@ -88,18 +88,13 @@ def basedir(path, bases):
     if path in bases:
         return path
     for b in sorted(bases, reverse=True):
-        if b == "" or path.startswith(b + "/"):
+        if not b or path.startswith(b + "/"):
             return b
 
 
 re_cache = {}
-# Python versions < 3.7 return r'\/' for re.escape('/').
-if re.escape("/") == "/":
-    MATCH_STAR_STAR_RE = re.compile(r"(^|/)\\\*\\\*/")
-    MATCH_STAR_STAR_END_RE = re.compile(r"(^|/)\\\*\\\*$")
-else:
-    MATCH_STAR_STAR_RE = re.compile(r"(^|\\\/)\\\*\\\*\\\/")
-    MATCH_STAR_STAR_END_RE = re.compile(r"(^|\\\/)\\\*\\\*$")
+MATCH_STAR_STAR_RE = re.compile(r"(^|/)\\\*\\\*/")
+MATCH_STAR_STAR_END_RE = re.compile(r"(^|/)\\\*\\\*$")
 
 
 def match(path, pattern):
@@ -153,3 +148,20 @@ def rebase(oldbase, base, relativepath):
     if relativepath.endswith("/") and not result.endswith("/"):
         result += "/"
     return result
+
+
+def ancestors(path):
+    """Emit the parent directories of a path.
+
+    Args:
+        path (str): Path to emit parents of.
+
+    Yields:
+        str: Path of parent directory.
+    """
+    while path:
+        yield path
+        newpath = os.path.dirname(path)
+        if newpath == path:
+            break
+        path = newpath

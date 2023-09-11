@@ -7,6 +7,9 @@
 #ifndef MediaEnginePrefs_h
 #define MediaEnginePrefs_h
 
+#include <stdint.h>
+#include <string.h>
+
 namespace mozilla {
 
 /**
@@ -31,11 +34,9 @@ class MediaEnginePrefs {
         mHPFOn(false),
         mNoiseOn(false),
         mTransientOn(false),
-        mResidualEchoOn(false),
         mAgc2Forced(false),
         mAgc(0),
         mNoise(0),
-        mFakeDeviceChangeEventOn(false),
         mChannels(0) {}
 
   int32_t mWidth;
@@ -48,11 +49,9 @@ class MediaEnginePrefs {
   bool mHPFOn;
   bool mNoiseOn;
   bool mTransientOn;
-  bool mResidualEchoOn;
   bool mAgc2Forced;
   int32_t mAgc;
   int32_t mNoise;
-  bool mFakeDeviceChangeEventOn;
   int32_t mChannels;
 
   bool operator==(const MediaEnginePrefs& aRhs) {

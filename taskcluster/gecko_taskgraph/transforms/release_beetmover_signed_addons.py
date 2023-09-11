@@ -5,24 +5,27 @@
 Transform the beetmover task into an actual task description.
 """
 
+import copy
+import logging
+
+from taskgraph.transforms.base import TransformSequence
+from taskgraph.util.schema import optionally_keyed_by, resolve_keyed_by
+from taskgraph.util.treeherder import inherit_treeherder_from_dep
+from voluptuous import Optional, Required
 
 from gecko_taskgraph.loader.single_dep import schema
-from gecko_taskgraph.transforms.base import TransformSequence
 from gecko_taskgraph.transforms.beetmover import craft_release_properties
-from gecko_taskgraph.util.attributes import copy_attributes_from_dependent_job
-from gecko_taskgraph.util.schema import optionally_keyed_by, resolve_keyed_by
-from gecko_taskgraph.util.scriptworker import (
-    get_beetmover_bucket_scope,
-    get_beetmover_action_scope,
-    generate_beetmover_upstream_artifacts,
-    generate_beetmover_artifact_map,
-)
-from gecko_taskgraph.util.treeherder import inherit_treeherder_from_dep
 from gecko_taskgraph.transforms.task import task_description_schema
-from voluptuous import Required, Optional
-
-import logging
-import copy
+from gecko_taskgraph.util.attributes import (
+    copy_attributes_from_dependent_job,
+    release_level,
+)
+from gecko_taskgraph.util.scriptworker import (
+    generate_beetmover_artifact_map,
+    generate_beetmover_upstream_artifacts,
+    get_beetmover_action_scope,
+    get_beetmover_bucket_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,7 @@ def resolve_keys(config, jobs):
                 field,
                 item_name=job["label"],
                 **{
-                    "release-level": config.params.release_level(),
+                    "release-level": release_level(config.params["project"]),
                     "release-type": config.params["release_type"],
                     "project": config.params["project"],
                 },

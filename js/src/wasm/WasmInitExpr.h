@@ -31,15 +31,29 @@ namespace wasm {
 class Decoder;
 struct ModuleEnvironment;
 
+// Validates a constant expression. Returns an optional literal value if the
+// final value was from a simple instruction such as i32.const.
+[[nodiscard]] bool DecodeConstantExpression(
+    Decoder& d, ModuleEnvironment* env, ValType expected,
+    uint32_t
+        maxInitializedGlobalsIndexPlus1,  // typically env->globals.length()
+    Maybe<LitVal>* literal);
+
 enum class InitExprKind {
   None,
   Literal,
   Variable,
 };
 
-// A InitExpr describes a deferred initializer expression, used to initialize
-// a global or a table element offset. Such expressions are created during
-// decoding and actually executed on module instantiation.
+// A InitExpr describes a WebAssembly constant expression, such as those used to
+// initialize a global, specify memory offsets in data segments, or populate
+// element segments. Such expressions are created during decoding and actually
+// executed on module instantiation.
+//
+// An InitExpr can only contain constant instructions, which are defined here in
+// the spec:
+//
+// https://webassembly.github.io/spec/core/valid/instructions.html#constant-expressions
 
 class InitExpr {
   InitExprKind kind_;
@@ -62,12 +76,21 @@ class InitExpr {
   // position of the decoder. Upon failure, the decoder contains the failure
   // message or else the failure was an OOM.
   static bool decodeAndValidate(Decoder& d, ModuleEnvironment* env,
-                                ValType expected, InitExpr* expr);
+                                ValType expected,
+                                uint32_t maxInitializedGlobalsIndexPlus1,
+                                InitExpr* expr);
+
+  // Decode and evaluate a constant expression at the current position of the
+  // decoder. Does not validate the expression first, since all InitExprs are
+  // required to have been validated. Failure conditions are the same as
+  // InitExpr::evaluate, i.e. failing only on OOM.
+  [[nodiscard]] static bool decodeAndEvaluate(
+      JSContext* cx, Handle<WasmInstanceObject*> instanceObj, Decoder& d,
+      MutableHandleVal result);
 
   // Evaluate the constant expresssion with the given context. This may only
   // fail due to an OOM, as all InitExpr's are required to have been validated.
-  bool evaluate(JSContext* cx, const ValVector& globalImportValues,
-                HandleWasmInstanceObject instanceObj,
+  bool evaluate(JSContext* cx, Handle<WasmInstanceObject*> instanceObj,
                 MutableHandleVal result) const;
 
   bool isLiteral() const { return kind_ == InitExprKind::Literal; }
@@ -90,7 +113,8 @@ class InitExpr {
   // Allow explicit cloning
   [[nodiscard]] bool clone(const InitExpr& src);
 
-  WASM_DECLARE_SERIALIZABLE(InitExpr)
+  size_t sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+  WASM_DECLARE_FRIEND_SERIALIZE(InitExpr);
 };
 
 }  // namespace wasm

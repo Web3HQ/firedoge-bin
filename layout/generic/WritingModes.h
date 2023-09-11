@@ -15,6 +15,7 @@
 
 #include "nsRect.h"
 #include "nsBidiUtils.h"
+#include "nsStyleStruct.h"
 
 // It is the caller's responsibility to operate on logical-coordinate objects
 // with matched writing modes. Failure to do so will be a runtime bug; the
@@ -70,6 +71,15 @@ enum LogicalCorner {
 
 // Physical axis constants.
 enum PhysicalAxis { eAxisVertical = 0x0, eAxisHorizontal = 0x1 };
+
+// Represents zero or more physical axes.
+enum class PhysicalAxes : uint8_t {
+  None = 0x0,
+  Horizontal = 0x1,
+  Vertical = 0x2,
+  Both = Horizontal | Vertical,
+};
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(PhysicalAxes)
 
 inline LogicalAxis GetOrthogonalAxis(LogicalAxis aAxis) {
   return aAxis == eLogicalAxisBlock ? eLogicalAxisInline : eLogicalAxisBlock;

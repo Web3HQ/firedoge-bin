@@ -10,7 +10,6 @@
 #include "mozilla/dom/HTMLAnchorElementBinding.h"
 #include "mozilla/dom/HTMLDNSPrefetch.h"
 #include "mozilla/EventDispatcher.h"
-#include "mozilla/EventStates.h"
 #include "mozilla/MemoryReporting.h"
 #include "nsCOMPtr.h"
 #include "nsContentUtils.h"
@@ -25,16 +24,12 @@ NS_IMPL_NS_NEW_HTML_ELEMENT(Anchor)
 
 namespace mozilla::dom {
 
-// static
-const DOMTokenListSupportedToken HTMLAnchorElement::sSupportedRelValues[] = {
-    "noreferrer", "noopener", nullptr};
-
 HTMLAnchorElement::~HTMLAnchorElement() {
   SupportsDNSPrefetch::Destroyed(*this);
 }
 
 bool HTMLAnchorElement::IsInteractiveHTMLContent() const {
-  return HasAttr(kNameSpaceID_None, nsGkAtoms::href) ||
+  return HasAttr(nsGkAtoms::href) ||
          nsGenericHTMLElement::IsInteractiveHTMLContent();
 }
 
@@ -56,7 +51,7 @@ int32_t HTMLAnchorElement::TabIndexDefault() { return 0; }
 bool HTMLAnchorElement::Draggable() const {
   // links can be dragged as long as there is an href and the
   // draggable attribute isn't false
-  if (!HasAttr(kNameSpaceID_None, nsGkAtoms::href)) {
+  if (!HasAttr(nsGkAtoms::href)) {
     // no href, so just use the same behavior as other elements
     return nsGenericHTMLElement::Draggable();
   }
@@ -67,14 +62,13 @@ bool HTMLAnchorElement::Draggable() const {
 
 nsresult HTMLAnchorElement::BindToTree(BindContext& aContext,
                                        nsINode& aParent) {
-  Link::ResetLinkState(false, Link::ElementHasHref());
-
   nsresult rv = nsGenericHTMLElement::BindToTree(aContext, aParent);
   NS_ENSURE_SUCCESS(rv, rv);
 
+  Link::BindToTree(aContext);
+
   // Prefetch links
   if (IsInComposedDoc()) {
-    aContext.OwnerDoc().RegisterPendingLinkUpdate(this);
     TryDNSPrefetch(*this);
   }
 
@@ -88,11 +82,11 @@ void HTMLAnchorElement::UnbindFromTree(bool aNullParent) {
   // via GetURIForDNSPrefetch().
   CancelDNSPrefetch(*this);
 
-  // Without removing the link state we risk a dangling pointer
-  // in the mStyledLinks hashtable
-  Link::ResetLinkState(false, Link::ElementHasHref());
-
   nsGenericHTMLElement::UnbindFromTree(aNullParent);
+
+  // Without removing the link state we risk a dangling pointer in the
+  // mStyledLinks hashtable
+  Link::UnbindFromTree();
 }
 
 bool HTMLAnchorElement::IsHTMLFocusable(bool aWithMouse, bool* aIsFocusable,
@@ -122,7 +116,7 @@ bool HTMLAnchorElement::IsHTMLFocusable(bool aWithMouse, bool* aIsFocusable,
 
   if (GetTabIndexAttrValue().isNothing()) {
     // check whether we're actually a link
-    if (!Link::HasURI()) {
+    if (!IsLink()) {
       // Not tabbable or focusable without href (bug 17605), unless
       // forced to be via presence of nonnegative tabindex attribute
       if (aTabIndex) {
@@ -152,17 +146,15 @@ nsresult HTMLAnchorElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
   return PostHandleEventForAnchors(aVisitor);
 }
 
-bool HTMLAnchorElement::IsLink(nsIURI** aURI) const { return IsHTMLLink(aURI); }
-
 void HTMLAnchorElement::GetLinkTarget(nsAString& aTarget) {
-  GetAttr(kNameSpaceID_None, nsGkAtoms::target, aTarget);
+  GetAttr(nsGkAtoms::target, aTarget);
   if (aTarget.IsEmpty()) {
     GetBaseTarget(aTarget);
   }
 }
 
-void HTMLAnchorElement::GetTarget(nsAString& aValue) {
-  if (!GetAttr(kNameSpaceID_None, nsGkAtoms::target, aValue)) {
+void HTMLAnchorElement::GetTarget(nsAString& aValue) const {
+  if (!GetAttr(nsGkAtoms::target, aValue)) {
     GetBaseTarget(aValue);
   }
 }
@@ -174,7 +166,8 @@ nsDOMTokenList* HTMLAnchorElement::RelList() {
   return mRelList;
 }
 
-void HTMLAnchorElement::GetText(nsAString& aText, mozilla::ErrorResult& aRv) {
+void HTMLAnchorElement::GetText(nsAString& aText,
+                                mozilla::ErrorResult& aRv) const {
   if (NS_WARN_IF(
           !nsContentUtils::GetNodeTextContent(this, true, aText, fallible))) {
     aRv.Throw(NS_ERROR_OUT_OF_MEMORY);
@@ -185,37 +178,27 @@ void HTMLAnchorElement::SetText(const nsAString& aText, ErrorResult& aRv) {
   aRv = nsContentUtils::SetNodeTextContent(this, aText, false);
 }
 
-void HTMLAnchorElement::ToString(nsAString& aSource) {
-  return GetHref(aSource);
-}
-
 already_AddRefed<nsIURI> HTMLAnchorElement::GetHrefURI() const {
-  nsCOMPtr<nsIURI> uri = Link::GetCachedURI();
-  if (uri) {
+  if (nsCOMPtr<nsIURI> uri = GetCachedURI()) {
     return uri.forget();
   }
-
   return GetHrefURIForAnchors();
 }
 
-nsresult HTMLAnchorElement::BeforeSetAttr(int32_t aNamespaceID, nsAtom* aName,
-                                          const nsAttrValueOrString* aValue,
-                                          bool aNotify) {
-  if (aNamespaceID == kNameSpaceID_None) {
-    if (aName == nsGkAtoms::href) {
-      CancelDNSPrefetch(*this);
-    }
+void HTMLAnchorElement::BeforeSetAttr(int32_t aNamespaceID, nsAtom* aName,
+                                      const nsAttrValue* aValue, bool aNotify) {
+  if (aNamespaceID == kNameSpaceID_None && aName == nsGkAtoms::href) {
+    CancelDNSPrefetch(*this);
   }
-
   return nsGenericHTMLElement::BeforeSetAttr(aNamespaceID, aName, aValue,
                                              aNotify);
 }
 
-nsresult HTMLAnchorElement::AfterSetAttr(int32_t aNamespaceID, nsAtom* aName,
-                                         const nsAttrValue* aValue,
-                                         const nsAttrValue* aOldValue,
-                                         nsIPrincipal* aSubjectPrincipal,
-                                         bool aNotify) {
+void HTMLAnchorElement::AfterSetAttr(int32_t aNamespaceID, nsAtom* aName,
+                                     const nsAttrValue* aValue,
+                                     const nsAttrValue* aOldValue,
+                                     nsIPrincipal* aSubjectPrincipal,
+                                     bool aNotify) {
   if (aNamespaceID == kNameSpaceID_None) {
     if (aName == nsGkAtoms::href) {
       Link::ResetLinkState(aNotify, !!aValue);
@@ -227,10 +210,6 @@ nsresult HTMLAnchorElement::AfterSetAttr(int32_t aNamespaceID, nsAtom* aName,
 
   return nsGenericHTMLElement::AfterSetAttr(
       aNamespaceID, aName, aValue, aOldValue, aSubjectPrincipal, aNotify);
-}
-
-EventStates HTMLAnchorElement::IntrinsicState() const {
-  return Link::LinkState() | nsGenericHTMLElement::IntrinsicState();
 }
 
 void HTMLAnchorElement::AddSizeOfExcludingThis(nsWindowSizes& aSizes,

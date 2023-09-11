@@ -20,7 +20,8 @@ class APZHitTestingTester : public APZCTreeManagerTester {
         manager->GetTargetAPZC(aPoint).mTargetApzc;
     if (hit) {
       transformToApzc = manager->GetScreenToApzcTransform(hit.get());
-      transformToGecko = manager->GetApzcToGeckoTransform(hit.get());
+      transformToGecko =
+          manager->GetApzcToGeckoTransform(hit.get(), LayoutAndVisual);
     }
     return hit.forget();
   }
@@ -35,23 +36,23 @@ class APZHitTestingTester : public APZCTreeManagerTester {
   void CreateComplexMultiLayerTree() {
     const char* treeShape = "x(xx(x)xx(x(x)xx))";
     // LayerID               0 12 3 45 6 7 89
-    nsIntRegion layerVisibleRegion[] = {
-        nsIntRegion(IntRect(0, 0, 300, 400)),    // root(0)
-        nsIntRegion(IntRect(0, 0, 100, 100)),    // layer(1) in top-left
-        nsIntRegion(IntRect(50, 50, 200, 300)),  // layer(2) centered in root(0)
-        nsIntRegion(IntRect(50, 50, 200,
-                            300)),  // layer(3) fully occupying parent layer(2)
-        nsIntRegion(IntRect(0, 200, 100, 100)),  // layer(4) in bottom-left
-        nsIntRegion(IntRect(200, 0, 100,
-                            400)),  // layer(5) along the right 100px of root(0)
-        nsIntRegion(IntRect(200, 0, 100, 200)),  // layer(6) taking up the top
-                                                 // half of parent layer(5)
-        nsIntRegion(IntRect(200, 0, 100,
-                            200)),  // layer(7) fully occupying parent layer(6)
-        nsIntRegion(IntRect(200, 200, 100,
-                            100)),  // layer(8) in bottom-right (below (6))
-        nsIntRegion(IntRect(200, 300, 100,
-                            100)),  // layer(9) in bottom-right (below (8))
+    LayerIntRegion layerVisibleRegion[] = {
+        LayerIntRect(0, 0, 300, 400),    // root(0)
+        LayerIntRect(0, 0, 100, 100),    // layer(1) in top-left
+        LayerIntRect(50, 50, 200, 300),  // layer(2) centered in root(0)
+        LayerIntRect(50, 50, 200,
+                     300),  // layer(3) fully occupying parent layer(2)
+        LayerIntRect(0, 200, 100, 100),  // layer(4) in bottom-left
+        LayerIntRect(200, 0, 100,
+                     400),  // layer(5) along the right 100px of root(0)
+        LayerIntRect(200, 0, 100, 200),  // layer(6) taking up the top
+                                         // half of parent layer(5)
+        LayerIntRect(200, 0, 100,
+                     200),  // layer(7) fully occupying parent layer(6)
+        LayerIntRect(200, 200, 100,
+                     100),  // layer(8) in bottom-right (below (6))
+        LayerIntRect(200, 300, 100,
+                     100),  // layer(9) in bottom-right (below (8))
     };
     CreateScrollData(treeShape, layerVisibleRegion);
     SetScrollableFrameMetrics(layers[1], ScrollableLayerGuid::START_SCROLL_ID);
@@ -71,9 +72,9 @@ class APZHitTestingTester : public APZCTreeManagerTester {
   void CreateBug1148350LayerTree() {
     const char* treeShape = "x(x)";
     // LayerID               0 1
-    nsIntRegion layerVisibleRegion[] = {
-        nsIntRegion(IntRect(0, 0, 200, 200)),
-        nsIntRegion(IntRect(0, 0, 200, 200)),
+    LayerIntRegion layerVisibleRegion[] = {
+        LayerIntRect(0, 0, 200, 200),
+        LayerIntRect(0, 0, 200, 200),
     };
     CreateScrollData(treeShape, layerVisibleRegion);
     SetScrollableFrameMetrics(layers[1], ScrollableLayerGuid::START_SCROLL_ID);
@@ -161,8 +162,6 @@ TEST_F(APZHitTestingTester, ComplexMultiLayerTree) {
 }
 
 TEST_F(APZHitTestingTester, TestRepaintFlushOnNewInputBlock) {
-  SCOPED_GFX_PREF_BOOL("layout.css.touch_action.enabled", false);
-
   // The main purpose of this test is to verify that touch-start events (or
   // anything that starts a new input block) don't ever get untransformed. This
   // should always hold because the APZ code should flush repaints when we start
@@ -249,8 +248,7 @@ TEST_F(APZHitTestingTester, TestRepaintFlushOnWheelEvents) {
   EXPECT_CALL(*mcc, RequestContentRepaint(_)).Times(AtLeast(3));
   ScreenPoint origin(100, 50);
   for (int i = 0; i < 3; i++) {
-    ScrollWheelInput swi(MillisecondsSinceStartup(mcc->Time()), mcc->Time(), 0,
-                         ScrollWheelInput::SCROLLMODE_INSTANT,
+    ScrollWheelInput swi(mcc->Time(), 0, ScrollWheelInput::SCROLLMODE_INSTANT,
                          ScrollWheelInput::SCROLLDELTA_PIXEL, origin, 0, 10,
                          false, WheelDeltaAdjustmentStrategy::eNone);
     EXPECT_EQ(nsEventStatus_eConsumeDoDefault,
@@ -277,8 +275,7 @@ TEST_F(APZHitTestingTester, TestForceDisableApz) {
   TestAsyncPanZoomController* apzcroot = ApzcOf(root);
 
   ScreenPoint origin(100, 50);
-  ScrollWheelInput swi(MillisecondsSinceStartup(mcc->Time()), mcc->Time(), 0,
-                       ScrollWheelInput::SCROLLMODE_INSTANT,
+  ScrollWheelInput swi(mcc->Time(), 0, ScrollWheelInput::SCROLLMODE_INSTANT,
                        ScrollWheelInput::SCROLLDELTA_PIXEL, origin, 0, 10,
                        false, WheelDeltaAdjustmentStrategy::eNone);
   EXPECT_EQ(nsEventStatus_eConsumeDoDefault,
@@ -308,8 +305,7 @@ TEST_F(APZHitTestingTester, TestForceDisableApz) {
   // With untransforming events we should get normal behaviour (in this case,
   // no noticeable untransform, because the repaint request already got
   // flushed).
-  swi = ScrollWheelInput(MillisecondsSinceStartup(mcc->Time()), mcc->Time(), 0,
-                         ScrollWheelInput::SCROLLMODE_INSTANT,
+  swi = ScrollWheelInput(mcc->Time(), 0, ScrollWheelInput::SCROLLMODE_INSTANT,
                          ScrollWheelInput::SCROLLDELTA_PIXEL, origin, 0, 0,
                          false, WheelDeltaAdjustmentStrategy::eNone);
   EXPECT_EQ(nsEventStatus_eConsumeDoDefault,
@@ -343,9 +339,7 @@ TEST_F(APZHitTestingTester, Bug1148350) {
 
   uint64_t blockId =
       TouchDown(manager, ScreenIntPoint(100, 100), mcc->Time()).mInputBlockId;
-  if (StaticPrefs::layout_css_touch_action_enabled()) {
-    SetDefaultAllowedTouchBehavior(manager, blockId);
-  }
+  SetDefaultAllowedTouchBehavior(manager, blockId);
   mcc->AdvanceByMillis(100);
 
   layers[0]->SetVisibleRegion(LayerIntRegion(LayerIntRect(0, 50, 200, 150)));

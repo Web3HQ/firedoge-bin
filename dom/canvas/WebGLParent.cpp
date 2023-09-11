@@ -17,8 +17,8 @@ mozilla::ipc::IPCResult WebGLParent::RecvInitialize(
     const webgl::InitContextDesc& desc, webgl::InitContextResult* const out) {
   mHost = HostWebGLContext::Create({nullptr, this}, desc, out);
 
-  if (!mHost && !out->error.size()) {
-    return IPC_FAIL(this, "Abnormally failed to create HostWebGLContext.");
+  if (!mHost) {
+    MOZ_ASSERT(!out->error.empty());
   }
 
   return IPC_OK();
@@ -31,19 +31,18 @@ WebGLParent::~WebGLParent() = default;
 
 using IPCResult = mozilla::ipc::IPCResult;
 
-IPCResult WebGLParent::RecvDispatchCommands(Shmem&& rawShmem,
+IPCResult WebGLParent::RecvDispatchCommands(BigBuffer&& shmem,
                                             const uint64_t cmdsByteSize) {
+  AUTO_PROFILER_LABEL("WebGLParent::RecvDispatchCommands", GRAPHICS);
   if (!mHost) {
     return IPC_FAIL(this, "HostWebGLContext is not initialized.");
   }
-
-  auto shmem = webgl::RaiiShmem(this, std::move(rawShmem));
 
   const auto& gl = mHost->mContext->GL();
   const gl::GLContext::TlsScope tlsIsCurrent(gl);
 
   MOZ_ASSERT(cmdsByteSize);
-  const auto shmemBytes = shmem.ByteRange();
+  const auto shmemBytes = Range<uint8_t>{shmem.AsSpan()};
   const auto byteSize = std::min<uint64_t>(shmemBytes.length(), cmdsByteSize);
   const auto cmdsBytes =
       Range<const uint8_t>{shmemBytes.begin(), shmemBytes.begin() + byteSize};
@@ -75,6 +74,19 @@ IPCResult WebGLParent::RecvDispatchCommands(Shmem&& rawShmem,
   return IPC_OK();
 }
 
+IPCResult WebGLParent::RecvTexImage(const uint32_t level,
+                                    const uint32_t respecFormat,
+                                    const uvec3& offset,
+                                    const webgl::PackingInfo& pi,
+                                    webgl::TexUnpackBlobDesc&& desc) {
+  if (!mHost) {
+    return IPC_FAIL(this, "HostWebGLContext is not initialized.");
+  }
+
+  mHost->TexImage(level, respecFormat, offset, pi, desc);
+  return IPC_OK();
+}
+
 // -
 
 mozilla::ipc::IPCResult WebGLParent::Recv__delete__() {
@@ -88,34 +100,43 @@ void WebGLParent::ActorDestroy(ActorDestroyReason aWhy) { mHost = nullptr; }
 
 IPCResult WebGLParent::RecvGetFrontBufferSnapshot(
     webgl::FrontBufferSnapshotIpc* const ret) {
-  *ret = {};
+  return GetFrontBufferSnapshot(ret, this);
+}
 
+IPCResult WebGLParent::GetFrontBufferSnapshot(
+    webgl::FrontBufferSnapshotIpc* const ret, IProtocol* aProtocol) {
+  AUTO_PROFILER_LABEL("WebGLParent::GetFrontBufferSnapshot", GRAPHICS);
+  *ret = {};
   if (!mHost) {
-    return IPC_FAIL(this, "HostWebGLContext is not initialized.");
+    return IPC_FAIL(aProtocol, "HostWebGLContext is not initialized.");
   }
 
-  const auto maybeSize = mHost->FrontBufferSnapshotInto({});
-  if (maybeSize) {
-    const auto& surfSize = *maybeSize;
-    const auto byteSize = 4 * surfSize.x * surfSize.y;
+  const bool ok = [&]() {
+    const auto maybeSize = mHost->FrontBufferSnapshotInto({});
+    if (maybeSize) {
+      const auto& surfSize = *maybeSize;
+      const auto byteSize = 4 * surfSize.x * surfSize.y;
 
-    auto shmem = webgl::RaiiShmem::Alloc(
-        this, byteSize,
-        mozilla::ipc::SharedMemory::SharedMemoryType::TYPE_BASIC);
-    if (!shmem) {
-      NS_WARNING("Failed to alloc shmem for RecvGetFrontBufferSnapshot.");
-      return IPC_FAIL(this, "Failed to allocate shmem for result");
-    }
-    const auto range = shmem.ByteRange();
-    *ret = {surfSize, Some(shmem.Extract())};
+      auto shmem = webgl::RaiiShmem::Alloc(aProtocol, byteSize);
+      if (!shmem) {
+        NS_WARNING("Failed to alloc shmem for RecvGetFrontBufferSnapshot.");
+        return false;
+      }
+      const auto range = shmem.ByteRange();
+      *ret = {surfSize, Some(shmem.Extract())};
 
-    if (!mHost->FrontBufferSnapshotInto(Some(range))) {
-      gfxCriticalNote << "WebGLParent::RecvGetFrontBufferSnapshot: "
-                         "FrontBufferSnapshotInto(some) failed after "
-                         "FrontBufferSnapshotInto(none)";
-      // Zero means failure, as we still need to send any shmem we alloc.
-      ret->surfSize = {0, 0};
+      if (!mHost->FrontBufferSnapshotInto(Some(range))) {
+        gfxCriticalNote << "WebGLParent::RecvGetFrontBufferSnapshot: "
+                           "FrontBufferSnapshotInto(some) failed after "
+                           "FrontBufferSnapshotInto(none)";
+        return false;
+      }
     }
+    return true;
+  }();
+  if (!ok) {
+    // Zero means failure, as we still need to send any shmem we alloc.
+    ret->surfSize = {0, 0};
   }
   return IPC_OK();
 }
@@ -124,17 +145,16 @@ IPCResult WebGLParent::RecvGetBufferSubData(const GLenum target,
                                             const uint64_t srcByteOffset,
                                             const uint64_t byteSize,
                                             Shmem* const ret) {
+  AUTO_PROFILER_LABEL("WebGLParent::RecvGetBufferSubData", GRAPHICS);
   if (!mHost) {
     return IPC_FAIL(this, "HostWebGLContext is not initialized.");
   }
 
   const auto allocSize = 1 + byteSize;
-  auto shmem = webgl::RaiiShmem::Alloc(
-      this, allocSize,
-      mozilla::ipc::SharedMemory::SharedMemoryType::TYPE_BASIC);
+  auto shmem = webgl::RaiiShmem::Alloc(this, allocSize);
   if (!shmem) {
     NS_WARNING("Failed to alloc shmem for RecvGetBufferSubData.");
-    return IPC_FAIL(this, "Failed to allocate shmem for result");
+    return IPC_OK();
   }
 
   const auto shmemRange = shmem.ByteRange();
@@ -150,27 +170,34 @@ IPCResult WebGLParent::RecvGetBufferSubData(const GLenum target,
 }
 
 IPCResult WebGLParent::RecvReadPixels(const webgl::ReadPixelsDesc& desc,
-                                      const uint64_t byteSize,
+                                      ReadPixelsBuffer&& buffer,
                                       webgl::ReadPixelsResultIpc* const ret) {
+  AUTO_PROFILER_LABEL("WebGLParent::RecvReadPixels", GRAPHICS);
   *ret = {};
-
   if (!mHost) {
     return IPC_FAIL(this, "HostWebGLContext is not initialized.");
   }
 
+  if (buffer.type() == ReadPixelsBuffer::TShmem) {
+    const auto& shmem = buffer.get_Shmem();
+    const auto range = shmem.Range<uint8_t>();
+    const auto res = mHost->ReadPixelsInto(desc, range);
+    *ret = {res, {}};
+    return IPC_OK();
+  }
+
+  const uint64_t byteSize = buffer.get_uint64_t();
   const auto allocSize = std::max<uint64_t>(1, byteSize);
-  auto shmem = webgl::RaiiShmem::Alloc(
-      this, allocSize,
-      mozilla::ipc::SharedMemory::SharedMemoryType::TYPE_BASIC);
+  auto shmem = webgl::RaiiShmem::Alloc(this, allocSize);
   if (!shmem) {
     NS_WARNING("Failed to alloc shmem for RecvReadPixels.");
-    return IPC_FAIL(this, "Failed to allocate shmem for result");
+    return IPC_OK();
   }
 
   const auto range = shmem.ByteRange();
 
   const auto res = mHost->ReadPixelsInto(desc, range);
-  *ret = {res, shmem.Extract()};
+  *ret = {res, Some(shmem.Extract())};
   return IPC_OK();
 }
 

@@ -43,7 +43,10 @@ class DrawTargetSkia : public DrawTarget {
   virtual BackendType GetBackendType() const override {
     return BackendType::SKIA;
   }
-  virtual already_AddRefed<SourceSurface> Snapshot() override;
+  already_AddRefed<SourceSurface> Snapshot(SurfaceFormat aFormat);
+  virtual already_AddRefed<SourceSurface> Snapshot() override {
+    return Snapshot(mFormat);
+  }
   already_AddRefed<SourceSurface> GetBackingSurface() override;
   virtual IntSize GetSize() const override { return mSize; };
   virtual bool LockBits(uint8_t** aData, IntSize* aSize, int32_t* aStride,
@@ -60,8 +63,7 @@ class DrawTargetSkia : public DrawTarget {
                           const DrawOptions& aOptions = DrawOptions()) override;
   virtual void DrawSurfaceWithShadow(SourceSurface* aSurface,
                                      const Point& aDest,
-                                     const DeviceColor& aColor,
-                                     const Point& aOffset, Float aSigma,
+                                     const ShadowOptions& aShadow,
                                      CompositionOp aOperator) override;
   virtual void ClearRect(const Rect& aRect) override;
   virtual void CopySurface(SourceSurface* aSurface, const IntRect& aSourceRect,
@@ -100,6 +102,7 @@ class DrawTargetSkia : public DrawTarget {
   virtual void PushDeviceSpaceClipRects(const IntRect* aRects,
                                         uint32_t aCount) override;
   virtual void PopClip() override;
+  virtual bool RemoveAllClips() override;
   virtual void PushLayer(bool aOpaque, Float aOpacity, SourceSurface* aMask,
                          const Matrix& aMaskTransform,
                          const IntRect& aBounds = IntRect(),
@@ -128,6 +131,7 @@ class DrawTargetSkia : public DrawTarget {
 
   virtual already_AddRefed<PathBuilder> CreatePathBuilder(
       FillRule aFillRule = FillRule::FILL_WINDING) const override;
+
   virtual already_AddRefed<GradientStops> CreateGradientStops(
       GradientStop* aStops, uint32_t aNumStops,
       ExtendMode aExtendMode = ExtendMode::CLAMP) const override;
@@ -151,7 +155,7 @@ class DrawTargetSkia : public DrawTarget {
     return stream.str();
   }
 
-  Maybe<Rect> GetDeviceClipRect() const;
+  Maybe<IntRect> GetDeviceClipRect(bool aAllowComplex = false) const;
 
   Maybe<Rect> GetGlyphLocalBounds(ScaledFont* aFont, const GlyphBuffer& aBuffer,
                                   const Pattern& aPattern,
@@ -183,7 +187,7 @@ class DrawTargetSkia : public DrawTarget {
   SkCanvas* mCanvas = nullptr;
   RefPtr<DataSourceSurface> mBackingSurface;
   RefPtr<SourceSurfaceSkia> mSnapshot;
-  Mutex mSnapshotLock;
+  Mutex mSnapshotLock MOZ_UNANNOTATED;
 
 #ifdef MOZ_WIDGET_COCOA
   friend class BorrowedCGContext;

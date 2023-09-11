@@ -12,6 +12,8 @@ UNIFIED_SOURCES = [
 if CONFIG["OS_ARCH"] == "WINNT":
     UNIFIED_SOURCES += [
         "MockWinWidget.cpp",
+        "TestWinHeaderOnlyUtils.cpp",
+        "TestWinMessageLoggingUtils.cpp",
         "TestWinWindowOcclusionTracker.cpp",
         "TestWinWindowOcclusionTrackerInteractive.cpp",
     ]
@@ -23,5 +25,3 @@ LOCAL_INCLUDES += [
 ]
 
 DisableStlWrapping()
-
-REQUIRES_UNIFIED_BUILD = True

@@ -83,7 +83,7 @@ bool PaymentRequest::PrefEnabled(JSContext* aCx, JSObject* aObj) {
   MOZ_ASSERT(manager);
 
   nsCOMPtr<nsIRegion> regionJsm =
-      do_ImportModule("resource://gre/modules/Region.jsm", "Region");
+      do_ImportESModule("resource://gre/modules/Region.sys.mjs", "Region");
   nsAutoString region;
   nsresult rv = regionJsm->GetHome(region);
   if (NS_FAILED(rv)) {
@@ -654,7 +654,7 @@ already_AddRefed<PaymentRequest> PaymentRequest::CreatePaymentRequest(
     nsPIDOMWindowInner* aWindow, ErrorResult& aRv) {
   // Generate a unique id for identification
   nsID uuid;
-  if (NS_WARN_IF(NS_FAILED(nsContentUtils::GenerateUUIDInPlace(uuid)))) {
+  if (NS_WARN_IF(NS_FAILED(nsID::GenerateUUIDInPlace(uuid)))) {
     aRv.ThrowAbortError(
         "Failed to create an internal UUID for the PaymentRequest");
     return nullptr;
@@ -1112,7 +1112,8 @@ void PaymentRequest::SetOptions(const PaymentOptions& aOptions) {
 }
 
 void PaymentRequest::ResolvedCallback(JSContext* aCx,
-                                      JS::Handle<JS::Value> aValue) {
+                                      JS::Handle<JS::Value> aValue,
+                                      ErrorResult& aRv) {
   if (!InFullyActiveDocument()) {
     return;
   }
@@ -1147,7 +1148,8 @@ void PaymentRequest::ResolvedCallback(JSContext* aCx,
 }
 
 void PaymentRequest::RejectedCallback(JSContext* aCx,
-                                      JS::Handle<JS::Value> aValue) {
+                                      JS::Handle<JS::Value> aValue,
+                                      ErrorResult& aRv) {
   if (!InFullyActiveDocument()) {
     return;
   }

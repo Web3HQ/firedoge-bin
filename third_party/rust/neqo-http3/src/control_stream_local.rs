@@ -4,7 +4,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::hframe::HFrame;
+use crate::frames::HFrame;
 use crate::{BufferedStream, Http3StreamType, RecvStream, Res};
 use neqo_common::{qtrace, Encoder};
 use neqo_transport::{Connection, StreamId, StreamType};
@@ -39,7 +39,7 @@ impl ControlStreamLocal {
     pub fn queue_frame(&mut self, f: &HFrame) {
         let mut enc = Encoder::default();
         f.encode(&mut enc);
-        self.stream.buffer(&enc);
+        self.stream.buffer(enc.as_ref());
     }
 
     pub fn queue_update_priority(&mut self, stream_id: StreamId) {
@@ -63,10 +63,7 @@ impl ControlStreamLocal {
     ) -> Res<()> {
         // send all necessary priority updates
         while let Some(update_id) = self.outstanding_priority_update.pop_front() {
-            let update_stream = match recv_conn.get_mut(&update_id) {
-                Some(update_stream) => update_stream,
-                None => continue,
-            };
+            let Some(update_stream) = recv_conn.get_mut(&update_id) else { continue };
 
             // can assert and unwrap here, because priority updates can only be added to
             // HttpStreams in [Http3Connection::queue_update_priority}
@@ -74,14 +71,14 @@ impl ControlStreamLocal {
                 update_stream.stream_type(),
                 Http3StreamType::Http | Http3StreamType::Push
             ));
-            let priority_handler = update_stream.http_stream().unwrap().priority_handler_mut();
+            let stream = update_stream.http_stream().unwrap();
 
             // in case multiple priority_updates were issued, ignore now irrelevant
-            if let Some(hframe) = priority_handler.maybe_encode_frame(update_id) {
+            if let Some(hframe) = stream.priority_update_frame() {
                 let mut enc = Encoder::new();
                 hframe.encode(&mut enc);
-                if self.stream.send_atomic(conn, &enc)? {
-                    priority_handler.priority_update_sent();
+                if self.stream.send_atomic(conn, enc.as_ref())? {
+                    stream.priority_update_sent();
                 } else {
                     self.outstanding_priority_update.push_front(update_id);
                     break;

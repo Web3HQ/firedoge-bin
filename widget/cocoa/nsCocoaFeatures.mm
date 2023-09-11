@@ -25,6 +25,7 @@
 #define MACOS_VERSION_10_16_HEX 0x000A1000
 #define MACOS_VERSION_11_0_HEX 0x000B0000
 #define MACOS_VERSION_12_0_HEX 0x000C0000
+#define MACOS_VERSION_13_0_HEX 0x000D0000
 
 #include "nsCocoaFeatures.h"
 #include "nsCocoaUtils.h"
@@ -37,7 +38,8 @@
 /*static*/ int32_t nsCocoaFeatures::mOSVersion = 0;
 
 // This should not be called with unchecked aMajor, which should be >= 10.
-inline int32_t AssembleVersion(int32_t aMajor, int32_t aMinor, int32_t aBugFix) {
+inline int32_t AssembleVersion(int32_t aMajor, int32_t aMinor,
+                               int32_t aBugFix) {
   MOZ_ASSERT(aMajor >= 10);
   return (aMajor << 16) + (aMinor << 8) + aBugFix;
 }
@@ -64,11 +66,13 @@ static int intAtStringIndex(NSArray* array, int index) {
 void nsCocoaFeatures::GetSystemVersion(int& major, int& minor, int& bugfix) {
   major = minor = bugfix = 0;
 
-  NSString* versionString = [[NSDictionary
-      dictionaryWithContentsOfFile:@"/System/Library/CoreServices/SystemVersion.plist"]
-      objectForKey:@"ProductVersion"];
+  NSString* versionString =
+      [[NSDictionary dictionaryWithContentsOfFile:
+                         @"/System/Library/CoreServices/SystemVersion.plist"]
+          objectForKey:@"ProductVersion"];
   if (!versionString) {
-    NS_ERROR("Couldn't read /System/Library/CoreServices/SystemVersion.plist to determine macOS "
+    NS_ERROR("Couldn't read /System/Library/CoreServices/SystemVersion.plist "
+             "to determine macOS "
              "version.");
     return;
   }
@@ -85,7 +89,8 @@ void nsCocoaFeatures::GetSystemVersion(int& major, int& minor, int& bugfix) {
   }
 }
 
-int32_t nsCocoaFeatures::GetVersion(int32_t aMajor, int32_t aMinor, int32_t aBugFix) {
+int32_t nsCocoaFeatures::GetVersion(int32_t aMajor, int32_t aMinor,
+                                    int32_t aBugFix) {
   int32_t macOSVersion;
   if (aMajor < 10) {
     aMajor = 10;
@@ -147,7 +152,8 @@ int32_t nsCocoaFeatures::GetVersion(int32_t aMajor, int32_t aMinor, int32_t aBug
 }
 
 /* static */ bool nsCocoaFeatures::OnSierraExactly() {
-  return (macOSVersion() >= MACOS_VERSION_10_12_HEX) && (macOSVersion() < MACOS_VERSION_10_13_HEX);
+  return (macOSVersion() >= MACOS_VERSION_10_12_HEX) &&
+         (macOSVersion() < MACOS_VERSION_10_13_HEX);
 }
 
 /* Version of OnSierraExactly as global function callable from cairo & skia */
@@ -189,7 +195,13 @@ bool Gecko_OnSierraExactly() { return nsCocoaFeatures::OnSierraExactly(); }
   return (macOSVersion() >= MACOS_VERSION_12_0_HEX);
 }
 
-/* static */ bool nsCocoaFeatures::IsAtLeastVersion(int32_t aMajor, int32_t aMinor,
+/* static */ bool nsCocoaFeatures::OnVenturaOrLater() {
+  // See comments above regarding SYSTEM_VERSION_COMPAT.
+  return (macOSVersion() >= MACOS_VERSION_13_0_HEX);
+}
+
+/* static */ bool nsCocoaFeatures::IsAtLeastVersion(int32_t aMajor,
+                                                    int32_t aMinor,
                                                     int32_t aBugFix) {
   return macOSVersion() >= GetVersion(aMajor, aMinor, aBugFix);
 }

@@ -4,7 +4,7 @@ Monster example
 
 This article describes a very simple web page that we'll use to illustrate some features of the Memory tool.
 
-You can try the site at https://mdn.github.io/performance-scenarios/js-allocs/alloc.html. Here's the code:
+You can try the site at https://firefox-devtools.github.io/performance-scenarios/js-allocs/alloc.html. Here's the code:
 
 .. code-block:: javascript
 
@@ -78,4 +78,3 @@ So the structure of the memory allocated on the JavaScript heap is an object con
 
 .. image:: monsters.svg
   :class: center
-

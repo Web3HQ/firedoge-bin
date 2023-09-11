@@ -1,7 +1,7 @@
 /* ***** BEGIN LICENSE BLOCK *****
  * Version: MPL 1.1/GPL 2.0/LGPL 2.1
  *
- * Copyright (C) 2002-2017 Németh László
+ * Copyright (C) 2002-2022 Németh László
  *
  * The contents of this file are subject to the Mozilla Public License Version
  * 1.1 (the "License"); you may not use this file except in compliance with
@@ -173,8 +173,8 @@ public:
   }
   void arena_free(void* ptr);
 
-  static const int CHUNK_SIZE = 4096;
   std::vector<std::unique_ptr<uint8_t[]>> arena;
+  int current_chunk_size = 0;
   int current_chunk_offset = 0;
   int outstanding_arena_allocations = 0;
 };

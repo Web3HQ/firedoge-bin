@@ -17,10 +17,10 @@ include protocol PCompositorManager;
 include protocol PCompositorWidget;
 include protocol PTexture;
 include protocol PWebRenderBridge;
-include protocol PWebGPU;
 include "mozilla/GfxMessageUtils.h";
 include "mozilla/layers/LayersMessageUtils.h";
 include "mozilla/layers/WebRenderMessageUtils.h";
+include "mozilla/layers/CompositorBridgeParent.h";
 
 using struct mozilla::null_t from "mozilla/ipc/IPCCore.h";
 using struct mozilla::layers::LayersId from "mozilla/layers/LayersTypes.h";
@@ -41,7 +41,6 @@ using mozilla::wr::IdNamespace from "mozilla/webrender/WebRenderTypes.h";
 using mozilla::wr::RenderReasons from "mozilla/webrender/webrender_ffi.h";
 using base::ProcessId from "base/process.h";
 using mozilla::wr::MaybeExternalImageId from "mozilla/webrender/WebRenderTypes.h";
-using mozilla::layers::LayersObserverEpoch from "mozilla/layers/LayersTypes.h";
 using mozilla::layers::TransactionId from "mozilla/layers/LayersTypes.h";
 
 namespace mozilla {
@@ -88,7 +87,8 @@ struct FrameStats {
  * protocol, which is per-browser. A lot of the functions in the protocol are
  * basically multiplexing/demultiplexing stuff in PLayerTransaction.
  */
-[RefCounted] sync protocol PCompositorBridge
+[ParentImpl="CompositorBridgeParentBase"]
+sync protocol PCompositorBridge
 {
   manager PCompositorManager;
 
@@ -98,14 +98,8 @@ struct FrameStats {
   manages PTexture;
   manages PCompositorWidget;
   manages PWebRenderBridge;
-  manages PWebGPU;
 
 child:
-  // The child should invalidate retained layers. This is used for local
-  // compositor device resets, such as in CompositorD3D9, and ensures that
-  // TextureSources are recreated.
-  async InvalidateLayers(LayersId layersId);
-
   // The compositor completed a layers transaction. id is the layers id
   // of the child layer tree that was composited (or 0 when notifying
   // the root layer tree).
@@ -120,7 +114,7 @@ child:
 
   async ParentAsyncMessages(AsyncParentMessageData[] aMessages);
 
-  async ObserveLayersUpdate(LayersId aLayersId, LayersObserverEpoch aEpoch, bool aActive);
+  async ObserveLayersUpdate(LayersId aLayersId, bool aActive);
 
   async CompositorOptionsChanged(LayersId id, CompositorOptions newOptions);
 
@@ -138,10 +132,6 @@ parent:
   // Must be called after Initialize(), and only succeeds if AsyncPanZoomEnabled() is true.
   async PAPZ(LayersId layersId);
   async PAPZCTreeManager(LayersId layersId);
-
-  // Constructor for WebGPU IPDL
-  // Must be called before Initialize().
-  async PWebGPU();
 
   // The child is about to be destroyed, so perform any necessary cleanup.
   sync WillClose();
@@ -172,6 +162,8 @@ parent:
   // cross-process bridge.
   sync NotifyChildRecreated(LayersId id)
     returns (CompositorOptions compositorOptions);
+
+  async NotifyMemoryPressure();
 
   // Make sure any pending composites are started immediately and
   // block until they are completed.
@@ -210,11 +202,8 @@ parent:
   async BeginRecording(TimeStamp aRecordingStart)
     returns (bool success);
 
-  async EndRecordingToDisk()
-    returns (bool success);
-
-  async EndRecordingToMemory()
-    returns (CollectedFramesParams? frames);
+  async EndRecording()
+    returns (FrameRecording? recording);
 
   // To set up sharing the composited output to Firefox Reality on Desktop
   async RequestFxrOutput();

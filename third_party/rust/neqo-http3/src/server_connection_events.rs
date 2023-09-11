@@ -6,7 +6,7 @@
 
 use crate::connection::Http3State;
 use crate::{
-    features::extended_connect::{ExtendedConnectEvents, ExtendedConnectType},
+    features::extended_connect::{ExtendedConnectEvents, ExtendedConnectType, SessionCloseReason},
     CloseType, Http3StreamInfo, HttpRecvStreamEvents, Priority, RecvStreamEvents, SendStreamEvents,
 };
 use neqo_common::Header;
@@ -52,9 +52,14 @@ pub(crate) enum Http3ServerConnEvent {
     ExtendedConnectClosed {
         connect_type: ExtendedConnectType,
         stream_id: StreamId,
-        error: Option<AppError>,
+        reason: SessionCloseReason,
+        headers: Option<Vec<Header>>,
     },
     ExtendedConnectNewStream(Http3StreamInfo),
+    ExtendedConnectDatagram {
+        session_id: StreamId,
+        datagram: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -116,23 +121,39 @@ impl HttpRecvStreamEvents for Http3ServerConnEvents {
 }
 
 impl ExtendedConnectEvents for Http3ServerConnEvents {
-    fn session_start(&self, _connect_type: ExtendedConnectType, _stream_id: StreamId) {}
+    fn session_start(
+        &self,
+        _connect_type: ExtendedConnectType,
+        _stream_id: StreamId,
+        _status: u16,
+        _headers: Vec<Header>,
+    ) {
+    }
 
     fn session_end(
         &self,
         connect_type: ExtendedConnectType,
         stream_id: StreamId,
-        error: Option<AppError>,
+        reason: SessionCloseReason,
+        headers: Option<Vec<Header>>,
     ) {
         self.insert(Http3ServerConnEvent::ExtendedConnectClosed {
             connect_type,
             stream_id,
-            error,
+            reason,
+            headers,
         });
     }
 
     fn extended_connect_new_stream(&self, stream_info: Http3StreamInfo) {
         self.insert(Http3ServerConnEvent::ExtendedConnectNewStream(stream_info));
+    }
+
+    fn new_datagram(&self, session_id: StreamId, datagram: Vec<u8>) {
+        self.insert(Http3ServerConnEvent::ExtendedConnectDatagram {
+            session_id,
+            datagram,
+        });
     }
 }
 

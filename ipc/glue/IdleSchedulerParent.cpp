@@ -8,6 +8,7 @@
 #include "mozilla/StaticPrefs_javascript.h"
 #include "mozilla/Unused.h"
 #include "mozilla/ipc/IdleSchedulerParent.h"
+#include "mozilla/AppShutdown.h"
 #include "mozilla/Telemetry.h"
 #include "nsSystemInfo.h"
 #include "nsThreadUtils.h"
@@ -34,6 +35,8 @@ uint32_t IdleSchedulerParent::sPrefConcurrentGCsMax = 0;
 uint32_t IdleSchedulerParent::sPrefConcurrentGCsCPUDivisor = 0;
 
 IdleSchedulerParent::IdleSchedulerParent() {
+  MOZ_ASSERT(!AppShutdown::IsInOrBeyond(ShutdownPhase::XPCOMShutdownThreads));
+
   sChildProcessesAlive++;
 
   uint32_t max_gcs_pref =
@@ -60,19 +63,22 @@ IdleSchedulerParent::IdleSchedulerParent() {
           if (NS_SUCCEEDED(CollectProcessInfo(processInfo))) {
             uint32_t num_cpus = processInfo.cpuCount;
             // We have a new cpu count, Update the number of idle tasks.
-            nsCOMPtr<nsIRunnable> runnable = NS_NewRunnableFunction(
-                "IdleSchedulerParent::CalculateNumIdleTasks", [num_cpus]() {
-                  // We're setting this within this lambda because it's run on
-                  // the correct thread and avoids a race.
-                  sNumCPUs = num_cpus;
+            if (MOZ_LIKELY(!AppShutdown::IsInOrBeyond(
+                    ShutdownPhase::XPCOMShutdownThreads))) {
+              nsCOMPtr<nsIRunnable> runnable = NS_NewRunnableFunction(
+                  "IdleSchedulerParent::CalculateNumIdleTasks", [num_cpus]() {
+                    // We're setting this within this lambda because it's run on
+                    // the correct thread and avoids a race.
+                    sNumCPUs = num_cpus;
 
-                  // This reads the sPrefConcurrentGCsMax and
-                  // sPrefConcurrentGCsCPUDivisor values set below, it will run
-                  // after the code that sets those.
-                  CalculateNumIdleTasks();
-                });
+                    // This reads the sPrefConcurrentGCsMax and
+                    // sPrefConcurrentGCsCPUDivisor values set below, it will
+                    // run after the code that sets those.
+                    CalculateNumIdleTasks();
+                  });
 
-            thread->Dispatch(runnable, NS_DISPATCH_NORMAL);
+              thread->Dispatch(runnable, NS_DISPATCH_NORMAL);
+            }
           }
         });
     NS_DispatchBackgroundTask(runnable.forget(), NS_DISPATCH_EVENT_MAY_BLOCK);
@@ -208,7 +214,7 @@ IPCResult IdleSchedulerParent::RecvInitForIdleUse(
   // If there wasn't an empty item, we'll fallback to 0.
   mChildId = unusedId;
 
-  aResolve(Tuple<mozilla::Maybe<SharedMemoryHandle>&&, const uint32_t&>(
+  aResolve(std::tuple<mozilla::Maybe<SharedMemoryHandle>&&, const uint32_t&>(
       std::move(activeCounter), mChildId));
   return IPC_OK();
 }

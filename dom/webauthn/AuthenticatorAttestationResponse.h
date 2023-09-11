@@ -11,12 +11,11 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/dom/AuthenticatorResponse.h"
 #include "mozilla/dom/BindingDeclarations.h"
-#include "mozilla/dom/CryptoBuffer.h"
 #include "nsCycleCollectionParticipant.h"
+#include "nsIWebAuthnController.h"
 #include "nsWrapperCache.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 class AuthenticatorAttestationResponse final : public AuthenticatorResponse {
  public:
@@ -33,17 +32,30 @@ class AuthenticatorAttestationResponse final : public AuthenticatorResponse {
   virtual JSObject* WrapObject(JSContext* aCx,
                                JS::Handle<JSObject*> aGivenProto) override;
 
-  void GetAttestationObject(JSContext* aCx,
-                            JS::MutableHandle<JSObject*> aRetVal);
+  void GetAttestationObject(JSContext* aCx, JS::MutableHandle<JSObject*> aValue,
+                            ErrorResult& aRv);
 
-  nsresult SetAttestationObject(CryptoBuffer& aBuffer);
+  void SetAttestationObject(const nsTArray<uint8_t>& aBuffer);
+
+  void GetTransports(nsTArray<nsString>& aTransports);
+
+  void SetTransports(const nsTArray<nsString>& aTransports);
+
+  void GetAuthenticatorData(JSContext* aCx, JS::MutableHandle<JSObject*> aValue,
+                            ErrorResult& aRv);
+
+  void GetPublicKey(JSContext* aCx, JS::MutableHandle<JSObject*> aValue,
+                    ErrorResult& aRv);
+
+  COSEAlgorithmIdentifier GetPublicKeyAlgorithm(ErrorResult& aRv);
 
  private:
-  CryptoBuffer mAttestationObject;
+  nsTArray<uint8_t> mAttestationObject;
+  nsCOMPtr<nsIWebAuthnAttObj> mAttestationObjectParsed;
   JS::Heap<JSObject*> mAttestationObjectCachedObj;
+  nsTArray<nsString> mTransports;
 };
 
-}  // namespace dom
-}  // namespace mozilla
+}  // namespace mozilla::dom
 
 #endif  // mozilla_dom_AuthenticatorAttestationResponse_h

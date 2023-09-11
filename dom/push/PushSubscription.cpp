@@ -6,6 +6,7 @@
 
 #include "mozilla/dom/PushSubscription.h"
 
+#include "nsGlobalWindowInner.h"
 #include "nsIPushService.h"
 #include "nsIScriptObjectPrincipal.h"
 #include "nsServiceManagerUtils.h"
@@ -22,8 +23,7 @@
 #include "mozilla/dom/WorkerRunnable.h"
 #include "mozilla/dom/WorkerScope.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 namespace {
 
@@ -283,8 +283,8 @@ already_AddRefed<Promise> PushSubscription::Unsubscribe(ErrorResult& aRv) {
     return nullptr;
   }
 
-  nsCOMPtr<nsIScriptObjectPrincipal> sop = do_QueryInterface(mGlobal);
-  if (!sop) {
+  nsCOMPtr<nsPIDOMWindowInner> window = do_QueryInterface(mGlobal);
+  if (!window) {
     aRv.Throw(NS_ERROR_FAILURE);
     return nullptr;
   }
@@ -295,8 +295,9 @@ already_AddRefed<Promise> PushSubscription::Unsubscribe(ErrorResult& aRv) {
   }
 
   RefPtr<UnsubscribeResultCallback> callback = new UnsubscribeResultCallback(p);
-  Unused << NS_WARN_IF(
-      NS_FAILED(service->Unsubscribe(mScope, sop->GetPrincipal(), callback)));
+  Unused << NS_WARN_IF(NS_FAILED(service->Unsubscribe(
+      mScope, nsGlobalWindowInner::Cast(window)->GetClientPrincipal(),
+      callback)));
 
   return p.forget();
 }
@@ -366,5 +367,4 @@ already_AddRefed<Promise> PushSubscription::UnsubscribeFromWorker(
   return p.forget();
 }
 
-}  // namespace dom
-}  // namespace mozilla
+}  // namespace mozilla::dom

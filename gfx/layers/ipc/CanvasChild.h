@@ -11,6 +11,7 @@
 #include "mozilla/ipc/CrossProcessSemaphore.h"
 #include "mozilla/layers/PCanvasChild.h"
 #include "mozilla/layers/SourceSurfaceSharedData.h"
+#include "mozilla/WeakPtr.h"
 #include "nsRefPtrHashtable.h"
 #include "nsTArray.h"
 
@@ -23,7 +24,7 @@ class SourceSurface;
 namespace layers {
 class CanvasDrawEventRecorder;
 
-class CanvasChild final : public PCanvasChild {
+class CanvasChild final : public PCanvasChild, public SupportsWeakPtr {
  public:
   NS_INLINE_DECL_REFCOUNTING(CanvasChild)
 
@@ -33,6 +34,11 @@ class CanvasChild final : public PCanvasChild {
    * @returns true if remote canvas has been deactivated due to failure.
    */
   static bool Deactivated() { return mDeactivated; }
+
+  /**
+   * Release resources until they are next required.
+   */
+  static void ClearCachedResources();
 
   ipc::IPCResult RecvNotifyDeviceChanged();
 
@@ -75,8 +81,9 @@ class CanvasChild final : public PCanvasChild {
   /**
    * Ensures that we have sent a begin transaction event, since the last
    * end transaction.
+   * @returns false on failure to begin transaction
    */
-  void EnsureBeginTransaction();
+  bool EnsureBeginTransaction();
 
   /**
    * Send an end transaction event to indicate the end of events for this frame.
@@ -135,12 +142,13 @@ class CanvasChild final : public PCanvasChild {
   static const uint32_t kCacheDataSurfaceThreshold = 10;
 
   static bool mDeactivated;
+  static bool mInForeground;
 
   RefPtr<CanvasDrawEventRecorder> mRecorder;
   TextureType mTextureType = TextureType::Unknown;
   uint32_t mLastWriteLockCheckpoint = 0;
   uint32_t mTransactionsSinceGetDataSurface = kCacheDataSurfaceThreshold;
-  TimeStamp mLastNonEmptyTransaction = TimeStamp::NowLoRes();
+  std::vector<RefPtr<gfx::SourceSurface>> mLastTransactionExternalSurfaces;
   bool mIsInTransaction = false;
   bool mHasOutstandingWriteLock = false;
 };

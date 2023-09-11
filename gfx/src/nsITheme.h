@@ -32,6 +32,9 @@ namespace layers {
 class StackingContextHelper;
 class RenderRootStateManager;
 }  // namespace layers
+namespace widget {
+class Theme;
+}  // namespace widget
 namespace wr {
 class DisplayListBuilder;
 class IpcResourceUpdateQueue;
@@ -107,12 +110,9 @@ class nsITheme : public nsISupports {
    * horizontal scrollbar.
    */
   enum class Overlay { No, Yes };
-  struct ScrollbarSizes {
-    LayoutDeviceIntCoord mVertical;
-    LayoutDeviceIntCoord mHorizontal;
-  };
-  virtual ScrollbarSizes GetScrollbarSizes(nsPresContext*, StyleScrollbarWidth,
-                                           Overlay) = 0;
+  virtual LayoutDeviceIntCoord GetScrollbarSize(const nsPresContext*,
+                                                StyleScrollbarWidth,
+                                                Overlay) = 0;
 
   /**
    * Return the border for the widget, in device pixels.
@@ -163,15 +163,11 @@ class nsITheme : public nsISupports {
   }
 
   /**
-   * Get the minimum border-box size of a widget, in *pixels* (in
-   * |aResult|).  If |aIsOverridable| is set to true, this size is a
-   * minimum size; if false, this size is the only valid size for the
-   * widget.
+   * Get the minimum border-box size of a widget, in device pixels.
    */
-  NS_IMETHOD GetMinimumWidgetSize(nsPresContext* aPresContext, nsIFrame* aFrame,
-                                  StyleAppearance aWidgetType,
-                                  mozilla::LayoutDeviceIntSize* aResult,
-                                  bool* aIsOverridable) = 0;
+  virtual mozilla::LayoutDeviceIntSize GetMinimumWidgetSize(
+      nsPresContext* aPresContext, nsIFrame* aFrame,
+      StyleAppearance aWidgetType) = 0;
 
   enum Transparency { eOpaque = 0, eTransparent, eUnknownTransparency };
 
@@ -267,5 +263,9 @@ NS_DEFINE_STATIC_IID_ACCESSOR(nsITheme, NS_ITHEME_IID)
 extern already_AddRefed<nsITheme> do_GetNativeThemeDoNotUseDirectly();
 extern already_AddRefed<nsITheme> do_GetBasicNativeThemeDoNotUseDirectly();
 extern already_AddRefed<nsITheme> do_GetRDMThemeDoNotUseDirectly();
+
+// Native theme creation function, these should never return null.
+extern already_AddRefed<mozilla::widget::Theme>
+do_CreateNativeThemeDoNotUseDirectly();
 
 #endif

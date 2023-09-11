@@ -4,6 +4,7 @@
 
 package org.mozilla.geckoview;
 
+import android.annotation.SuppressLint;
 import android.graphics.Color;
 import android.util.Log;
 import androidx.annotation.AnyThread;
@@ -40,8 +41,10 @@ public class WebExtension {
    * Will point to folder <code>/assets/web_extensions/my_webextension/</code> in the APK.
    */
   public final @NonNull String location;
+
   /** Unique identifier for this WebExtension */
   public final @NonNull String id;
+
   /** {@link Flags} for this WebExtension. */
   public final @WebExtensionFlags long flags;
 
@@ -100,12 +103,13 @@ public class WebExtension {
 
   private static final String LOGTAG = "WebExtension";
 
-  // Keep in sync with GeckoViewWebExtension.jsm
+  // Keep in sync with GeckoViewWebExtension.sys.mjs
   public static class Flags {
     /*
      * Default flags for this WebExtension.
      */
     public static final long NONE = 0;
+
     /**
      * Set this flag if you want to enable content scripts messaging. To listen to such messages you
      * can use {@link SessionController#setMessageDelegate}.
@@ -120,7 +124,7 @@ public class WebExtension {
   @LongDef(
       flag = true,
       value = {Flags.NONE, Flags.ALLOW_CONTENT_MESSAGING})
-  /* package */ @interface WebExtensionFlags {}
+  public @interface WebExtensionFlags {}
 
   /* package */ WebExtension(final DelegateControllerProvider provider, final GeckoBundle bundle) {
     location = bundle.getString("locationURI");
@@ -192,7 +196,7 @@ public class WebExtension {
         BrowsingDataDelegate.Type.PASSWORDS
       },
       flag = true)
-  @interface BrowsingDataTypes {}
+  public @interface BrowsingDataTypes {}
 
   /**
    * This delegate is used to handle calls from the |browsingData| WebExtension API.
@@ -218,6 +222,7 @@ public class WebExtension {
        * remove data given in milliseconds since the UNIX epoch.
        */
       public final int sinceUnixTimestamp;
+
       /**
        * Data types that can be toggled in the browser's "Clear Data" UI. One or more flags from
        * {@link Type}.
@@ -618,14 +623,19 @@ public class WebExtension {
      * should stop being highlighted. If <code>false</code>, does nothing.
      */
     @Nullable public final Boolean active;
+
     /** Whether the tab should be discarded automatically by the app when resources are low. */
     @Nullable public final Boolean autoDiscardable;
+
     /** If <code>true</code> and the tab is not highlighted, it should become active by default. */
     @Nullable public final Boolean highlighted;
+
     /** Whether the tab should be muted. */
     @Nullable public final Boolean muted;
+
     /** Whether the tab should be pinned. */
     @Nullable public final Boolean pinned;
+
     /**
      * The url that the tab will be navigated to. This url is provided just for informational
      * purposes, there is no need to load the URL manually. The corresponding {@link GeckoSession}
@@ -667,23 +677,29 @@ public class WebExtension {
      * should stop being highlighted. If <code>false</code>, does nothing.
      */
     @Nullable public final Boolean active;
+
     /**
      * The CookieStoreId used for the tab. This option is only available if the extension has the
      * "cookies" permission.
      */
     @Nullable public final String cookieStoreId;
+
     /**
      * Whether the tab is created and made visible in the tab bar without any content loaded into
      * memory, a state known as discarded. The tab’s content should be loaded when the tab is
      * activated.
      */
     @Nullable public final Boolean discarded;
+
     /** The position the tab should take in the window. */
     @Nullable public final Integer index;
+
     /** If true, open this tab in Reader Mode. */
     @Nullable public final Boolean openInReaderMode;
+
     /** Whether the tab should be pinned. */
     @Nullable public final Boolean pinned;
+
     /**
      * The url that the tab will be navigated to. This url is provided just for informational
      * purposes, there is no need to load the URL manually. The corresponding {@link GeckoSession}
@@ -1093,8 +1109,10 @@ public class WebExtension {
 
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({ENV_TYPE_UNKNOWN, ENV_TYPE_EXTENSION, ENV_TYPE_CONTENT_SCRIPT})
-    /* package */ @interface EnvType {}
+    public @interface EnvType {}
+
     /* package */ static final int ENV_TYPE_UNKNOWN = 0;
+
     /** This sender originated inside a privileged extension context like a background script. */
     public static final int ENV_TYPE_EXTENSION = 1;
 
@@ -1196,6 +1214,7 @@ public class WebExtension {
      * browserAction/getTitle</a>
      */
     public final @Nullable String title;
+
     /**
      * Icon for this Action.
      *
@@ -1206,6 +1225,7 @@ public class WebExtension {
      * browserAction/setIcon</a>
      */
     public final @Nullable Image icon;
+
     /**
      * Whether this action is enabled and should be visible.
      *
@@ -1220,6 +1240,7 @@ public class WebExtension {
      * browserAction/enabled</a>
      */
     public final @Nullable Boolean enabled;
+
     /**
      * Badge text for this action.
      *
@@ -1228,6 +1249,7 @@ public class WebExtension {
      * browserAction/getBadgeText</a>
      */
     public final @Nullable String badgeText;
+
     /**
      * Background color for the badge for this Action.
      *
@@ -1239,6 +1261,7 @@ public class WebExtension {
      * browserAction/getBadgeBackgroundColor</a>
      */
     public final @Nullable Integer badgeBackgroundColor;
+
     /**
      * Text color for the badge for this Action.
      *
@@ -1258,7 +1281,7 @@ public class WebExtension {
 
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({TYPE_BROWSER_ACTION, TYPE_PAGE_ACTION})
-    /* package */ @interface ActionType {}
+    public @interface ActionType {}
 
     /* package */ final @ActionType int type;
 
@@ -1348,7 +1371,9 @@ public class WebExtension {
       return new Action(this, defaultValue);
     }
 
-    /** @see Action#withDefault */
+    /**
+     * @see Action#withDefault
+     */
     private Action(final Action source, final Action defaultValue) {
       if (source.type != defaultValue.type) {
         throw new IllegalArgumentException("defaultValue must be of the same type.");
@@ -1398,6 +1423,9 @@ public class WebExtension {
               return;
             }
 
+            // The .accept method will be called from the UIThread in this case because
+            // the GeckoResult instance was created on the UIThread
+            @SuppressLint("WrongThread")
             final GeckoResult<GeckoSession> popup = delegate.onTogglePopup(mExtension, this);
             openPopup(popup, uri);
           });
@@ -1451,6 +1479,7 @@ public class WebExtension {
         final @NonNull WebExtension extension,
         final @Nullable GeckoSession session,
         final @NonNull Action action) {}
+
     /**
      * Called whenever a page action is defined or updated.
      *
@@ -1511,22 +1540,40 @@ public class WebExtension {
     public static class ErrorCodes {
       /** The download failed due to network problems. */
       public static final int ERROR_NETWORK_FAILURE = -1;
+
       /** The downloaded file did not match the provided hash. */
       public static final int ERROR_INCORRECT_HASH = -2;
+
       /** The downloaded file seems to be corrupted in some way. */
       public static final int ERROR_CORRUPT_FILE = -3;
+
       /** An error occurred trying to write to the filesystem. */
       public static final int ERROR_FILE_ACCESS = -4;
+
       /** The extension must be signed and isn't. */
       public static final int ERROR_SIGNEDSTATE_REQUIRED = -5;
+
       /** The downloaded extension had a different type than expected. */
       public static final int ERROR_UNEXPECTED_ADDON_TYPE = -6;
+
+      /** The downloaded extension had a different version than expected. */
+      public static final int ERROR_UNEXPECTED_ADDON_VERSION = -9;
+
       /** The extension did not have the expected ID. */
       public static final int ERROR_INCORRECT_ID = -7;
+
       /** The extension did not have the expected ID. */
       public static final int ERROR_INVALID_DOMAIN = -8;
+
+      /** The extension is blocklisted. */
+      public static final int ERROR_BLOCKLISTED = -10;
+
+      /** The extension is incompatible. */
+      public static final int ERROR_INCOMPATIBLE = -11;
+
       /** The extension install was canceled. */
       public static final int ERROR_USER_CANCELED = -100;
+
       /** The extension install was postponed until restart. */
       public static final int ERROR_POSTPONED = -101;
 
@@ -1548,7 +1595,9 @@ public class WebExtension {
         final GeckoBundle bundle = (GeckoBundle) response;
         int errorCode = bundle.getInt("installError");
         final int installState = bundle.getInt("state");
-        if (errorCode == 0 && installState == StateCodes.STATE_CANCELED) {
+        if (errorCode == 0
+            && installState == StateCodes.STATE_CANCELED
+            && bundle.getBoolean("cancelledByUser")) {
           errorCode = ErrorCodes.ERROR_USER_CANCELED;
         } else if (errorCode == 0 && installState == StateCodes.STATE_POSTPONED) {
           errorCode = ErrorCodes.ERROR_POSTPONED;
@@ -1568,19 +1617,26 @@ public class WebExtension {
           ErrorCodes.ERROR_FILE_ACCESS,
           ErrorCodes.ERROR_SIGNEDSTATE_REQUIRED,
           ErrorCodes.ERROR_UNEXPECTED_ADDON_TYPE,
+          ErrorCodes.ERROR_UNEXPECTED_ADDON_VERSION,
           ErrorCodes.ERROR_INCORRECT_ID,
           ErrorCodes.ERROR_INVALID_DOMAIN,
+          ErrorCodes.ERROR_BLOCKLISTED,
+          ErrorCodes.ERROR_INCOMPATIBLE,
           ErrorCodes.ERROR_USER_CANCELED,
           ErrorCodes.ERROR_POSTPONED,
         })
-    /* package */ @interface Codes {}
+    public @interface Codes {}
 
     /** One of {@link ErrorCodes} that provides more information about this exception. */
     public final @Codes int code;
 
+    /** An optional name of the extension that caused the exception. */
+    public final @Nullable String extensionName;
+
     /** For testing */
     protected InstallException() {
       this.code = ErrorCodes.ERROR_NETWORK_FAILURE;
+      this.extensionName = null;
     }
 
     @Override
@@ -1588,8 +1644,14 @@ public class WebExtension {
       return "InstallException: " + code;
     }
 
+    /* package */ InstallException(final @Codes int code, final @Nullable String extensionName) {
+      this.code = code;
+      this.extensionName = extensionName;
+    }
+
     /* package */ InstallException(final @Codes int code) {
       this.code = code;
+      this.extensionName = null;
     }
   }
 
@@ -1628,14 +1690,19 @@ public class WebExtension {
      * certificate.
      */
     public static final int UNKNOWN = -1;
+
     /** This extension is unsigned. */
     public static final int MISSING = 0;
+
     /** This extension has been preliminarily reviewed. */
     public static final int PRELIMINARY = 1;
+
     /** This extension has been fully reviewed. */
     public static final int SIGNED = 2;
+
     /** This extension is a system add-on. */
     public static final int SYSTEM = 3;
+
     /** This extension is signed with a "Mozilla Extensions" certificate. */
     public static final int PRIVILEGED = 4;
 
@@ -1651,7 +1718,7 @@ public class WebExtension {
     SignedStateFlags.SYSTEM,
     SignedStateFlags.PRIVILEGED
   })
-  @interface SignedState {}
+  public @interface SignedState {}
 
   /**
    * Describes the blocklist state for a {@link WebExtension}. See <a
@@ -1662,17 +1729,22 @@ public class WebExtension {
     // Keep in sync with nsIBlocklistService.idl
     /** This extension does not appear in the blocklist. */
     public static final int NOT_BLOCKED = 0;
+
     /**
      * This extension is in the blocklist but the problem is not severe enough to warant forcibly
      * blocking.
      */
     public static final int SOFTBLOCKED = 1;
+
     /** This extension should be blocked and never used. */
     public static final int BLOCKED = 2;
+
     /** This extension is considered outdated, and there is a known update available. */
     public static final int OUTDATED = 3;
+
     /** This extension is vulnerable and there is an update. */
     public static final int VULNERABLE_UPDATE_AVAILABLE = 4;
+
     /** This extension is vulnerable and there is no update. */
     public static final int VULNERABLE_NO_UPDATE = 5;
   }
@@ -1686,7 +1758,7 @@ public class WebExtension {
     BlocklistStateFlags.VULNERABLE_UPDATE_AVAILABLE,
     BlocklistStateFlags.VULNERABLE_NO_UPDATE
   })
-  @interface BlocklistState {}
+  public @interface BlocklistState {}
 
   public static class DisabledFlags {
     /** The extension has been disabled by the user */
@@ -1710,7 +1782,7 @@ public class WebExtension {
   @IntDef(
       flag = true,
       value = {DisabledFlags.USER, DisabledFlags.BLOCKLIST, DisabledFlags.APP})
-  @interface EnabledFlags {}
+  public @interface EnabledFlags {}
 
   /** Provides information about a {@link WebExtension}. */
   public class MetaData {
@@ -1719,6 +1791,7 @@ public class WebExtension {
      * prompts.
      */
     public final @NonNull Image icon;
+
     /**
      * API permissions requested or granted to this extension.
      *
@@ -1727,6 +1800,7 @@ public class WebExtension {
      * API permissions </a>.
      */
     public final @NonNull String[] permissions;
+
     /**
      * Host permissions requested or granted to this extension.
      *
@@ -1735,6 +1809,7 @@ public class WebExtension {
      * Host permissions </a>.
      */
     public final @NonNull String[] origins;
+
     /**
      * Branding name for this extension.
      *
@@ -1743,6 +1818,7 @@ public class WebExtension {
      * manifest.json/name </a>
      */
     public final @Nullable String name;
+
     /**
      * Branding description for this extension. This string will be localized using the current
      * GeckoView language setting.
@@ -1752,6 +1828,7 @@ public class WebExtension {
      * manifest.json/description </a>
      */
     public final @Nullable String description;
+
     /**
      * Version string for this extension.
      *
@@ -1760,6 +1837,7 @@ public class WebExtension {
      * manifest.json/version </a>
      */
     public final @NonNull String version;
+
     /**
      * Creator name as provided in the manifest.
      *
@@ -1768,6 +1846,7 @@ public class WebExtension {
      * manifest.json/developer </a>
      */
     public final @Nullable String creatorName;
+
     /**
      * Creator url as provided in the manifest.
      *
@@ -1776,6 +1855,7 @@ public class WebExtension {
      * manifest.json/developer </a>
      */
     public final @Nullable String creatorUrl;
+
     /**
      * Homepage url as provided in the manifest.
      *
@@ -1784,6 +1864,7 @@ public class WebExtension {
      * manifest.json/homepage_url </a>
      */
     public final @Nullable String homepageUrl;
+
     /**
      * Options page as provided in the manifest.
      *
@@ -1792,6 +1873,7 @@ public class WebExtension {
      * manifest.json/options_ui </a>
      */
     public final @Nullable String optionsPageUrl;
+
     /**
      * Whether the options page should be open in a Tab or not.
      *
@@ -1800,6 +1882,7 @@ public class WebExtension {
      * manifest.json/options_ui#Syntax </a>
      */
     public final boolean openOptionsPageInTab;
+
     /**
      * Whether or not this is a recommended extension.
      *
@@ -1807,6 +1890,7 @@ public class WebExtension {
      * Extensions program </a>
      */
     public final boolean isRecommended;
+
     /**
      * Blocklist status for this extension.
      *
@@ -1814,6 +1898,7 @@ public class WebExtension {
      * Add-ons that cause stability or security issues are put on a blocklist </a>.
      */
     public final @BlocklistState int blocklistState;
+
     /**
      * Signed status for this extension.
      *
@@ -1935,6 +2020,7 @@ public class WebExtension {
 
   // TODO: make public bug 1595822
 
+  @Retention(RetentionPolicy.SOURCE)
   @IntDef(
       flag = true,
       value = {
@@ -1945,8 +2031,7 @@ public class WebExtension {
         Context.TAB,
         Context.TOOLS_MENU
       })
-
-  /* package */ @interface ContextFlags {}
+  public @interface ContextFlags {}
 
   /**
    * Flags to determine which contexts a menu item should be shown in. See <a
@@ -2044,11 +2129,11 @@ public class WebExtension {
    */
   static class MenuItem {
 
+    @Retention(RetentionPolicy.SOURCE)
     @IntDef(
         flag = false,
         value = {MenuType.NORMAL, MenuType.CHECKBOX, MenuType.RADIO, MenuType.SEPARATOR})
-
-    /* package */ @interface Type {}
+    public @interface Type {}
 
     /** A set of constants that represents the display type of this menu item. */
     static class MenuType {
@@ -2313,6 +2398,7 @@ public class WebExtension {
      * Represents a download in progress where the app is currently receiving data from the server.
      * See also {@link Info#state()}.
      */
+    @Retention(RetentionPolicy.SOURCE)
     @IntDef({STATE_IN_PROGRESS, STATE_INTERRUPTED, STATE_COMPLETE})
     public @interface DownloadState {}
 
@@ -2328,6 +2414,7 @@ public class WebExtension {
     /**
      * Represents a possible reason why a download was interrupted. See also {@link Info#error()}.
      */
+    @Retention(RetentionPolicy.SOURCE)
     @IntDef({
       INTERRUPT_REASON_NO_INTERRUPT,
       INTERRUPT_REASON_FILE_FAILED,
@@ -2443,13 +2530,17 @@ public class WebExtension {
         return null;
       }
 
-      /** @return boolean indicating whether a downloaded file still exists */
+      /**
+       * @return boolean indicating whether a downloaded file still exists
+       */
       @UiThread
       default boolean fileExists() {
         return false;
       }
 
-      /** @return the filename. */
+      /**
+       * @return the filename.
+       */
       @NonNull
       @UiThread
       default String filename() {
@@ -2465,7 +2556,9 @@ public class WebExtension {
         return -1;
       }
 
-      /** @return the downloaded file's MIME type */
+      /**
+       * @return the downloaded file's MIME type
+       */
       @NonNull
       @UiThread
       default String mime() {
@@ -2481,14 +2574,18 @@ public class WebExtension {
         return false;
       }
 
-      /** @return String representing the downloaded file's referrer */
+      /**
+       * @return String representing the downloaded file's referrer
+       */
       @NonNull
       @UiThread
       default String referrer() {
         return "";
       }
 
-      /** @return the number of milliseconds between the UNIX epoch and when this download began */
+      /**
+       * @return the number of milliseconds between the UNIX epoch and when this download began
+       */
       @UiThread
       default long startTime() {
         return -1;
@@ -2515,7 +2612,6 @@ public class WebExtension {
     }
 
     @NonNull
-    @UiThread
     /* package */ static GeckoBundle downloadInfoToBundle(final @NonNull Info data) {
       final GeckoBundle dataBundle = new GeckoBundle();
 
@@ -2580,10 +2676,11 @@ public class WebExtension {
      */
     public final boolean allowHttpErrors;
 
+    @Retention(RetentionPolicy.SOURCE)
     @IntDef(
         flag = true,
         value = {CONFLICT_ACTION_UNIQUIFY, CONFLICT_ACTION_OVERWRITE, CONFLICT_ACTION_PROMPT})
-    /* package */ @interface ConflictActionFlags {}
+    public @interface ConflictActionFlags {}
 
     /** The app should modify the filename to make it unique */
     public static final int CONFLICT_ACTION_UNIQUIFY = 0;

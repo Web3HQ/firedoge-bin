@@ -13,10 +13,8 @@
 #include "mozilla/dom/Credential.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsWrapperCache.h"
-#include "mozilla/dom/CryptoBuffer.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 class PublicKeyCredential final : public Credential {
  public:
@@ -33,19 +31,21 @@ class PublicKeyCredential final : public Credential {
   virtual JSObject* WrapObject(JSContext* aCx,
                                JS::Handle<JSObject*> aGivenProto) override;
 
-  void GetRawId(JSContext* cx, JS::MutableHandle<JSObject*> aRetVal);
+  void GetRawId(JSContext* aCx, JS::MutableHandle<JSObject*> aValue,
+                ErrorResult& aRv);
 
   already_AddRefed<AuthenticatorResponse> Response() const;
 
-  nsresult SetRawId(CryptoBuffer& aBuffer);
+  void SetRawId(const nsTArray<uint8_t>& aBuffer);
 
   void SetResponse(RefPtr<AuthenticatorResponse>);
 
   static already_AddRefed<Promise>
-  IsUserVerifyingPlatformAuthenticatorAvailable(GlobalObject& aGlobal);
+  IsUserVerifyingPlatformAuthenticatorAvailable(GlobalObject& aGlobal,
+                                                ErrorResult& aError);
 
   static already_AddRefed<Promise> IsExternalCTAP2SecurityKeySupported(
-      GlobalObject& aGlobal);
+      GlobalObject& aGlobal, ErrorResult& aError);
 
   void GetClientExtensionResults(
       AuthenticationExtensionsClientOutputs& aResult);
@@ -55,13 +55,12 @@ class PublicKeyCredential final : public Credential {
   void SetClientExtensionResultHmacSecret(bool aHmacCreateSecret);
 
  private:
-  CryptoBuffer mRawId;
+  nsTArray<uint8_t> mRawId;
   JS::Heap<JSObject*> mRawIdCachedObj;
   RefPtr<AuthenticatorResponse> mResponse;
   AuthenticationExtensionsClientOutputs mClientExtensionOutputs;
 };
 
-}  // namespace dom
-}  // namespace mozilla
+}  // namespace mozilla::dom
 
 #endif  // mozilla_dom_PublicKeyCredential_h

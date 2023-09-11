@@ -36,15 +36,32 @@ downloads-cmd-show-menuitem-2 =
   }
   .accesskey = F
 
+## Displayed in the downloads context menu for files that can be opened.
+## Variables:
+##   $handler (String) - The name of the mime type's default file handler.
+##   Example: "Notepad", "Acrobat Reader DC", "7-Zip File Manager"
+
 downloads-cmd-use-system-default =
   .label = Open In System Viewer
-  .accesskey = V
+  .accesskey = I
+# This version is shown when the download's mime type has a valid file handler.
+downloads-cmd-use-system-default-named =
+  .label = Open In { $handler }
+  .accesskey = I
 
 # We can use the same accesskey as downloads-cmd-always-open-similar-files.
 # Both should not be visible in the downloads context menu at the same time.
 downloads-cmd-always-use-system-default =
   .label = Always Open In System Viewer
   .accesskey = w
+# We can use the same accesskey as downloads-cmd-always-open-similar-files.
+# Both should not be visible in the downloads context menu at the same time.
+# This version is shown when the download's mime type has a valid file handler.
+downloads-cmd-always-use-system-default-named =
+  .label = Always Open In { $handler }
+  .accesskey = w
+
+##
 
 # We can use the same accesskey as downloads-cmd-always-use-system-default.
 # Both should not be visible in the downloads context menu at the same time.
@@ -89,6 +106,9 @@ downloads-cmd-clear-list =
     .accesskey = a
 downloads-cmd-clear-downloads =
     .label = Clear Downloads
+    .accesskey = C
+downloads-cmd-delete-file =
+    .label = Delete
     .accesskey = D
 
 # This command is shown in the context menu when downloads are blocked.
@@ -139,11 +159,18 @@ downloads-open-file =
 ##   $seconds (number) - Amount of seconds left till the file opens.
 ##   $minutes (number) - Amount of minutes till the file opens.
 
-downloading-file-opens-in-hours-and-minutes = Opening in { $hours }h { $minutes }m…
-downloading-file-opens-in-minutes = Opening in { $minutes }m…
-downloading-file-opens-in-minutes-and-seconds = Opening in { $minutes }m { $seconds }s…
-downloading-file-opens-in-seconds = Opening in { $seconds }s…
-downloading-file-opens-in-some-time = Opening when completed…
+downloading-file-opens-in-hours-and-minutes-2 =
+  .value = Opening in { $hours }h { $minutes }m…
+downloading-file-opens-in-minutes-2 =
+  .value = Opening in { $minutes }m…
+downloading-file-opens-in-minutes-and-seconds-2 =
+  .value = Opening in { $minutes }m { $seconds }s…
+downloading-file-opens-in-seconds-2 =
+  .value = Opening in { $seconds }s…
+downloading-file-opens-in-some-time-2 =
+  .value = Opening when completed…
+downloading-file-click-to-open =
+  .value = Open when completed
 
 ##
 
@@ -164,10 +191,10 @@ downloads-history =
     .label = Show all downloads
     .accesskey = S
 
-# This string is shown at the top of the Download Details Panel, to indicate
+# This string is shown at the top of the download details sub-panel to indicate
 # that we are showing the details of a single download.
 downloads-details =
-    .title = Download Details
+    .title = Download details
 
 ## Displayed when a site attempts to automatically download many files.
 ## Variables:
@@ -205,3 +232,17 @@ downloads-more-downloading =
         [one] { $count } more file downloading
        *[other] { $count } more files downloading
     }
+
+## Download errors
+
+downloads-error-alert-title = Download Error
+# Variables:
+#   $extension (String): the name of the blocking extension.
+downloads-error-blocked-by = The download cannot be saved because it is blocked by { $extension }.
+# Used when the name of the blocking extension is unavailable.
+downloads-error-extension = The download cannot be saved because it is blocked by an extension.
+# Line breaks in this message are meaningful, and should be maintained.
+downloads-error-generic =
+    The download cannot be saved because an unknown error occurred.
+
+    Please try again.

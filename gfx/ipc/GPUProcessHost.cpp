@@ -7,6 +7,7 @@
 #include "GPUProcessHost.h"
 #include "chrome/common/process_watcher.h"
 #include "gfxPlatform.h"
+#include "mozilla/dom/ContentParent.h"
 #include "mozilla/gfx/GPUChild.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/layers/SynchronousTask.h"
@@ -42,7 +43,8 @@ bool GPUProcessHost::Launch(StringVector aExtraOpts) {
   MOZ_ASSERT(!gfxPlatform::IsHeadless());
 
   mPrefSerializer = MakeUnique<ipc::SharedPreferenceSerializer>();
-  if (!mPrefSerializer->SerializeToSharedMemory()) {
+  if (!mPrefSerializer->SerializeToSharedMemory(GeckoProcessType_GPU,
+                                                /* remoteType */ ""_ns)) {
     return false;
   }
   mPrefSerializer->AddSharedPrefCmdLineArgs(*this, aExtraOpts);
@@ -86,7 +88,7 @@ bool GPUProcessHost::WaitForLaunch() {
   return result;
 }
 
-void GPUProcessHost::OnChannelConnected(int32_t peer_pid) {
+void GPUProcessHost::OnChannelConnected(base::ProcessId peer_pid) {
   MOZ_ASSERT(!NS_IsMainThread());
 
   GeckoChildProcessHost::OnChannelConnected(peer_pid);
@@ -98,22 +100,6 @@ void GPUProcessHost::OnChannelConnected(int32_t peer_pid) {
     MonitorAutoLock lock(mMonitor);
     runnable =
         mTaskFactory.NewRunnableMethod(&GPUProcessHost::OnChannelConnectedTask);
-  }
-  NS_DispatchToMainThread(runnable);
-}
-
-void GPUProcessHost::OnChannelError() {
-  MOZ_ASSERT(!NS_IsMainThread());
-
-  GeckoChildProcessHost::OnChannelError();
-
-  // Post a task to the main thread. Take the lock because mTaskFactory is not
-  // thread-safe.
-  RefPtr<Runnable> runnable;
-  {
-    MonitorAutoLock lock(mMonitor);
-    runnable =
-        mTaskFactory.NewRunnableMethod(&GPUProcessHost::OnChannelErrorTask);
   }
   NS_DispatchToMainThread(runnable);
 }
@@ -141,9 +127,8 @@ void GPUProcessHost::InitAfterConnect(bool aSucceeded) {
 
   if (aSucceeded) {
     mProcessToken = ++sProcessTokenCounter;
-    mGPUChild = MakeUnique<GPUChild>(this);
-    DebugOnly<bool> rv = mGPUChild->Open(
-        TakeInitialPort(), base::GetProcId(GetChildProcessHandle()));
+    mGPUChild = MakeRefPtr<GPUChild>(this);
+    DebugOnly<bool> rv = TakeInitialEndpoint().Bind(mGPUChild.get());
     MOZ_ASSERT(rv);
 
     mGPUChild->Init();
@@ -170,7 +155,7 @@ void GPUProcessHost::InitAfterConnect(bool aSucceeded) {
   }
 }
 
-void GPUProcessHost::Shutdown() {
+void GPUProcessHost::Shutdown(bool aUnexpectedShutdown) {
   MOZ_ASSERT(!mShutdownRequested);
 
   mListener = nullptr;
@@ -179,6 +164,10 @@ void GPUProcessHost::Shutdown() {
     // OnChannelClosed uses this to check if the shutdown was expected or
     // unexpected.
     mShutdownRequested = true;
+
+    if (aUnexpectedShutdown) {
+      mGPUChild->OnUnexpectedShutdown();
+    }
 
     // The channel might already be closed if we got here unexpectedly.
     if (!mChannelClosed) {
@@ -224,7 +213,7 @@ void GPUProcessHost::OnChannelClosed() {
 
 void GPUProcessHost::KillHard(const char* aReason) {
   ProcessHandle handle = GetChildProcessHandle();
-  if (!base::KillProcess(handle, base::PROCESS_END_KILLED_BY_USER, false)) {
+  if (!base::KillProcess(handle, base::PROCESS_END_KILLED_BY_USER)) {
     NS_WARNING("failed to kill subprocess!");
   }
 
@@ -234,6 +223,8 @@ void GPUProcessHost::KillHard(const char* aReason) {
 uint64_t GPUProcessHost::GetProcessToken() const { return mProcessToken; }
 
 void GPUProcessHost::KillProcess() { KillHard("DiagnosticKill"); }
+
+void GPUProcessHost::CrashProcess() { mGPUChild->SendCrashProcess(); }
 
 void GPUProcessHost::DestroyProcess() {
   // Cancel all tasks. We don't want anything triggering after our caller

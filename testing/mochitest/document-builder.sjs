@@ -4,8 +4,9 @@
 
 "use strict";
 
-// eslint-disable-next-line mozilla/use-chromeutils-import
-Cu.import("resource://gre/modules/NetUtil.jsm");
+const { NetUtil } = ChromeUtils.importESModule(
+  "resource://gre/modules/NetUtil.sys.mjs"
+);
 Cu.importGlobalProperties(["URLSearchParams"]);
 
 function loadHTMLFromFile(path) {

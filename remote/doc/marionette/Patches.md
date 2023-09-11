@@ -1,5 +1,4 @@
-Submitting patches
-==================
+# Submitting patches
 
 You can submit patches by using [Phabricator]. Walk through its documentation
 in how to set it up, and uploading patches for review. Don't worry about which
@@ -14,20 +13,20 @@ granted commit access level 1 you will have permission to use the
 
 You can use the `remote-protocol` [try preset]:
 
-	mach try --preset remote-protocol
+    mach try --preset remote-protocol
 
 This preset will schedule tests related to the Remote Protocol component on
 various platforms. You can reduce the number of tasks by filtering on platforms
 (e.g. linux) or build type (e.g. opt):
 
-	mach try --preset remote-protocol -xq "'linux 'opt"
+    mach try --preset remote-protocol -xq "'linux 'opt"
 
 But you can also schedule tests by selecting relevant jobs yourself:
 
     mach try fuzzy
 
 [Phabricator]: https://moz-conduit.readthedocs.io/en/latest/phabricator-user.html
-[commit creation guidelines]: https://mozilla-version-control-tools.readthedocs.io/en/latest/devguide/contributing.html?highlight=phabricator#submitting-patches-for-review
+[commit creation guidelines]: https://mozilla-version-control-tools.readthedocs.io/en/latest/devguide/contributing.html#submitting-patches-for-review
 [becoming a Mozilla committer]: https://www.mozilla.org/en-US/about/governance/policies/commit/
 [Firefox CI]: https://treeherder.mozilla.org/
-[try preset]: https://firefox-source-docs.mozilla.org/tools/try/presets.html
+[try preset]: /tools/try/presets

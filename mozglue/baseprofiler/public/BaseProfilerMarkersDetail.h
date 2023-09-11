@@ -23,6 +23,7 @@
 
 #include <limits>
 #include <tuple>
+#include <type_traits>
 
 namespace mozilla::baseprofiler {
 // Implemented in platform.cpp
@@ -30,14 +31,6 @@ MFBT_API ProfileChunkedBuffer& profiler_get_core_buffer();
 }  // namespace mozilla::baseprofiler
 
 namespace mozilla::base_profiler_markers_detail {
-
-// Get the core buffer from the profiler, and cache it in a
-// non-templated-function static reference.
-inline ProfileChunkedBuffer& CachedBaseCoreBuffer() {
-  static ProfileChunkedBuffer& coreBuffer =
-      baseprofiler::profiler_get_core_buffer();
-  return coreBuffer;
-}
 
 struct Streaming {
   // A `MarkerDataDeserializer` is a free function that can read a serialized
@@ -80,7 +73,23 @@ struct Streaming {
       DeserializerTag aTag);
 
   // Retrieve all MarkerTypeFunctions's.
-  MFBT_API static Span<const MarkerTypeFunctions> MarkerTypeFunctionsArray();
+  // While this object lives, no other operations can happen on this list.
+  class LockedMarkerTypeFunctionsList {
+   public:
+    MFBT_API LockedMarkerTypeFunctionsList();
+    MFBT_API ~LockedMarkerTypeFunctionsList();
+
+    LockedMarkerTypeFunctionsList(const LockedMarkerTypeFunctionsList&) =
+        delete;
+    LockedMarkerTypeFunctionsList& operator=(
+        const LockedMarkerTypeFunctionsList&) = delete;
+
+    auto begin() const { return mMarkerTypeFunctionsSpan.begin(); }
+    auto end() const { return mMarkerTypeFunctionsSpan.end(); }
+
+   private:
+    Span<const MarkerTypeFunctions> mMarkerTypeFunctionsSpan;
+  };
 };
 
 // This helper will examine a marker type's `StreamJSONMarkerData` function, see
@@ -250,8 +259,16 @@ static ProfileBufferBlockIndex AddMarkerWithOptionalStackToBuffer(
 
 // Pointer to a function that can capture a backtrace into the provided
 // `ProfileChunkedBuffer`, and returns true when successful.
-using BacktraceCaptureFunction = bool (*)(ProfileChunkedBuffer&,
-                                          StackCaptureOptions);
+using OptionalBacktraceCaptureFunction = bool (*)(ProfileChunkedBuffer&,
+                                                  StackCaptureOptions);
+
+// Use a pre-allocated and cleared chunked buffer in the main thread's
+// `AddMarkerToBuffer()`.
+// Null if not the main thread, or if profilers are not active.
+MFBT_API ProfileChunkedBuffer* GetClearedBufferForMainThreadAddMarker();
+// Called by the profiler(s) when starting/stopping. Safe to nest.
+MFBT_API void EnsureBufferForMainThreadAddMarker();
+MFBT_API void ReleaseBufferForMainThreadAddMarker();
 
 // Add a marker with the given name, options, and arguments to the given buffer.
 // Because this may be called from either Base or Gecko Profiler functions, the
@@ -260,7 +277,8 @@ template <typename MarkerType, typename... Ts>
 ProfileBufferBlockIndex AddMarkerToBuffer(
     ProfileChunkedBuffer& aBuffer, const ProfilerString8View& aName,
     const MarkerCategory& aCategory, MarkerOptions&& aOptions,
-    BacktraceCaptureFunction aBacktraceCaptureFunction, const Ts&... aTs) {
+    OptionalBacktraceCaptureFunction aOptionalBacktraceCaptureFunction,
+    const Ts&... aTs) {
   if (aOptions.ThreadId().IsUnspecified()) {
     // If yet unspecified, set thread to this thread where the marker is added.
     aOptions.Set(MarkerThreadId::CurrentThread());
@@ -272,23 +290,38 @@ ProfileBufferBlockIndex AddMarkerToBuffer(
   }
 
   StackCaptureOptions captureOptions = aOptions.Stack().CaptureOptions();
-  if (captureOptions != StackCaptureOptions::NoStack) {
+  if (captureOptions != StackCaptureOptions::NoStack &&
+      // Backtrace capture function will be nullptr if the profiler
+      // NoMarkerStacks feature is set.
+      aOptionalBacktraceCaptureFunction != nullptr) {
     // A capture was requested, let's attempt to do it here&now. This avoids a
     // lot of allocations that would be necessary if capturing a backtrace
     // separately.
-    // TODO use a local on-stack byte buffer to remove last allocation.
     // TODO reduce internal profiler stack levels, see bug 1659872.
+    auto CaptureStackAndAddMarker = [&](ProfileChunkedBuffer& aChunkedBuffer) {
+      aOptions.StackRef().UseRequestedBacktrace(
+          aOptionalBacktraceCaptureFunction(aChunkedBuffer, captureOptions)
+              ? &aChunkedBuffer
+              : nullptr);
+      // This call must be made from here, while chunkedBuffer is in scope.
+      return AddMarkerWithOptionalStackToBuffer<MarkerType>(
+          aBuffer, aName, aCategory, std::move(aOptions), aTs...);
+    };
+
+    if (ProfileChunkedBuffer* buffer = GetClearedBufferForMainThreadAddMarker();
+        buffer) {
+      // Use a pre-allocated buffer for the main thread (because it's the most
+      // used thread, and most sensitive to overhead), so it's only allocated
+      // once. It could be null if this is not the main thread, or no profilers
+      // are currently active.
+      return CaptureStackAndAddMarker(*buffer);
+    }
+    // TODO use a local on-stack byte buffer to remove last allocation.
     ProfileBufferChunkManagerSingle chunkManager(
         ProfileBufferChunkManager::scExpectedMaximumStackSize);
     ProfileChunkedBuffer chunkedBuffer(
         ProfileChunkedBuffer::ThreadSafety::WithoutMutex, chunkManager);
-    aOptions.StackRef().UseRequestedBacktrace(
-        aBacktraceCaptureFunction(chunkedBuffer, captureOptions)
-            ? &chunkedBuffer
-            : nullptr);
-    // This call must be made from here, while chunkedBuffer is in scope.
-    return AddMarkerWithOptionalStackToBuffer<MarkerType>(
-        aBuffer, aName, aCategory, std::move(aOptions), aTs...);
+    return CaptureStackAndAddMarker(chunkedBuffer);
   }
 
   return AddMarkerWithOptionalStackToBuffer<MarkerType>(
@@ -349,7 +382,7 @@ void DeserializeAfterKindAndStream(
             aEntryReader.ReadObject<mozilla::base_profiler_markers_detail::
                                         Streaming::DeserializerTag>();
         tag != 0) {
-      writer->StartObjectElement(JSONWriter::SingleLineStyle);
+      writer->StartObjectElement();
       {
         // Stream "common props".
 
@@ -375,8 +408,8 @@ void DeserializeAfterKindAndStream(
         }
 
         auto payloadType = static_cast<mozilla::MarkerPayloadType>(
-            aEntryReader
-                .ReadObject<mozilla::MarkerPayloadTypeUnderlyingType>());
+            aEntryReader.ReadObject<
+                std::underlying_type_t<mozilla::MarkerPayloadType>>());
 
         // Stream the payload, including the type.
         switch (payloadType) {

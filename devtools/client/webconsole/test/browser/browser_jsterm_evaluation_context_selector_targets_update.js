@@ -11,7 +11,8 @@ const IFRAME_PATH = `${FILE_FOLDER}/test-console-evaluation-context-selector-chi
 // Test that when a target is destroyed, it does not appear in the list anymore (and
 // the context is set to the top one if the destroyed target was selected).
 
-add_task(async function() {
+add_task(async function () {
+  await pushPref("devtools.popups.debug", true);
   await pushPref("devtools.webconsole.input.context", true);
 
   const hud = await openNewTabWithIframesAndConsole(TEST_URI, [
@@ -64,7 +65,7 @@ add_task(async function() {
   ]);
 
   info("Add another iframe");
-  ContentTask.spawn(gBrowser.selectedBrowser, [IFRAME_PATH], function(path) {
+  ContentTask.spawn(gBrowser.selectedBrowser, [IFRAME_PATH], function (path) {
     const iframe = content.document.createElement("iframe");
     iframe.src = `https://test1.example.org/${path}?id=iframe-2`;
     content.document.body.append(iframe);
@@ -114,7 +115,7 @@ add_task(async function() {
   ok(true, "The context was set to the selected iframe document");
 
   info("Remove the first iframe from the content document");
-  ContentTask.spawn(gBrowser.selectedBrowser, [], function() {
+  ContentTask.spawn(gBrowser.selectedBrowser, [], function () {
     content.document.querySelector("iframe").remove();
   });
 
@@ -150,7 +151,7 @@ add_task(async function() {
   ok(true, "The context was set to the selected iframe document");
 
   info("Remove the second iframe from the content document");
-  ContentTask.spawn(gBrowser.selectedBrowser, [], function() {
+  ContentTask.spawn(gBrowser.selectedBrowser, [], function () {
     content.document.querySelector("iframe").remove();
   });
 
@@ -165,4 +166,77 @@ add_task(async function() {
 
   await waitForEagerEvaluationResult(hud, `"example.com"`);
   ok(true, "Instant evaluation is done against the top frame context");
+
+  info("Open a popup");
+  const originalTab = gBrowser.selectedTab;
+  let onSwitchedHost = hud.toolbox.once("host-changed");
+  await ContentTask.spawn(
+    gBrowser.selectedBrowser,
+    [IFRAME_PATH],
+    function (path) {
+      content.open(`https://test2.example.org/${path}?id=popup`);
+    }
+  );
+  await onSwitchedHost;
+
+  // Wait until the popup is rendered in the context selector
+  // and that it is automatically switched to (aria-checked==true).
+  await waitFor(() => {
+    try {
+      const items = getContextSelectorItems(hud);
+      return (
+        items.length === 3 &&
+        items.some(
+          el =>
+            el
+              .querySelector(".label")
+              ?.textContent.includes("popup|test2.example.org") &&
+            el.getAttribute("aria-checked") === "true"
+        )
+      );
+    } catch (e) {
+      // The context list may be wiped while updating and getContextSelectorItems will throw
+    }
+    return false;
+  });
+
+  const expectedPopupItem = {
+    label: `popup|test2.example.org`,
+    tooltip: `https://test2.example.org/${IFRAME_PATH}?id=popup`,
+  };
+
+  await checkContextSelectorMenu(hud, [
+    {
+      ...expectedTopItem,
+      checked: false,
+    },
+    expectedSeparatorItem,
+    {
+      ...expectedPopupItem,
+      checked: true,
+    },
+  ]);
+
+  await waitForEagerEvaluationResult(hud, `"test2.example.org"`);
+  ok(true, "The context was set to the popup document");
+
+  info("Open a second popup and reload the original tab");
+  onSwitchedHost = hud.toolbox.once("host-changed");
+  await ContentTask.spawn(
+    originalTab.linkedBrowser,
+    [IFRAME_PATH],
+    function (path) {
+      content.open(`https://test2.example.org/${path}?id=popup2`);
+    }
+  );
+  await onSwitchedHost;
+
+  // Reloading the tab while having two popups opened used to
+  // generate exception in the context selector component
+  await BrowserTestUtils.reloadTab(originalTab);
+
+  ok(
+    !hud.ui.document.querySelector(".app-error-panel"),
+    "The web console did not crash"
+  );
 });

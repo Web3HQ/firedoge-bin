@@ -11,10 +11,11 @@
 #ifndef vm_AtomsTable_h
 #define vm_AtomsTable_h
 
+#include "gc/Barrier.h"
 #include "js/GCHashTable.h"
 #include "js/TypeDecls.h"
 #include "js/Vector.h"
-#include "vm/JSAtom.h"
+#include "vm/StringType.h"
 
 /*
  * The atoms table is a mapping from strings to JSAtoms that supports
@@ -26,14 +27,24 @@ namespace js {
 struct AtomHasher {
   struct Lookup;
   static inline HashNumber hash(const Lookup& l);
-  static MOZ_ALWAYS_INLINE bool match(const WeakHeapPtrAtom& entry,
+  static MOZ_ALWAYS_INLINE bool match(const WeakHeapPtr<JSAtom*>& entry,
                                       const Lookup& lookup);
-  static void rekey(WeakHeapPtrAtom& k, const WeakHeapPtrAtom& newKey) {
+  static void rekey(WeakHeapPtr<JSAtom*>& k,
+                    const WeakHeapPtr<JSAtom*>& newKey) {
     k = newKey;
   }
 };
 
-using AtomSet = JS::GCHashSet<WeakHeapPtrAtom, AtomHasher, SystemAllocPolicy>;
+// Note: Use a 'class' here to make forward declarations easier to use.
+class AtomSet : public JS::GCHashSet<WeakHeapPtr<JSAtom*>, AtomHasher,
+                                     SystemAllocPolicy> {
+  using Base =
+      JS::GCHashSet<WeakHeapPtr<JSAtom*>, AtomHasher, SystemAllocPolicy>;
+
+ public:
+  AtomSet() = default;
+  explicit AtomSet(size_t length) : Base(length){};
+};
 
 // This class is a wrapper for AtomSet that is used to ensure the AtomSet is
 // not modified. It should only expose read-only methods from AtomSet.
@@ -82,7 +93,7 @@ class AtomsTable {
   bool init();
 
   template <typename CharT>
-  MOZ_ALWAYS_INLINE JSAtom* atomizeAndCopyChars(
+  MOZ_ALWAYS_INLINE JSAtom* atomizeAndCopyCharsNonStaticValidLength(
       JSContext* cx, const CharT* chars, size_t length,
       const mozilla::Maybe<uint32_t>& indexValue,
       const AtomHasher::Lookup& lookup);

@@ -6,6 +6,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/Assertions.h"  // MOZ_RELEASE_ASSERT
+#include "mozilla/RefPtr.h"      // RefPtr
 #include "mozilla/Utf8.h"        // mozilla::Utf8Unit
 
 #include <algorithm>  // std::all_of, std::equal, std::move, std::transform
@@ -19,12 +20,12 @@
 
 #include "gc/GC.h"                        // js::gc::FinishGC
 #include "js/CompilationAndEvaluation.h"  // JS::Evaluate
-#include "js/CompileOptions.h"            // JS::CompileOptions
-#include "js/Conversions.h"               // JS::ToString
-#include "js/MemoryFunctions.h"           // JS_malloc
-#include "js/OffThreadScriptCompilation.h"  // JS::CompileOffThread, JS::OffThreadToken, JS::FinishOffThreadScript
-#include "js/RootingAPI.h"  // JS::MutableHandle, JS::Rooted
-#include "js/SourceText.h"  // JS::SourceOwnership, JS::SourceText
+#include "js/CompileOptions.h"  // JS::CompileOptions, JS::InstantiateOptions
+#include "js/Conversions.h"     // JS::ToString
+#include "js/experimental/JSStencil.h"  // JS::Stencil, JS::InstantiateGlobalStencil
+#include "js/MemoryFunctions.h"         // JS_malloc
+#include "js/RootingAPI.h"              // JS::MutableHandle, JS::Rooted
+#include "js/SourceText.h"              // JS::SourceOwnership, JS::SourceText
 #include "js/String.h"  // JS::GetLatin1LinearStringChars, JS::GetTwoByteLinearStringChars, JS::StringHasLatin1Chars
 #include "js/UniquePtr.h"  // js::UniquePtr
 #include "js/Utility.h"    // JS::FreePolicy
@@ -495,50 +496,3 @@ BEGIN_TEST(testScriptSourceCompression_automatic) {
   return true;
 }
 END_TEST(testScriptSourceCompression_automatic)
-
-BEGIN_TEST(testScriptSourceCompression_offThread) {
-  constexpr size_t len = MinimumCompressibleLength + 55;
-  auto chars = MakeSourceAllWhitespace<char16_t>(cx, len);
-  CHECK(chars);
-
-  JS::SourceText<char16_t> source;
-  CHECK(source.init(cx, std::move(chars), len));
-
-  js::Monitor monitor(js::mutexid::ShellOffThreadState);
-  JS::CompileOptions options(cx);
-  JS::OffThreadToken* token;
-
-  // Force off-thread even though if this is a small file.
-  options.forceAsync = true;
-
-  CHECK(token = JS::CompileOffThread(cx, options, source, callback, &monitor));
-
-  {
-    // Finish any active GC in case it is blocking off-thread work.
-    js::gc::FinishGC(cx);
-
-    js::AutoLockMonitor lock(monitor);
-    lock.wait();
-  }
-
-  JS::Rooted<JSScript*> script(cx, JS::FinishOffThreadScript(cx, token));
-  CHECK(script);
-
-  // Check that source compression was triggered by the compile. If the
-  // off-thread source compression system is globally disabled, the source will
-  // remain uncompressed.
-  js::RunPendingSourceCompressions(cx->runtime());
-  bool expected = js::IsOffThreadSourceCompressionEnabled();
-  CHECK(script->scriptSource()->hasCompressedSource() == expected);
-
-  return true;
-}
-
-static void callback(JS::OffThreadToken* token, void* context) {
-  js::Monitor& monitor = *static_cast<js::Monitor*>(context);
-
-  js::AutoLockMonitor lock(monitor);
-  lock.notify();
-}
-
-END_TEST(testScriptSourceCompression_offThread)

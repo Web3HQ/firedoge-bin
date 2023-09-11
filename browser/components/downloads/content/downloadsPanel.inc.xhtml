@@ -2,8 +2,8 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
-
-<commandset>
+<commandset commandupdater="true" events="richlistbox-select"
+            oncommandupdate="goUpdateCommand('cmd_delete');">
   <command id="downloadsCmd_doDefault"
            oncommand="goDoCommand('downloadsCmd_doDefault')"/>
   <command id="downloadsCmd_pauseResume"
@@ -46,6 +46,8 @@
            oncommand="goDoCommand('downloadsCmd_alwaysOpenInSystemViewer')"/>
   <command id="downloadsCmd_alwaysOpenSimilarFiles"
            oncommand="goDoCommand('downloadsCmd_alwaysOpenSimilarFiles')"/>
+  <command id="downloadsCmd_deleteFile"
+           oncommand="goDoCommand('downloadsCmd_deleteFile')"/>
 </commandset>
 
 <!-- For accessibility to screen readers, we use a label on the panel instead
@@ -96,12 +98,17 @@
     <menuseparator class="downloadCommandsSeparator"/>
 
     <menuitem command="downloadsCmd_openReferrer"
+              class="downloadOpenReferrerMenuItem"
               data-l10n-id="downloads-cmd-go-to-download-page"/>
     <menuitem command="downloadsCmd_copyLocation"
+              class="downloadCopyLocationMenuItem"
               data-l10n-id="downloads-cmd-copy-download-link"/>
 
     <menuseparator/>
 
+    <menuitem command="downloadsCmd_deleteFile"
+              class="downloadDeleteFileMenuItem"
+              data-l10n-id="downloads-cmd-delete-file"/>
     <menuitem command="cmd_delete"
               class="downloadRemoveFromHistoryMenuItem"
               data-l10n-id="downloads-cmd-remove-from-history"/>
@@ -113,7 +120,8 @@
   </menupopup>
 
   <panelmultiview id="downloadsPanel-multiView"
-                  mainViewId="downloadsPanel-mainView">
+                  mainViewId="downloadsPanel-mainView"
+                  disablekeynav="true">
 
     <panelview id="downloadsPanel-mainView">
       <vbox class="panel-view-body-unscrollable">
@@ -162,7 +170,6 @@
 
     <panelview id="downloadsPanel-blockedSubview"
                data-l10n-id="downloads-details"
-               descriptionheightworkaround="true"
                class="PanelUI-subView">
       <vbox class="panel-view-body-unscrollable">
         <hbox class="downloadsPanel-blockedSubview-title-box">
@@ -172,19 +179,16 @@
         <description id="downloadsPanel-blockedSubview-details1"/>
         <description id="downloadsPanel-blockedSubview-details2"/>
       </vbox>
-      <hbox id="downloadsPanel-blockedSubview-buttons"
-            class="panel-footer"
-            align="stretch">
+      <html:moz-button-group id="downloadsPanel-blockedSubview-buttons"
+            class="panel-footer">
         <button id="downloadsPanel-blockedSubview-unblockButton"
-                class="downloadsPanelFooterButton"
-                command="downloadsCmd_unblockAndOpen"
-                flex="1"/>
+                class="panel-footer-button"
+                command="downloadsCmd_unblockAndOpen"/>
         <button id="downloadsPanel-blockedSubview-deleteButton"
-                class="downloadsPanelFooterButton"
+                class="panel-footer-button"
                 oncommand="DownloadsBlockedSubview.confirmBlock();"
-                default="true"
-                flex="1"/>
-      </hbox>
+                default="true"/>
+      </html:moz-button-group>
     </panelview>
   </panelmultiview>
 

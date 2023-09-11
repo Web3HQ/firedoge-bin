@@ -19,6 +19,7 @@
 #include "gfx2DGlue.h"
 #include "gfxPlatform.h"
 #include "imgFrame.h"
+#include "mozilla/AppShutdown.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/CheckedInt.h"
@@ -28,7 +29,7 @@
 #include "mozilla/StaticMutex.h"
 #include "mozilla/StaticPrefs_image.h"
 #include "mozilla/StaticPtr.h"
-#include "mozilla/Tuple.h"
+
 #include "nsExpirationTracker.h"
 #include "nsHashKeys.h"
 #include "nsIMemoryReporter.h"
@@ -60,7 +61,7 @@ class SurfaceCacheImpl;
 static StaticRefPtr<SurfaceCacheImpl> sInstance;
 
 // The mutex protecting the surface cache.
-static StaticMutex sInstanceMutex;
+static StaticMutex sInstanceMutex MOZ_UNANNOTATED;
 
 ///////////////////////////////////////////////////////////////////////////////
 // SurfaceCache Implementation
@@ -132,6 +133,10 @@ class CachedSurface {
       return DrawableSurface();
     }
 
+    return mProvider->Surface();
+  }
+
+  DrawableSurface GetDrawableSurfaceEvenIfPlaceholder() const {
     return mProvider->Surface();
   }
 
@@ -325,19 +330,21 @@ class ImageSurfaceCache {
    *          an IntSize which is the size the caller should choose to decode
    *          at should it attempt to do so.
    */
-  Tuple<already_AddRefed<CachedSurface>, MatchType, IntSize> LookupBestMatch(
-      const SurfaceKey& aIdealKey) {
+  std::tuple<already_AddRefed<CachedSurface>, MatchType, IntSize>
+  LookupBestMatch(const SurfaceKey& aIdealKey) {
     // Try for an exact match first.
     RefPtr<CachedSurface> exactMatch;
     mSurfaces.Get(aIdealKey, getter_AddRefs(exactMatch));
     if (exactMatch) {
       if (exactMatch->IsDecoded()) {
-        return MakeTuple(exactMatch.forget(), MatchType::EXACT, IntSize());
+        return std::make_tuple(exactMatch.forget(), MatchType::EXACT,
+                               IntSize());
       }
     } else if (aIdealKey.Region()) {
       // We cannot substitute if we have a region. Allow it to create an exact
       // match.
-      return MakeTuple(exactMatch.forget(), MatchType::NOT_FOUND, IntSize());
+      return std::make_tuple(exactMatch.forget(), MatchType::NOT_FOUND,
+                             IntSize());
     } else if (!mFactor2Mode) {
       // If no exact match is found, and we are not in factor of 2 mode, then
       // we know that we will trigger a decode because at best we will provide
@@ -353,8 +360,9 @@ class ImageSurfaceCache {
         mSurfaces.Get(compactKey, getter_AddRefs(exactMatch));
         if (exactMatch && exactMatch->IsDecoded()) {
           MOZ_ASSERT(suggestedSize != aIdealKey.Size());
-          return MakeTuple(exactMatch.forget(),
-                           MatchType::SUBSTITUTE_BECAUSE_BEST, suggestedSize);
+          return std::make_tuple(exactMatch.forget(),
+                                 MatchType::SUBSTITUTE_BECAUSE_BEST,
+                                 suggestedSize);
         }
       }
     }
@@ -434,7 +442,7 @@ class ImageSurfaceCache {
       }
     }
 
-    return MakeTuple(bestMatch.forget(), matchType, suggestedSize);
+    return std::make_tuple(bestMatch.forget(), matchType, suggestedSize);
   }
 
   void MaybeSetFactor2Mode() {
@@ -470,17 +478,6 @@ class ImageSurfaceCache {
     // other sized surfaces are requested, in addition to the native sizes).
     thresholdSurfaces += nativeSizes;
     if (mSurfaces.Count() <= static_cast<uint32_t>(thresholdSurfaces)) {
-      return;
-    }
-
-    // Get our native size. While we know the image should be fully decoded,
-    // if it is an SVG, it is valid to have a zero size. We can't do compacting
-    // in that case because we need to know the width/height ratio to define a
-    // candidate set.
-    IntSize nativeSize;
-    if (NS_FAILED(image->GetWidth(&nativeSize.width)) ||
-        NS_FAILED(image->GetHeight(&nativeSize.height)) ||
-        nativeSize.IsEmpty()) {
       return;
     }
 
@@ -593,11 +590,19 @@ class ImageSurfaceCache {
     if (NS_FAILED(image->GetWidth(&factorSize.width)) ||
         NS_FAILED(image->GetHeight(&factorSize.height)) ||
         factorSize.IsEmpty()) {
-      // We should not have entered factor of 2 mode without a valid size, and
-      // several successfully decoded surfaces. Note that valid vector images
-      // may have a default size of 0x0, and those are not yet supported.
-      MOZ_ASSERT_UNREACHABLE("Expected valid native size!");
-      return aSize;
+      // Valid vector images may have a default size of 0x0. In that case, just
+      // assume a default size of 100x100 and apply the intrinsic ratio if
+      // available. If our guess was too small, don't use factor-of-scaling.
+      MOZ_ASSERT(mIsVectorImage);
+      factorSize = IntSize(100, 100);
+      Maybe<AspectRatio> aspectRatio = image->GetIntrinsicRatio();
+      if (aspectRatio && *aspectRatio) {
+        factorSize.width =
+            NSToIntRound(aspectRatio->ApplyToFloat(float(factorSize.height)));
+        if (factorSize.IsEmpty()) {
+          return aSize;
+        }
+      }
     }
 
     if (mIsVectorImage) {
@@ -1027,7 +1032,7 @@ class SurfaceCacheImpl final : public nsIMemoryReporter {
     MatchType matchType = MatchType::NOT_FOUND;
     IntSize suggestedSize;
     while (true) {
-      Tie(surface, matchType, suggestedSize) =
+      std::tie(surface, matchType, suggestedSize) =
           cache->LookupBestMatch(aSurfaceKey);
 
       if (!surface) {
@@ -1227,6 +1232,21 @@ class SurfaceCacheImpl final : public nsIMemoryReporter {
     aDiscard = std::move(mCachedSurfacesDiscard);
   }
 
+  already_AddRefed<CachedSurface> GetSurfaceForResetAnimation(
+      const ImageKey aImageKey, const SurfaceKey& aSurfaceKey,
+      const StaticMutexAutoLock& aAutoLock) {
+    RefPtr<CachedSurface> surface;
+
+    RefPtr<ImageSurfaceCache> cache = GetImageCache(aImageKey);
+    if (!cache) {
+      // No cached surfaces for this image.
+      return surface.forget();
+    }
+
+    surface = cache->Lookup(aSurfaceKey, /* aForAccess = */ false);
+    return surface.forget();
+  }
+
   void LockSurface(NotNull<CachedSurface*> aSurface,
                    const StaticMutexAutoLock& aAutoLock) {
     if (aSurface->IsPlaceholder() || aSurface->IsLocked()) {
@@ -1382,7 +1402,8 @@ class SurfaceCacheImpl final : public nsIMemoryReporter {
     bool needsDispatch = mReleasingImagesOnMainThread.IsEmpty();
     mReleasingImagesOnMainThread.AppendElement(image);
 
-    if (!needsDispatch || gXPCOMThreadsShutDown) {
+    if (!needsDispatch ||
+        AppShutdown::IsInOrBeyond(ShutdownPhase::XPCOMShutdownFinal)) {
       // Either there is already a ongoing task for ClearReleasingImages() or
       // it's too late in shutdown to dispatch.
       return;
@@ -1604,7 +1625,9 @@ void SurfaceCache::Initialize() {
   // Compute the size of the surface cache.
   uint64_t memorySize = PR_GetPhysicalMemorySize();
   if (memorySize == 0) {
+#if !defined(__DragonFly__)
     MOZ_ASSERT_UNREACHABLE("PR_GetPhysicalMemorySize not implemented here");
+#endif
     memorySize = 256 * 1024 * 1024;  // Fall back to 256MB.
   }
   uint64_t proposedSize = memorySize / surfaceCacheSizeFactor;
@@ -1797,6 +1820,39 @@ void SurfaceCache::DiscardAll() {
 }
 
 /* static */
+void SurfaceCache::ResetAnimation(const ImageKey aImageKey,
+                                  const SurfaceKey& aSurfaceKey) {
+  RefPtr<CachedSurface> surface;
+  nsTArray<RefPtr<CachedSurface>> discard;
+  {
+    StaticMutexAutoLock lock(sInstanceMutex);
+    if (!sInstance) {
+      return;
+    }
+
+    surface =
+        sInstance->GetSurfaceForResetAnimation(aImageKey, aSurfaceKey, lock);
+    sInstance->TakeDiscard(discard, lock);
+  }
+
+  // Calling Reset will acquire the AnimationSurfaceProvider::mFramesMutex
+  // mutex. In other places we acquire the mFramesMutex then call into the
+  // surface cache (acquiring the surface cache mutex), so that determines a
+  // lock order which we must obey by calling Reset after releasing the surface
+  // cache mutex.
+  if (surface) {
+    DrawableSurface drawableSurface =
+        surface->GetDrawableSurfaceEvenIfPlaceholder();
+    if (drawableSurface) {
+      MOZ_ASSERT(surface->GetSurfaceKey() == aSurfaceKey,
+                 "ResetAnimation() not returning an exact match?");
+
+      drawableSurface.Reset();
+    }
+  }
+}
+
+/* static */
 void SurfaceCache::CollectSizeOfSurfaces(
     const ImageKey aImageKey, nsTArray<SurfaceMemoryCounter>& aCounters,
     MallocSizeOf aMallocSizeOf) {
@@ -1884,7 +1940,7 @@ void SurfaceCache::ReleaseImageOnMainThread(
 
   // Don't try to dispatch the release after shutdown, we'll just leak the
   // runnable.
-  if (gXPCOMThreadsShutDown) {
+  if (AppShutdown::IsInOrBeyond(ShutdownPhase::XPCOMShutdownFinal)) {
     return;
   }
 

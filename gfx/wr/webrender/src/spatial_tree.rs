@@ -3,20 +3,21 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use api::{ExternalScrollId, PropertyBinding, ReferenceFrameKind, TransformStyle, PropertyBindingId};
-use api::{PipelineId, ScrollClamping, SpatialTreeItemKey};
+use api::{APZScrollGeneration, HasScrollLinkedEffect, PipelineId, SampledScrollOffset, SpatialTreeItemKey};
 use api::units::*;
 use euclid::Transform3D;
 use crate::gpu_types::TransformPalette;
-use crate::internal_types::{FastHashMap, FastHashSet};
+use crate::internal_types::{FastHashMap, FastHashSet, PipelineInstanceId};
 use crate::print_tree::{PrintableTree, PrintTree, PrintTreePrinter};
 use crate::scene::SceneProperties;
-use crate::spatial_node::{SpatialNode, SpatialNodeType, StickyFrameInfo, SpatialNodeDescriptor};
+use crate::spatial_node::{ReferenceFrameInfo, SpatialNode, SpatialNodeType, StickyFrameInfo, SpatialNodeDescriptor};
 use crate::spatial_node::{SpatialNodeUid, ScrollFrameKind, SceneSpatialNode, SpatialNodeInfo, SpatialNodeUidKind};
 use std::{ops, u32};
 use crate::util::{FastTransform, LayoutToWorldFastTransform, MatrixHelpers, ScaleOffset, scale_factors};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use crate::util::TransformedRectKind;
+use peek_poke::PeekPoke;
 
 
 /// An id that identifies coordinate systems in the SpatialTree. Each
@@ -51,13 +52,20 @@ impl CoordinateSystem {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, Hash, MallocSizeOf, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, Hash, MallocSizeOf, PartialEq, PeekPoke, Default)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-pub struct SpatialNodeIndex(u32);
+pub struct SpatialNodeIndex(pub u32);
 
 impl SpatialNodeIndex {
     pub const INVALID: SpatialNodeIndex = SpatialNodeIndex(u32::MAX);
+
+    /// May be set on a cluster / picture during scene building if the spatial
+    /// node is not known at this time. It must be set to a valid value before
+    /// scene building is complete (by `finalize_picture`). In future, we could
+    /// make this type-safe with a wrapper type to ensure we know when a spatial
+    /// node index may have an unknown value.
+    pub const UNKNOWN: SpatialNodeIndex = SpatialNodeIndex(u32::MAX - 1);
 }
 
 // In some cases, the conversion from CSS pixels to device pixels can result in small
@@ -249,6 +257,7 @@ impl SceneSpatialTree {
             ReferenceFrameKind::Transform {
                 should_snap: true,
                 is_2d_scale_translation: true,
+                paired_with_perspective: false,
             },
             LayoutVector2D::zero(),
             PipelineId::dummy(),
@@ -435,7 +444,7 @@ impl SceneSpatialTree {
 
                 let existing_node = &self.spatial_nodes[e.index];
 
-                if existing_node.descriptor != node.descriptor || existing_node.parent != node.parent {
+                if *existing_node != node {
                     self.updates.updates.push(SpatialTreeUpdate::Update {
                         index: e.index,
                         parent: node.parent,
@@ -531,6 +540,8 @@ impl SceneSpatialTree {
         content_size: &LayoutSize,
         frame_kind: ScrollFrameKind,
         external_scroll_offset: LayoutVector2D,
+        scroll_offset_generation: APZScrollGeneration,
+        has_scroll_linked_effect: HasScrollLinkedEffect,
         uid: SpatialNodeUid,
     ) -> SpatialNodeIndex {
         // Scroll frames are only 2d translations - they can't introduce a new static coord system
@@ -544,6 +555,8 @@ impl SceneSpatialTree {
             content_size,
             frame_kind,
             external_scroll_offset,
+            scroll_offset_generation,
+            has_scroll_linked_effect,
             is_root_coord_system,
         );
         self.add_spatial_node(node, uid)
@@ -555,10 +568,11 @@ impl SceneSpatialTree {
         sticky_frame_info: StickyFrameInfo,
         pipeline_id: PipelineId,
         key: SpatialTreeItemKey,
+        instance_id: PipelineInstanceId,
     ) -> SpatialNodeIndex {
         // Sticky frames are only 2d translations - they can't introduce a new static coord system
         let is_root_coord_system = self.spatial_nodes[parent_index.0 as usize].is_root_coord_system;
-        let uid = SpatialNodeUid::external(key, pipeline_id);
+        let uid = SpatialNodeUid::external(key, pipeline_id, instance_id);
 
         let node = SceneSpatialNode::new_sticky_frame(
             parent_index,
@@ -704,6 +718,14 @@ impl<Src, Dst> CoordinateSpaceMapping<Src, Dst> {
             CoordinateSpaceMapping::Local |
             CoordinateSpaceMapping::ScaleOffset(_) => true,
             CoordinateSpaceMapping::Transform(ref transform) => transform.preserves_2d_axis_alignment(),
+        }
+    }
+
+    pub fn is_2d_scale_translation(&self) -> bool {
+        match *self {
+            CoordinateSpaceMapping::Local |
+            CoordinateSpaceMapping::ScaleOffset(_) => true,
+            CoordinateSpaceMapping::Transform(ref transform) => transform.is_2d_scale_translation(),
         }
     }
 
@@ -884,12 +906,40 @@ impl SpatialTree {
         self.visit_nodes_mut(|_, node| {
             match node.node_type {
                 SpatialNodeType::ScrollFrame(ref mut info) => {
-                    info.offset = -info.external_scroll_offset;
+                    info.offsets = vec![SampledScrollOffset{
+                        offset: -info.external_scroll_offset,
+                        generation: info.offset_generation,
+                    }];
                 }
                 SpatialNodeType::StickyFrame(ref mut info) => {
                     info.current_offset = LayoutVector2D::zero();
                 }
                 SpatialNodeType::ReferenceFrame(..) => {}
+            }
+        });
+    }
+
+    pub fn get_last_sampled_scroll_offsets(
+        &self,
+    ) -> FastHashMap<ExternalScrollId, Vec<SampledScrollOffset>> {
+        let mut result = FastHashMap::default();
+        self.visit_nodes(|_, node| {
+            if let SpatialNodeType::ScrollFrame(ref scrolling) = node.node_type {
+                result.insert(scrolling.external_id, scrolling.offsets.clone());
+            }
+        });
+        result
+    }
+
+    pub fn apply_last_sampled_scroll_offsets(
+        &mut self,
+        last_sampled_offsets: FastHashMap<ExternalScrollId, Vec<SampledScrollOffset>>,
+    ) {
+        self.visit_nodes_mut(|_, node| {
+            if let SpatialNodeType::ScrollFrame(ref mut scrolling) = node.node_type {
+                if let Some(offsets) = last_sampled_offsets.get(&scrolling.external_id) {
+                    scrolling.offsets = offsets.clone();
+                }
             }
         });
     }
@@ -1065,21 +1115,20 @@ impl SpatialTree {
         self.root_reference_frame_index
     }
 
-    pub fn scroll_node(
+    pub fn set_scroll_offsets(
         &mut self,
-        origin: LayoutPoint,
         id: ExternalScrollId,
-        clamp: ScrollClamping
+        offsets: Vec<SampledScrollOffset>,
     ) -> bool {
-        let mut did_scroll_node = false;
+        let mut did_change = false;
 
         self.visit_nodes_mut(|_, node| {
             if node.matches_external_id(id) {
-                did_scroll_node |= node.set_scroll_origin(&origin, clamp);
+                did_change |= node.set_scroll_offsets(offsets.clone());
             }
         });
 
-        did_scroll_node
+        did_change
     }
 
     pub fn update_tree(
@@ -1182,12 +1231,16 @@ impl SpatialTree {
                 pt.new_level(format!("StickyFrame"));
                 pt.add_item(format!("sticky info: {:?}", sticky_frame_info));
             }
-            SpatialNodeType::ScrollFrame(scrolling_info) => {
+            SpatialNodeType::ScrollFrame(ref scrolling_info) => {
                 pt.new_level(format!("ScrollFrame"));
                 pt.add_item(format!("viewport: {:?}", scrolling_info.viewport_rect));
                 pt.add_item(format!("scrollable_size: {:?}", scrolling_info.scrollable_size));
-                pt.add_item(format!("scroll offset: {:?}", scrolling_info.offset));
+                pt.add_item(format!("scroll offset: {:?}", scrolling_info.offset()));
                 pt.add_item(format!("external_scroll_offset: {:?}", scrolling_info.external_scroll_offset));
+                pt.add_item(format!("offset generation: {:?}", scrolling_info.offset_generation));
+                if scrolling_info.has_scroll_linked_effect == HasScrollLinkedEffect::Yes {
+                    pt.add_item("has scroll-linked effect".to_string());
+                }
                 pt.add_item(format!("kind: {:?}", scrolling_info.frame_kind));
             }
             SpatialNodeType::ReferenceFrame(ref info) => {
@@ -1216,7 +1269,31 @@ impl SpatialTree {
     pub fn get_local_visible_face(&self, node_index: SpatialNodeIndex) -> VisibleFace {
         let node = self.get_spatial_node(node_index);
         let mut face = VisibleFace::Front;
-        if let Some(parent_index) = node.parent {
+        if let Some(mut parent_index) = node.parent {
+            // Check if the parent is perspective. In CSS, a stacking context may
+            // have both perspective and a regular transformation. Gecko translates the
+            // perspective into a different `nsDisplayPerspective` and `nsDisplayTransform` items.
+            // On WebRender side, we end up with 2 different reference frames:
+            // one has kind of "transform", and it's parented to another of "perspective":
+            // https://searchfox.org/mozilla-central/rev/72c7cef167829b6f1e24cae216fa261934c455fc/layout/generic/nsIFrame.cpp#3716
+            if let SpatialNodeType::ReferenceFrame(ReferenceFrameInfo { kind: ReferenceFrameKind::Transform {
+                paired_with_perspective: true,
+                ..
+            }, .. }) = node.node_type {
+                let parent = self.get_spatial_node(parent_index);
+                match parent.node_type {
+                    SpatialNodeType::ReferenceFrame(ReferenceFrameInfo {
+                        kind: ReferenceFrameKind::Perspective { .. },
+                        ..
+                    }) => {
+                        parent_index = parent.parent.unwrap();
+                    }
+                    _ => {
+                        log::error!("Unexpected parent {:?} is not perspective", parent_index);
+                    }
+                }
+            }
+
             self.get_relative_transform_with_face(node_index, parent_index, Some(&mut face));
         }
         face
@@ -1232,7 +1309,7 @@ impl SpatialTree {
             }
             // If running in Gecko, set RUST_LOG=webrender::spatial_tree=debug
             // to get this logging to be emitted to stderr/logcat.
-            println!("{}", std::str::from_utf8(&buf).unwrap_or("(Tree printer emitted non-utf8)"));
+            debug!("{}", std::str::from_utf8(&buf).unwrap_or("(Tree printer emitted non-utf8)"));
         }
     }
 }
@@ -1328,6 +1405,8 @@ fn add_reference_frame(
     origin_in_parent_reference_frame: LayoutVector2D,
     key: SpatialTreeItemKey,
 ) -> SpatialNodeIndex {
+    let pid = PipelineInstanceId::new(0);
+
     cst.add_reference_frame(
         parent,
         TransformStyle::Preserve3D,
@@ -1335,10 +1414,11 @@ fn add_reference_frame(
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: false,
             should_snap: false,
+            paired_with_perspective: false,
         },
         origin_in_parent_reference_frame,
         PipelineId::dummy(),
-        SpatialNodeUid::external(key, PipelineId::dummy()),
+        SpatialNodeUid::external(key, PipelineId::dummy(), pid),
     )
 }
 
@@ -1620,6 +1700,7 @@ fn test_is_ancestor1() {
 #[test]
 fn test_find_scroll_root_simple() {
     let mut st = SceneSpatialTree::new();
+    let pid = PipelineInstanceId::new(0);
 
     let root = st.add_reference_frame(
         st.root_reference_frame_index(),
@@ -1628,10 +1709,11 @@ fn test_find_scroll_root_simple() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: true,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy(), pid),
     );
 
     let scroll = st.add_scroll_frame(
@@ -1642,7 +1724,9 @@ fn test_find_scroll_root_simple() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid),
     );
 
     assert_eq!(st.find_scroll_root(scroll), scroll);
@@ -1652,6 +1736,7 @@ fn test_find_scroll_root_simple() {
 #[test]
 fn test_find_scroll_root_sub_scroll_frame() {
     let mut st = SceneSpatialTree::new();
+    let pid = PipelineInstanceId::new(0);
 
     let root = st.add_reference_frame(
         st.root_reference_frame_index(),
@@ -1660,10 +1745,11 @@ fn test_find_scroll_root_sub_scroll_frame() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: true,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy(), pid),
     );
 
     let root_scroll = st.add_scroll_frame(
@@ -1674,7 +1760,9 @@ fn test_find_scroll_root_sub_scroll_frame() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid),
     );
 
     let sub_scroll = st.add_scroll_frame(
@@ -1685,7 +1773,9 @@ fn test_find_scroll_root_sub_scroll_frame() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy(), pid),
     );
 
     assert_eq!(st.find_scroll_root(sub_scroll), root_scroll);
@@ -1695,6 +1785,7 @@ fn test_find_scroll_root_sub_scroll_frame() {
 #[test]
 fn test_find_scroll_root_not_scrollable() {
     let mut st = SceneSpatialTree::new();
+    let pid = PipelineInstanceId::new(0);
 
     let root = st.add_reference_frame(
         st.root_reference_frame_index(),
@@ -1703,10 +1794,11 @@ fn test_find_scroll_root_not_scrollable() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: true,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy(), pid),
     );
 
     let root_scroll = st.add_scroll_frame(
@@ -1717,7 +1809,9 @@ fn test_find_scroll_root_not_scrollable() {
         &LayoutSize::new(400.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid),
     );
 
     let sub_scroll = st.add_scroll_frame(
@@ -1728,7 +1822,9 @@ fn test_find_scroll_root_not_scrollable() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy(), pid),
     );
 
     assert_eq!(st.find_scroll_root(sub_scroll), sub_scroll);
@@ -1738,6 +1834,7 @@ fn test_find_scroll_root_not_scrollable() {
 #[test]
 fn test_find_scroll_root_too_small() {
     let mut st = SceneSpatialTree::new();
+    let pid = PipelineInstanceId::new(0);
 
     let root = st.add_reference_frame(
         st.root_reference_frame_index(),
@@ -1746,10 +1843,11 @@ fn test_find_scroll_root_too_small() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: true,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy(), pid),
     );
 
     let root_scroll = st.add_scroll_frame(
@@ -1760,7 +1858,9 @@ fn test_find_scroll_root_too_small() {
         &LayoutSize::new(1000.0, 1000.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid),
     );
 
     let sub_scroll = st.add_scroll_frame(
@@ -1771,7 +1871,9 @@ fn test_find_scroll_root_too_small() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy(), pid),
     );
 
     assert_eq!(st.find_scroll_root(sub_scroll), sub_scroll);
@@ -1782,6 +1884,7 @@ fn test_find_scroll_root_too_small() {
 #[test]
 fn test_find_scroll_root_perspective() {
     let mut st = SceneSpatialTree::new();
+    let pid = PipelineInstanceId::new(0);
 
     let root = st.add_reference_frame(
         st.root_reference_frame_index(),
@@ -1790,10 +1893,11 @@ fn test_find_scroll_root_perspective() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: true,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy(), pid),
     );
 
     let root_scroll = st.add_scroll_frame(
@@ -1804,7 +1908,9 @@ fn test_find_scroll_root_perspective() {
         &LayoutSize::new(400.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid),
     );
 
     let perspective = st.add_reference_frame(
@@ -1816,7 +1922,7 @@ fn test_find_scroll_root_perspective() {
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy(), pid),
     );
 
     let sub_scroll = st.add_scroll_frame(
@@ -1827,7 +1933,9 @@ fn test_find_scroll_root_perspective() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 3), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 3), PipelineId::dummy(), pid),
     );
 
     assert_eq!(st.find_scroll_root(sub_scroll), root_scroll);
@@ -1838,6 +1946,7 @@ fn test_find_scroll_root_perspective() {
 #[test]
 fn test_find_scroll_root_2d_scale() {
     let mut st = SceneSpatialTree::new();
+    let pid = PipelineInstanceId::new(0);
 
     let root = st.add_reference_frame(
         st.root_reference_frame_index(),
@@ -1846,10 +1955,11 @@ fn test_find_scroll_root_2d_scale() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: true,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 0), PipelineId::dummy(), pid),
     );
 
     let root_scroll = st.add_scroll_frame(
@@ -1860,7 +1970,9 @@ fn test_find_scroll_root_2d_scale() {
         &LayoutSize::new(400.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid),
     );
 
     let scale = st.add_reference_frame(
@@ -1870,10 +1982,11 @@ fn test_find_scroll_root_2d_scale() {
         ReferenceFrameKind::Transform {
             is_2d_scale_translation: true,
             should_snap: false,
+            paired_with_perspective: false,
         },
         LayoutVector2D::new(0.0, 0.0),
         PipelineId::dummy(),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy()),
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 2), PipelineId::dummy(), pid),
     );
 
     let sub_scroll = st.add_scroll_frame(
@@ -1884,7 +1997,9 @@ fn test_find_scroll_root_2d_scale() {
         &LayoutSize::new(800.0, 400.0),
         ScrollFrameKind::Explicit,
         LayoutVector2D::new(0.0, 0.0),
-        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 3), PipelineId::dummy()),
+        APZScrollGeneration::default(),
+        HasScrollLinkedEffect::No,
+        SpatialNodeUid::external(SpatialTreeItemKey::new(0, 3), PipelineId::dummy(), pid),
     );
 
     assert_eq!(st.find_scroll_root(sub_scroll), sub_scroll);

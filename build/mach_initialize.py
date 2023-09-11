@@ -2,13 +2,11 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import division, print_function, unicode_literals
-
 import math
 import os
-import platform
 import shutil
 import sys
+from pathlib import Path
 
 if sys.version_info[0] < 3:
     import __builtin__ as builtins
@@ -16,13 +14,10 @@ if sys.version_info[0] < 3:
     class MetaPathFinder(object):
         pass
 
-
 else:
     from importlib.abc import MetaPathFinder
 
-
 from types import ModuleType
-
 
 STATE_DIR_FIRST_RUN = """
 Mach and the build system store shared state in a common directory
@@ -30,64 +25,10 @@ on the filesystem. The following directory will be created:
 
   {}
 
-If you would like to use a different directory, hit CTRL+c, set the
-MOZBUILD_STATE_PATH environment variable to the directory you'd like to
-use, and run Mach again.
-
-Press ENTER/RETURN to continue or CTRL+c to abort.
+If you would like to use a different directory, rename or move it to your
+desired location, and set the MOZBUILD_STATE_PATH environment variable
+accordingly.
 """.strip()
-
-
-# Individual files providing mach commands.
-MACH_MODULES = [
-    "build/valgrind/mach_commands.py",
-    "devtools/shared/css/generated/mach_commands.py",
-    "dom/bindings/mach_commands.py",
-    "js/src/devtools/rootAnalysis/mach_commands.py",
-    "layout/tools/reftest/mach_commands.py",
-    "mobile/android/mach_commands.py",
-    "python/mach/mach/commands/commandinfo.py",
-    "python/mach/mach/commands/settings.py",
-    "python/mach_commands.py",
-    "python/mozboot/mozboot/mach_commands.py",
-    "python/mozbuild/mozbuild/artifact_commands.py",
-    "python/mozbuild/mozbuild/backend/mach_commands.py",
-    "python/mozbuild/mozbuild/build_commands.py",
-    "python/mozbuild/mozbuild/code_analysis/mach_commands.py",
-    "python/mozbuild/mozbuild/compilation/codecomplete.py",
-    "python/mozbuild/mozbuild/frontend/mach_commands.py",
-    "python/mozbuild/mozbuild/vendor/mach_commands.py",
-    "python/mozbuild/mozbuild/mach_commands.py",
-    "python/mozperftest/mozperftest/mach_commands.py",
-    "python/mozrelease/mozrelease/mach_commands.py",
-    "remote/mach_commands.py",
-    "security/manager/tools/mach_commands.py",
-    "taskcluster/mach_commands.py",
-    "testing/awsy/mach_commands.py",
-    "testing/condprofile/mach_commands.py",
-    "testing/firefox-ui/mach_commands.py",
-    "testing/geckodriver/mach_commands.py",
-    "testing/mach_commands.py",
-    "testing/marionette/mach_commands.py",
-    "testing/mochitest/mach_commands.py",
-    "testing/mozharness/mach_commands.py",
-    "testing/raptor/mach_commands.py",
-    "testing/talos/mach_commands.py",
-    "testing/tps/mach_commands.py",
-    "testing/web-platform/mach_commands.py",
-    "testing/xpcshell/mach_commands.py",
-    "toolkit/components/telemetry/tests/marionette/mach_commands.py",
-    "toolkit/components/glean/build_scripts/mach_commands.py",
-    "tools/browsertime/mach_commands.py",
-    "tools/compare-locales/mach_commands.py",
-    "tools/lint/mach_commands.py",
-    "tools/mach_commands.py",
-    "tools/moztreedocs/mach_commands.py",
-    "tools/phabricator/mach_commands.py",
-    "tools/power/mach_commands.py",
-    "tools/tryselect/mach_commands.py",
-    "tools/vcs/mach_commands.py",
-]
 
 
 CATEGORIES = {
@@ -140,31 +81,6 @@ CATEGORIES = {
     },
 }
 
-INSTALL_PYTHON_GUIDANCE_LINUX = """
-See https://firefox-source-docs.mozilla.org/setup/linux_build.html#installingpython
-for guidance on how to install Python on your system.
-""".strip()
-
-INSTALL_PYTHON_GUIDANCE_OSX = """
-See https://firefox-source-docs.mozilla.org/setup/macos_build.html
-for guidance on how to prepare your system to build Firefox. Perhaps
-you need to update Xcode, or install Python using brew?
-""".strip()
-
-INSTALL_PYTHON_GUIDANCE_MOZILLABUILD = """
-Python is provided by MozillaBuild; ensure your MozillaBuild
-installation is up to date.
-See https://firefox-source-docs.mozilla.org/setup/windows_build.html#install-mozillabuild
-for details.
-""".strip()
-
-INSTALL_PYTHON_GUIDANCE_OTHER = """
-We do not have specific instructions for your platform on how to
-install Python. You may find Pyenv (https://github.com/pyenv/pyenv)
-helpful, if your system package manager does not provide a way to
-install a recent enough Python 3.
-""".strip()
-
 
 def _activate_python_environment(topsrcdir, get_state_dir):
     from mach.site import MachSiteManager
@@ -176,22 +92,51 @@ def _activate_python_environment(topsrcdir, get_state_dir):
     mach_environment.activate()
 
 
-def initialize(topsrcdir):
-    # Ensure we are running Python 3.6+. We run this check as soon as
-    # possible to avoid a cryptic import/usage error.
-    if sys.version_info < (3, 6):
-        print("Python 3.6+ is required to run mach.")
-        print("You are running Python", platform.python_version())
-        if sys.platform.startswith("linux"):
-            print(INSTALL_PYTHON_GUIDANCE_LINUX)
-        elif sys.platform.startswith("darwin"):
-            print(INSTALL_PYTHON_GUIDANCE_OSX)
-        elif "MOZILLABUILD" in os.environ:
-            print(INSTALL_PYTHON_GUIDANCE_MOZILLABUILD)
-        else:
-            print(INSTALL_PYTHON_GUIDANCE_OTHER)
-        sys.exit(1)
+def _maybe_activate_mozillabuild_environment():
+    if sys.platform != "win32":
+        return
 
+    mozillabuild = Path(os.environ.get("MOZILLABUILD", r"C:\mozilla-build"))
+    os.environ.setdefault("MOZILLABUILD", str(mozillabuild))
+    assert mozillabuild.exists(), (
+        f'MozillaBuild was not found at "{mozillabuild}".\n'
+        "If it's installed in a different location, please "
+        'set the "MOZILLABUILD" environment variable '
+        "accordingly."
+    )
+
+    use_msys2 = (mozillabuild / "msys2").exists()
+    if use_msys2:
+        mozillabuild_msys_tools_path = mozillabuild / "msys2" / "usr" / "bin"
+    else:
+        mozillabuild_msys_tools_path = mozillabuild / "msys" / "bin"
+
+    paths_to_add = [mozillabuild_msys_tools_path, mozillabuild / "bin"]
+    existing_paths = [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep)]
+    for new_path in paths_to_add:
+        if new_path not in existing_paths:
+            os.environ["PATH"] += f"{os.pathsep}{new_path}"
+
+
+def check_for_spaces(topsrcdir):
+    if " " in topsrcdir:
+        raise Exception(
+            f"Your checkout at path '{topsrcdir}' contains a space, which "
+            f"is not supported. Please move it to somewhere that does not "
+            f"have a space in the path before rerunning mach."
+        )
+
+    mozillabuild_dir = os.environ.get("MOZILLABUILD", "")
+    if sys.platform == "win32" and " " in mozillabuild_dir:
+        raise Exception(
+            f"Your installation of MozillaBuild appears to be installed on a path that "
+            f"contains a space ('{mozillabuild_dir}') which is not supported. Please "
+            f"reinstall MozillaBuild on a path without a space and restart your shell"
+            f"from the new installation."
+        )
+
+
+def initialize(topsrcdir, args=()):
     # This directory was deleted in bug 1666345, but there may be some ignored
     # files here. We can safely just delete it for the user so they don't have
     # to clean the repo themselves.
@@ -200,28 +145,58 @@ def initialize(topsrcdir):
         shutil.rmtree(deleted_dir, ignore_errors=True)
 
     # We need the "mach" module to access the logic to parse virtualenv
-    # requirements. Since that depends on "packaging" (and, transitively,
-    # "pyparsing"), we add those to the path too.
+    # requirements. Since that depends on "packaging", we add it to the path too.
     sys.path[0:0] = [
         os.path.join(topsrcdir, module)
         for module in (
             os.path.join("python", "mach"),
             os.path.join("third_party", "python", "packaging"),
-            os.path.join("third_party", "python", "pyparsing"),
         )
     ]
 
-    from mach.util import setenv, get_state_dir
+    from mach.util import get_state_dir, get_virtualenv_base_dir, setenv
 
     state_dir = _create_state_dir()
+
+    check_for_spaces(topsrcdir)
 
     # normpath state_dir to normalize msys-style slashes.
     _activate_python_environment(
         topsrcdir, lambda: os.path.normpath(get_state_dir(True, topsrcdir=topsrcdir))
     )
+    _maybe_activate_mozillabuild_environment()
 
-    import mach.base
     import mach.main
+    from mach.command_util import (
+        MACH_COMMANDS,
+        DetermineCommandVenvAction,
+        load_commands_from_spec,
+    )
+    from mach.main import get_argument_parser
+
+    parser = get_argument_parser(
+        action=DetermineCommandVenvAction,
+        topsrcdir=topsrcdir,
+    )
+    namespace = parser.parse_args()
+
+    command_name = getattr(namespace, "command_name", None)
+    site_name = getattr(namespace, "site_name", "common")
+    command_site_manager = None
+
+    # the 'clobber' command needs to run in the 'mach' venv, so we
+    # don't want to activate any other virtualenv for it.
+    if command_name != "clobber":
+        from mach.site import CommandSiteManager
+
+        command_site_manager = CommandSiteManager.from_environment(
+            topsrcdir,
+            lambda: os.path.normpath(get_state_dir(True, topsrcdir=topsrcdir)),
+            site_name,
+            get_virtualenv_base_dir(topsrcdir),
+        )
+
+        command_site_manager.activate()
 
     # Set a reasonable limit to the number of open files.
     #
@@ -346,7 +321,7 @@ def initialize(topsrcdir):
     if "MACH_MAIN_PID" not in os.environ:
         setenv("MACH_MAIN_PID", str(os.getpid()))
 
-    driver = mach.main.Mach(os.getcwd())
+    driver = mach.main.Mach(os.getcwd(), command_site_manager)
     driver.populate_context_handler = populate_context
 
     if not driver.settings_paths:
@@ -361,16 +336,53 @@ def initialize(topsrcdir):
     # Sparse checkouts may not have all mach_commands.py files. Ignore
     # errors from missing files. Same for spidermonkey tarballs.
     repo = resolve_repository()
-    missing_ok = (
-        repo is not None and repo.sparse_checkout_present()
-    ) or os.path.exists(os.path.join(topsrcdir, "INSTALL"))
+    if repo != "SOURCE":
+        missing_ok = (
+            repo is not None and repo.sparse_checkout_present()
+        ) or os.path.exists(os.path.join(topsrcdir, "INSTALL"))
+    else:
+        missing_ok = ()
 
-    for path in MACH_MODULES:
-        try:
-            driver.load_commands_from_file(os.path.join(topsrcdir, path))
-        except mach.base.MissingFileError:
-            if not missing_ok:
-                raise
+    commands_that_need_all_modules_loaded = [
+        "busted",
+        "help",
+        "mach-commands",
+        "mach-completion",
+        "mach-debug-commands",
+    ]
+
+    def commands_to_load(top_level_command: str):
+        visited = set()
+
+        def find_downstream_commands_recursively(command: str):
+            if not MACH_COMMANDS.get(command):
+                return
+
+            if command in visited:
+                return
+
+            visited.add(command)
+
+            for command_dependency in MACH_COMMANDS[command].command_dependencies:
+                find_downstream_commands_recursively(command_dependency)
+
+        find_downstream_commands_recursively(top_level_command)
+
+        return list(visited)
+
+    if (
+        command_name not in MACH_COMMANDS
+        or command_name in commands_that_need_all_modules_loaded
+    ):
+        command_modules_to_load = MACH_COMMANDS
+    else:
+        command_names_to_load = commands_to_load(command_name)
+        command_modules_to_load = {
+            command_name: MACH_COMMANDS[command_name]
+            for command_name in command_names_to_load
+        }
+
+    load_commands_from_spec(command_modules_to_load, topsrcdir, missing_ok=missing_ok)
 
     return driver
 
@@ -412,7 +424,8 @@ def _finalize_telemetry_glean(telemetry, is_bootstrap, success):
         # psutil may not be available (we may not have been able to download
         # a wheel or build it from source).
         system_metrics.logical_cores.add(logical_cores)
-        system_metrics.physical_cores.add(physical_cores)
+        if physical_cores is not None:
+            system_metrics.physical_cores.add(physical_cores)
         if memory_total is not None:
             system_metrics.memory.accumulate(
                 int(math.ceil(float(memory_total) / (1024 * 1024 * 1024)))
@@ -441,11 +454,6 @@ def _create_state_dir():
         if not os.path.exists(state_dir):
             if not os.environ.get("MOZ_AUTOMATION"):
                 print(STATE_DIR_FIRST_RUN.format(state_dir))
-                try:
-                    sys.stdin.readline()
-                    print("\n")
-                except KeyboardInterrupt:
-                    sys.exit(1)
 
             print("Creating default state directory: {}".format(state_dir))
 

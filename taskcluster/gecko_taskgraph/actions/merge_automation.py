@@ -2,11 +2,10 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+from taskgraph.parameters import Parameters
 
-from .registry import register_callback_action
-
+from gecko_taskgraph.actions.registry import register_callback_action
 from gecko_taskgraph.decision import taskgraph_decision
-from gecko_taskgraph.parameters import Parameters
 from gecko_taskgraph.util.attributes import RELEASE_PROMOTION_PROJECTS
 
 
@@ -71,7 +70,6 @@ def is_release_promotion_available(parameters):
     },
 )
 def merge_automation_action(parameters, graph_config, input, task_group_id, task_id):
-
     # make parameters read-write
     parameters = dict(parameters)
 

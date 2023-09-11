@@ -10,6 +10,7 @@
 #include "nsCOMPtr.h"
 #include "nsITimer.h"
 #include "nsTArray.h"
+#include "nsINamed.h"
 
 #include "mozilla/Mutex.h"
 #include "mozilla/rlbox/rlbox_types.hpp"
@@ -44,22 +45,24 @@ class RLBoxSandboxPool : public nsITimerCallback, public nsINamed {
         mMutex("RLBoxSandboxPool::mMutex"){};
 
   void Push(UniquePtr<RLBoxSandboxDataBase> sbx);
-  // PopOrCreate() returns a sandbox from the pool if the pool is not empty and
+  // PopOrCreate returns a sandbox from the pool if the pool is not empty and
   // tries to mint a new one otherwise. If creating a new sandbox fails, the
-  // function returns a nullptr.
-  UniquePtr<RLBoxSandboxPoolData> PopOrCreate();
+  // function returns a nullptr. The parameter aMinSize is the minimum size of
+  // the sandbox memory.
+  UniquePtr<RLBoxSandboxPoolData> PopOrCreate(uint64_t aMinSize = 0);
 
  protected:
-  virtual UniquePtr<RLBoxSandboxDataBase> CreateSandboxData() = 0;
+  // CreateSandboxData takes a parameter which is the size of the sandbox memory
+  virtual UniquePtr<RLBoxSandboxDataBase> CreateSandboxData(uint64_t aSize) = 0;
   virtual ~RLBoxSandboxPool() = default;
 
  private:
-  void StartTimer();
-  void CancelTimer();
+  void StartTimer() MOZ_REQUIRES(mMutex);
+  void CancelTimer() MOZ_REQUIRES(mMutex);
 
-  nsTArray<UniquePtr<RLBoxSandboxDataBase>> mPool;
-  const size_t mDelaySeconds;
-  nsCOMPtr<nsITimer> mTimer;
+  nsTArray<UniquePtr<RLBoxSandboxDataBase>> mPool MOZ_GUARDED_BY(mMutex);
+  const size_t mDelaySeconds MOZ_GUARDED_BY(mMutex);
+  nsCOMPtr<nsITimer> mTimer MOZ_GUARDED_BY(mMutex);
   mozilla::Mutex mMutex;
 };
 
@@ -68,6 +71,8 @@ class RLBoxSandboxPool : public nsITimerCallback, public nsINamed {
 // (e.g., callbacks).
 class RLBoxSandboxDataBase {
  public:
+  const uint64_t mSize;
+  explicit RLBoxSandboxDataBase(uint64_t aSize) : mSize(aSize) {}
   virtual ~RLBoxSandboxDataBase() = default;
 };
 

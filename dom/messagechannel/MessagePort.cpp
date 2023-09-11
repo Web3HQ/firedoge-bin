@@ -32,7 +32,6 @@
 #include "mozilla/TimelineMarker.h"
 #include "mozilla/Unused.h"
 #include "nsContentUtils.h"
-#include "nsGlobalWindow.h"
 #include "nsPresContext.h"
 
 #ifdef XP_WIN
@@ -115,8 +114,7 @@ class PostMessageRunnable final : public CancelableRunnable {
 
     UniquePtr<AbstractTimelineMarker> start;
     UniquePtr<AbstractTimelineMarker> end;
-    RefPtr<TimelineConsumers> timelines = TimelineConsumers::Get();
-    bool isTimelineRecording = timelines && !timelines->IsEmpty();
+    bool isTimelineRecording = !TimelineConsumers::IsEmpty();
 
     if (isTimelineRecording) {
       start = MakeUnique<MessagePortTimelineMarker>(
@@ -131,8 +129,8 @@ class PostMessageRunnable final : public CancelableRunnable {
       end = MakeUnique<MessagePortTimelineMarker>(
           ProfileTimelineMessagePortOperationType::DeserializeData,
           MarkerTracingType::END);
-      timelines->AddMarkerForAllObservedDocShells(start);
-      timelines->AddMarkerForAllObservedDocShells(end);
+      TimelineConsumers::AddMarkerForAllObservedDocShells(start);
+      TimelineConsumers::AddMarkerForAllObservedDocShells(end);
     }
 
     if (NS_WARN_IF(rv.Failed())) {
@@ -341,8 +339,7 @@ void MessagePort::PostMessage(JSContext* aCx, JS::Handle<JS::Value> aMessage,
 
   UniquePtr<AbstractTimelineMarker> start;
   UniquePtr<AbstractTimelineMarker> end;
-  RefPtr<TimelineConsumers> timelines = TimelineConsumers::Get();
-  bool isTimelineRecording = timelines && !timelines->IsEmpty();
+  bool isTimelineRecording = !TimelineConsumers::IsEmpty();
 
   if (isTimelineRecording) {
     start = MakeUnique<MessagePortTimelineMarker>(
@@ -357,8 +354,8 @@ void MessagePort::PostMessage(JSContext* aCx, JS::Handle<JS::Value> aMessage,
     end = MakeUnique<MessagePortTimelineMarker>(
         ProfileTimelineMessagePortOperationType::SerializeData,
         MarkerTracingType::END);
-    timelines->AddMarkerForAllObservedDocShells(start);
-    timelines->AddMarkerForAllObservedDocShells(end);
+    TimelineConsumers::AddMarkerForAllObservedDocShells(start);
+    TimelineConsumers::AddMarkerForAllObservedDocShells(end);
   }
 
   if (NS_WARN_IF(aRv.Failed())) {

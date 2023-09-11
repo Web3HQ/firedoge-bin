@@ -5,14 +5,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "ExtensionBrowser.h"
+#include "ExtensionAPIRequestForwarder.h"
 
 #include "mozilla/dom/ExtensionBrowserBinding.h"
 #include "mozilla/dom/ExtensionPortBinding.h"  // ExtensionPortDescriptor
-#include "mozilla/dom/WorkerPrivate.h"         // GetWorkerPrivateFromContext
+#include "mozilla/dom/WorkerScope.h"           // GetWorkerPrivateFromContext
 #include "mozilla/extensions/ExtensionAlarms.h"
+#include "mozilla/extensions/ExtensionBrowserSettings.h"
+#include "mozilla/extensions/ExtensionDns.h"
 #include "mozilla/extensions/ExtensionMockAPI.h"
 #include "mozilla/extensions/ExtensionPort.h"
+#include "mozilla/extensions/ExtensionProxy.h"
 #include "mozilla/extensions/ExtensionRuntime.h"
+#include "mozilla/extensions/ExtensionScripting.h"
 #include "mozilla/extensions/ExtensionTest.h"
 #include "mozilla/extensions/WebExtensionPolicy.h"
 
@@ -31,8 +36,12 @@ NS_INTERFACE_MAP_END
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(ExtensionBrowser)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mGlobal)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionAlarms)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionBrowserSettings)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionDns)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionMockAPI)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionProxy)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionRuntime)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionScripting)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mExtensionTest)
   tmp->mLastError.setUndefined();
   tmp->mPortsLookup.Clear();
@@ -42,8 +51,12 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(ExtensionBrowser)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mGlobal)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionAlarms)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionBrowserSettings)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionDns)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionMockAPI)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionRuntime)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionProxy)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionScripting)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mExtensionTest)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
@@ -194,12 +207,36 @@ ExtensionAlarms* ExtensionBrowser::GetExtensionAlarms() {
   return mExtensionAlarms;
 }
 
+ExtensionBrowserSettings* ExtensionBrowser::GetExtensionBrowserSettings() {
+  if (!mExtensionBrowserSettings) {
+    mExtensionBrowserSettings = new ExtensionBrowserSettings(mGlobal, this);
+  }
+
+  return mExtensionBrowserSettings;
+}
+
+ExtensionDns* ExtensionBrowser::GetExtensionDns() {
+  if (!mExtensionDns) {
+    mExtensionDns = new ExtensionDns(mGlobal, this);
+  }
+
+  return mExtensionDns;
+}
+
 ExtensionMockAPI* ExtensionBrowser::GetExtensionMockAPI() {
   if (!mExtensionMockAPI) {
     mExtensionMockAPI = new ExtensionMockAPI(mGlobal, this);
   }
 
   return mExtensionMockAPI;
+}
+
+ExtensionProxy* ExtensionBrowser::GetExtensionProxy() {
+  if (!mExtensionProxy) {
+    mExtensionProxy = new ExtensionProxy(mGlobal, this);
+  }
+
+  return mExtensionProxy;
 }
 
 ExtensionRuntime* ExtensionBrowser::GetExtensionRuntime() {
@@ -210,12 +247,98 @@ ExtensionRuntime* ExtensionBrowser::GetExtensionRuntime() {
   return mExtensionRuntime;
 }
 
+ExtensionScripting* ExtensionBrowser::GetExtensionScripting() {
+  if (!mExtensionScripting) {
+    mExtensionScripting = new ExtensionScripting(mGlobal, this);
+  }
+
+  return mExtensionScripting;
+}
+
 ExtensionTest* ExtensionBrowser::GetExtensionTest() {
   if (!mExtensionTest) {
     mExtensionTest = new ExtensionTest(mGlobal, this);
   }
 
   return mExtensionTest;
+}
+
+// static
+void ExtensionEventWakeupMap::ToMapKey(const nsAString& aAPINamespace,
+                                       const nsAString& aAPIName,
+                                       nsAString& aResultMapKey) {
+  aResultMapKey.Truncate();
+  aResultMapKey.AppendPrintf("%s.%s",
+                             NS_ConvertUTF16toUTF8(aAPINamespace).get(),
+                             NS_ConvertUTF16toUTF8(aAPIName).get());
+}
+
+nsresult ExtensionEventWakeupMap::IncrementListeners(
+    const nsAString& aAPINamespace, const nsAString& aAPIName) {
+  nsString key;
+  ToMapKey(aAPINamespace, aAPIName, key);
+  auto maybeCount = MaybeGet(key);
+  if (maybeCount.isSome()) {
+    InsertOrUpdate(key, maybeCount.value() + 1);
+  } else {
+    InsertOrUpdate(key, 1);
+  }
+
+  return NS_OK;
+}
+
+nsresult ExtensionEventWakeupMap::DecrementListeners(
+    const nsAString& aAPINamespace, const nsAString& aAPIName) {
+  nsString key;
+  ToMapKey(aAPINamespace, aAPIName, key);
+  auto maybeCount = MaybeGet(key);
+  if (maybeCount.isSome()) {
+    MOZ_ASSERT(maybeCount.value() >= 1, "Unexpected counter value set to zero");
+    uint64_t val = maybeCount.value() - 1;
+    if (val == 0) {
+      Remove(key);
+    } else {
+      InsertOrUpdate(key, val);
+    }
+  }
+
+  return NS_OK;
+}
+
+bool ExtensionEventWakeupMap::HasListener(const nsAString& aAPINamespace,
+                                          const nsAString& aAPIName) {
+  nsString key;
+  ToMapKey(aAPINamespace, aAPIName, key);
+  auto maybeCount = MaybeGet(key);
+  return (maybeCount.isSome() && maybeCount.value() > 0);
+}
+
+nsresult ExtensionBrowser::TrackWakeupEventListener(
+    JSContext* aCx, const nsString& aAPINamespace, const nsString& aAPIName) {
+  auto* workerPrivate = mozilla::dom::GetWorkerPrivateFromContext(aCx);
+  if (workerPrivate->WorkerScriptExecutedSuccessfully()) {
+    // Ignore if the worker script has already executed all its synchronous
+    // statements.
+    return NS_OK;
+  }
+  mExpectedEventWakeupMap.IncrementListeners(aAPINamespace, aAPIName);
+  return NS_OK;
+}
+
+nsresult ExtensionBrowser::UntrackWakeupEventListener(
+    JSContext* aCx, const nsString& aAPINamespace, const nsString& aAPIName) {
+  auto* workerPrivate = mozilla::dom::GetWorkerPrivateFromContext(aCx);
+  if (workerPrivate->WorkerScriptExecutedSuccessfully()) {
+    // Ignore if the worker script has already executed all its synchronous
+    return NS_OK;
+  }
+  mExpectedEventWakeupMap.DecrementListeners(aAPINamespace, aAPIName);
+  return NS_OK;
+}
+
+bool ExtensionBrowser::HasWakeupEventListener(const nsString& aAPINamespace,
+                                              const nsString& aAPIName) {
+  return mExpectedEventWakeupMap.HasListener(aAPINamespace, aAPIName);
 }
 
 }  // namespace extensions

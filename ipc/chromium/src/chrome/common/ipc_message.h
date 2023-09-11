@@ -19,11 +19,14 @@
 #include "mozilla/ipc/ScopedPort.h"
 #include "nsTArray.h"
 
-#ifdef FUZZING
-#  include "mozilla/ipc/Faulty.h"
+namespace mozilla {
+
+#ifdef FUZZING_SNAPSHOT
+namespace fuzzing {
+class IPCFuzzController;
+}
 #endif
 
-namespace mozilla {
 namespace ipc {
 class MiniTransceiver;
 }
@@ -38,9 +41,8 @@ const char* StringFromIPCMessageType(uint32_t aMessageType);
 
 class Channel;
 class Message;
-#ifdef FUZZING
-class Faulty;
-#endif
+class MessageReader;
+class MessageWriter;
 struct LogData;
 
 class Message : public mojo::core::ports::UserMessage, public Pickle {
@@ -74,11 +76,6 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
     ASYNC = 1,
   };
 
-  enum Interrupt {
-    NOT_INTERRUPT = 0,
-    INTERRUPT = 1,
-  };
-
   enum Constructor {
     NOT_CONSTRUCTOR = 0,
     CONSTRUCTOR = 1,
@@ -89,12 +86,20 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
     REPLY = 1,
   };
 
-  // Mac and Linux both limit the number of file descriptors per message to
-  // slightly more than 250.
-  enum { MAX_DESCRIPTORS_PER_MESSAGE = 200 };
+  enum LazySend {
+    EAGER_SEND = 0,
+    LAZY_SEND = 1,
+  };
+
+  // The hard limit of handles or file descriptors allowed in a single message.
+  static constexpr size_t MAX_DESCRIPTORS_PER_MESSAGE = 32767;
 
   class HeaderFlags {
     friend class Message;
+#ifdef FUZZING_SNAPSHOT
+    // IPCFuzzController calls various private API functions on the header.
+    friend class mozilla::fuzzing::IPCFuzzController;
+#endif
 
     enum {
       NESTED_MASK = 0x0003,
@@ -102,7 +107,7 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
       SYNC_BIT = 0x0020,
       REPLY_BIT = 0x0040,
       REPLY_ERROR_BIT = 0x0080,
-      INTERRUPT_BIT = 0x0100,
+      LAZY_SEND_BIT = 0x0100,
       COMPRESS_BIT = 0x0200,
       COMPRESSALL_BIT = 0x0400,
       CONSTRUCTOR_BIT = 0x0800,
@@ -115,16 +120,15 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
     explicit constexpr HeaderFlags(NestedLevel level) : mFlags(level) {}
 
     constexpr HeaderFlags(NestedLevel level, PriorityValue priority,
-                          MessageCompression compression,
-                          Constructor constructor, Sync sync,
-                          Interrupt interrupt, Reply reply)
+                          MessageCompression compression, LazySend lazy_send,
+                          Constructor constructor, Sync sync, Reply reply)
         : mFlags(level | (priority << 2) |
                  (compression == COMPRESSION_ENABLED ? COMPRESS_BIT
                   : compression == COMPRESSION_ALL   ? COMPRESSALL_BIT
                                                      : 0) |
+                 (lazy_send == LAZY_SEND ? LAZY_SEND_BIT : 0) |
                  (constructor == CONSTRUCTOR ? CONSTRUCTOR_BIT : 0) |
                  (sync == SYNC ? SYNC_BIT : 0) |
-                 (interrupt == INTERRUPT ? INTERRUPT_BIT : 0) |
                  (reply == REPLY ? REPLY_BIT : 0)) {}
 
     NestedLevel Level() const {
@@ -141,17 +145,18 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
                                            : COMPRESSION_NONE);
     }
 
+    bool IsLazySend() const { return (mFlags & LAZY_SEND_BIT) != 0; }
+
     bool IsConstructor() const { return (mFlags & CONSTRUCTOR_BIT) != 0; }
     bool IsSync() const { return (mFlags & SYNC_BIT) != 0; }
-    bool IsInterrupt() const { return (mFlags & INTERRUPT_BIT) != 0; }
     bool IsReply() const { return (mFlags & REPLY_BIT) != 0; }
 
     bool IsReplyError() const { return (mFlags & REPLY_ERROR_BIT) != 0; }
     bool IsRelay() const { return (mFlags & RELAY_BIT) != 0; }
 
    private:
+    void SetConstructor() { mFlags |= CONSTRUCTOR_BIT; }
     void SetSync() { mFlags |= SYNC_BIT; }
-    void SetInterrupt() { mFlags |= INTERRUPT_BIT; }
     void SetReply() { mFlags |= REPLY_BIT; }
     void SetReplyError() { mFlags |= REPLY_ERROR_BIT; }
     void SetRelay(bool relay) {
@@ -167,34 +172,30 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
 
   virtual ~Message();
 
-  Message();
-
   // Initialize a message with a user-defined type, priority value, and
   // destination WebView ID.
-  //
-  // NOTE: `recordWriteLatency` is only passed by IPDL generated message code,
-  // and is used to trigger the IPC_WRITE_LATENCY_MS telemetry.
   Message(int32_t routing_id, msgid_t type,
           uint32_t segmentCapacity = 0,  // 0 for the default capacity.
-          HeaderFlags flags = HeaderFlags(), bool recordWriteLatency = false);
+          HeaderFlags flags = HeaderFlags());
 
   Message(const char* data, int data_len);
 
-  Message(const Message& other) = delete;
-  Message(Message&& other);
-  Message& operator=(const Message& other) = delete;
-  Message& operator=(Message&& other);
+  Message(const Message&) = delete;
+  Message(Message&&) = delete;
+  Message& operator=(const Message&) = delete;
+  Message& operator=(Message&&) = delete;
 
   // Helper method for the common case (default segmentCapacity, recording
   // the write latency of messages) of IPDL message creation.  This helps
   // move the malloc and some of the parameter setting out of autogenerated
   // code.
-  static Message* IPDLMessage(int32_t routing_id, msgid_t type,
-                              HeaderFlags flags);
+  static mozilla::UniquePtr<Message> IPDLMessage(int32_t routing_id,
+                                                 msgid_t type,
+                                                 uint32_t segmentCapacity,
+                                                 HeaderFlags flags);
 
   // One-off constructors for special error-handling messages.
-  static Message* ForSyncDispatchError(NestedLevel level);
-  static Message* ForInterruptDispatchError();
+  static mozilla::UniquePtr<Message> ForSyncDispatchError(NestedLevel level);
 
   NestedLevel nested_level() const { return header()->flags.Level(); }
 
@@ -205,18 +206,15 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
   // True if this is a synchronous message.
   bool is_sync() const { return header()->flags.IsSync(); }
 
-  // True if this is a synchronous message.
-  bool is_interrupt() const { return header()->flags.IsInterrupt(); }
-
   MessageCompression compress_type() const {
     return header()->flags.Compression();
   }
 
+  bool is_lazy_send() const { return header()->flags.IsLazySend(); }
+
   bool is_reply() const { return header()->flags.IsReply(); }
 
   bool is_reply_error() const { return header()->flags.IsReplyError(); }
-
-  bool is_valid() const { return !!header(); }
 
   msgid_t type() const { return header()->type; }
 
@@ -228,31 +226,11 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
 
   void set_transaction_id(int32_t txid) { header()->txid = txid; }
 
-  uint32_t interrupt_remote_stack_depth_guess() const {
-    return header()->interrupt_remote_stack_depth_guess;
-  }
-
-  void set_interrupt_remote_stack_depth_guess(uint32_t depth) {
-    DCHECK(is_interrupt());
-    header()->interrupt_remote_stack_depth_guess = depth;
-  }
-
-  uint32_t interrupt_local_stack_depth() const {
-    return header()->interrupt_local_stack_depth;
-  }
-
-  void set_interrupt_local_stack_depth(uint32_t depth) {
-    DCHECK(is_interrupt());
-    header()->interrupt_local_stack_depth = depth;
-  }
-
   int32_t seqno() const { return header()->seqno; }
 
   void set_seqno(int32_t aSeqno) { header()->seqno = aSeqno; }
 
   const char* name() const { return StringFromIPCMessageType(type()); }
-
-  const mozilla::TimeStamp& create_time() const { return create_time_; }
 
   uint32_t num_handles() const;
 
@@ -307,9 +285,6 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
     header()->event_footer_size = size;
   }
 
-  // Used for async messages with no parameters.
-  static void Log(const Message* msg, std::wstring* l) {}
-
   static int HeaderSize() { return sizeof(Header); }
 
   // Figure out how big the message starting at range_start is. Returns 0 if
@@ -331,7 +306,7 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
   // IPC::Message.
   void SetAttachedFileHandles(nsTArray<mozilla::UniqueFileHandle> handles);
 
-#if defined(OS_MACOSX)
+#if defined(XP_DARWIN)
   void set_fd_cookie(uint32_t cookie) { header()->cookie = cookie; }
   uint32_t fd_cookie() const { return header()->cookie; }
 #endif
@@ -350,7 +325,7 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
   // IPC. Must only be called when there are no ports on this IPC::Message.
   void SetAttachedPorts(nsTArray<mozilla::ipc::ScopedPort> ports);
 
-#if defined(OS_MACOSX)
+#if defined(XP_DARWIN)
   bool WriteMachSendRight(mozilla::UniqueMachSendRight port);
 
   // WARNING: This method is marked as `const` so it can be called when
@@ -362,24 +337,26 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
 #endif
 
   uint32_t num_relayed_attachments() const {
-#if defined(OS_WIN)
+#if defined(XP_WIN)
     return num_handles();
-#elif defined(OS_MACOSX)
+#elif defined(XP_DARWIN)
     return num_send_rights();
 #else
     return 0;
 #endif
   }
 
+#ifdef FUZZING_SNAPSHOT
+  bool IsFuzzMsg() { return isFuzzMsg; }
+  void SetFuzzMsg() { isFuzzMsg = true; }
+#endif
+
   friend class Channel;
   friend class MessageReplyDeserializer;
   friend class SyncMessage;
-#ifdef FUZZING
-  friend class mozilla::ipc::Faulty;
-#endif
   friend class mozilla::ipc::MiniTransceiver;
 
-#if !defined(OS_MACOSX)
+#if !defined(XP_DARWIN) && !defined(FUZZING_SNAPSHOT)
  protected:
 #endif
 
@@ -388,21 +365,13 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
     msgid_t type;          // specifies the user-defined message type
     HeaderFlags flags;     // specifies control flags for the message
     uint32_t num_handles;  // the number of handles included with this message
-#if defined(OS_MACOSX)
+#if defined(XP_DARWIN)
     uint32_t cookie;  // cookie to ACK that the descriptors have been read.
     uint32_t num_send_rights;  // the number of mach send rights included with
                                // this message
 #endif
-    union {
-      // For Interrupt messages, a guess at what the *other* side's stack depth
-      // is.
-      uint32_t interrupt_remote_stack_depth_guess;
-
-      // For RPC and Urgent messages, a transaction ID for message ordering.
-      int32_t txid;
-    };
-    // The actual local stack depth.
-    uint32_t interrupt_local_stack_depth;
+    // For sync messages, a transaction ID for message ordering.
+    int32_t txid;
     // Sequence number
     int32_t seqno;
     // Size of the message's event footer
@@ -424,7 +393,7 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
   // deserializing a message.
   mutable nsTArray<mozilla::ipc::ScopedPort> attached_ports_;
 
-#if defined(OS_MACOSX)
+#if defined(XP_DARWIN)
   // The set of mach send rights which are attached to this message.
   //
   // Mutable, as this array can be mutated during `ConsumeMachSendRight` when
@@ -432,22 +401,9 @@ class Message : public mojo::core::ports::UserMessage, public Pickle {
   mutable nsTArray<mozilla::UniqueMachSendRight> attached_send_rights_;
 #endif
 
-  mozilla::TimeStamp create_time_;
-};
-
-class MessageInfo {
- public:
-  typedef uint32_t msgid_t;
-
-  explicit MessageInfo(const Message& aMsg)
-      : mSeqno(aMsg.seqno()), mType(aMsg.type()) {}
-
-  int32_t seqno() const { return mSeqno; }
-  msgid_t type() const { return mType; }
-
- private:
-  int32_t mSeqno;
-  msgid_t mType;
+#ifdef FUZZING_SNAPSHOT
+  bool isFuzzMsg = false;
+#endif
 };
 
 //------------------------------------------------------------------------------

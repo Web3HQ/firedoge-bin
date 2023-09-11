@@ -1,5 +1,5 @@
-const { AppConstants } = ChromeUtils.import(
-  "resource://gre/modules/AppConstants.jsm"
+const { AppConstants } = ChromeUtils.importESModule(
+  "resource://gre/modules/AppConstants.sys.mjs"
 );
 
 const kForceDNSLookup = "browser.fixup.dns_first_for_single_words";
@@ -800,6 +800,18 @@ if (AppConstants.platform == "win") {
     affectedByDNSForSingleWordHosts: true,
   });
 } else {
+  const homeDir = Services.dirsvc.get("Home", Ci.nsIFile).path;
+
+  testcases.push({
+    input: "~",
+    fixedURI: `file://${homeDir}`,
+    protocolChange: true,
+  });
+  testcases.push({
+    input: "~/foo",
+    fixedURI: `file://${homeDir}/foo`,
+    protocolChange: true,
+  });
   testcases.push({
     input: "/some/file.txt",
     fixedURI: "file:///some/file.txt",
@@ -839,10 +851,12 @@ add_task(async function setup() {
   await addTestEngines();
 
   await Services.search.setDefault(
-    Services.search.getEngineByName(kSearchEngineID)
+    Services.search.getEngineByName(kSearchEngineID),
+    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
   );
   await Services.search.setDefaultPrivate(
-    Services.search.getEngineByName(kPrivateSearchEngineID)
+    Services.search.getEngineByName(kPrivateSearchEngineID),
+    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
   );
 });
 
@@ -866,14 +880,14 @@ add_task(async function run_test() {
   await do_single_test_run();
   gSingleWordDNSLookup = false;
   await Services.search.setDefault(
-    Services.search.getEngineByName(kPostSearchEngineID)
+    Services.search.getEngineByName(kPostSearchEngineID),
+    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
   );
   await do_single_test_run();
 });
 
 async function do_single_test_run() {
   Services.prefs.setBoolPref(kForceDNSLookup, gSingleWordDNSLookup);
-
   let relevantTests = gSingleWordDNSLookup
     ? testcases.filter(t => t.keywordLookup)
     : testcases;
@@ -934,6 +948,7 @@ async function do_single_test_run() {
       // Check the fixedURI:
       let makeAlternativeURI =
         flags & Services.uriFixup.FIXUP_FLAGS_MAKE_ALTERNATE_URI;
+
       if (makeAlternativeURI && alternativeURI != null) {
         Assert.equal(
           URIInfo.fixedURI.spec,
@@ -956,9 +971,23 @@ async function do_single_test_run() {
         couldDoKeywordLookup && expectKeywordLookup,
         "keyword lookup as expected"
       );
+
+      let expectProtocolChangeAfterAlternate = false;
+      // If alternativeURI was created, the protocol of the URI
+      // might have been changed to browser.fixup.alternate.protocol
+      // If the protocol is not the same as what was in expectedFixedURI,
+      // the protocol must've changed in the fixup process.
+      if (
+        makeAlternativeURI &&
+        alternativeURI != null &&
+        !expectedFixedURI.startsWith(URIInfo.fixedURI.scheme)
+      ) {
+        expectProtocolChangeAfterAlternate = true;
+      }
+
       Assert.equal(
         URIInfo.fixupChangedProtocol,
-        expectProtocolChange,
+        expectProtocolChange || expectProtocolChangeAfterAlternate,
         "protocol change as expected"
       );
       Assert.equal(

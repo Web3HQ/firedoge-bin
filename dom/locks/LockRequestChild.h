@@ -35,7 +35,9 @@ class LockRequestChild final : public PLockRequestChild,
 
   void MaybeSetWorkerRef();
 
-  IPCResult RecvResolve(const LockMode& aLockMode, bool aIsAvailable);
+  // TODO: Use MOZ_CAN_RUN_SCRIPT when it gains IPDL support (bug 1539864)
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY IPCResult RecvResolve(const LockMode& aLockMode,
+                                                    bool aIsAvailable);
   IPCResult Recv__delete__(bool aAborted);
 
   void ActorDestroy(ActorDestroyReason aReason) final;
@@ -47,7 +49,15 @@ class LockRequestChild final : public PLockRequestChild,
 
   LockManagerChild* CastedManager() const;
 
-  LockRequest mRequest;
+  const LockRequest mRequest;
+
+  // This prevents the worker from being GC'ed when the caller is waiting to
+  // acquire the lock and when the lock is held.
+  //
+  // The StrongWorkerRef is dropped immediately in the shutdown notification
+  // callback, and thus does not ensure any cleanup before the worker advances
+  // to the Killing state. That is ensured instead by
+  // LockManagerChild::mWorkerRef, see also the details there.
   RefPtr<StrongWorkerRef> mWorkerRef;
 };
 

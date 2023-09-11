@@ -9,10 +9,15 @@
 #include <utility>
 
 #include "mozilla/ScopeExit.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/layers/AsyncImagePipelineManager.h"
+#include "mozilla/layers/CompositorThread.h"
 #include "mozilla/layers/CompositorVsyncScheduler.h"  // for CompositorVsyncScheduler
+#include "mozilla/layers/RemoteTextureHostWrapper.h"
+#include "mozilla/layers/RemoteTextureMap.h"
 #include "mozilla/layers/WebRenderBridgeParent.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
+#include "mozilla/StaticPrefs_webgl.h"
 #include "nsAString.h"
 #include "nsDebug.h"          // for NS_WARNING, NS_ASSERTION
 #include "nsPrintfCString.h"  // for nsPrintfCString
@@ -31,12 +36,37 @@ WebRenderImageHost::WebRenderImageHost(const TextureInfo& aTextureInfo)
       ImageComposite(),
       mCurrentAsyncImageManager(nullptr) {}
 
-WebRenderImageHost::~WebRenderImageHost() { MOZ_ASSERT(mWrBridges.empty()); }
+WebRenderImageHost::~WebRenderImageHost() {
+  MOZ_ASSERT(mPendingRemoteTextureWrappers.empty());
+  MOZ_ASSERT(mWrBridges.empty());
+}
+
+void WebRenderImageHost::OnReleased() {
+  if (mRemoteTextureOwnerIdOfPushCallback) {
+    RemoteTextureMap::Get()->UnregisterRemoteTexturePushListener(
+        *mRemoteTextureOwnerIdOfPushCallback, mForPidOfPushCallback, this);
+    mRemoteTextureOwnerIdOfPushCallback = Nothing();
+    mSizeOfPushCallback = gfx::IntSize();
+    mFlagsOfPushCallback = TextureFlags::NO_FLAGS;
+  }
+  if (!mPendingRemoteTextureWrappers.empty()) {
+    mPendingRemoteTextureWrappers.clear();
+  }
+}
 
 void WebRenderImageHost::UseTextureHost(
     const nsTArray<TimedTexture>& aTextures) {
   CompositableHost::UseTextureHost(aTextures);
   MOZ_ASSERT(aTextures.Length() >= 1);
+
+  if (!mPendingRemoteTextureWrappers.empty()) {
+    mPendingRemoteTextureWrappers.clear();
+  }
+
+  if (mCurrentTextureHost &&
+      mCurrentTextureHost->AsRemoteTextureHostWrapper()) {
+    mCurrentTextureHost = nullptr;
+  }
 
   nsTArray<TimedImage> newImages;
 
@@ -95,6 +125,155 @@ void WebRenderImageHost::UseTextureHost(
   }
 }
 
+void WebRenderImageHost::PushPendingRemoteTexture(
+    const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
+    const base::ProcessId aForPid, const gfx::IntSize aSize,
+    const TextureFlags aFlags) {
+  // Ensure aOwnerId is the same as RemoteTextureOwnerId of pending
+  // RemoteTextures.
+  if (!mPendingRemoteTextureWrappers.empty()) {
+    auto* wrapper =
+        mPendingRemoteTextureWrappers.front()->AsRemoteTextureHostWrapper();
+    MOZ_ASSERT(wrapper);
+    if (wrapper->mOwnerId != aOwnerId || wrapper->mForPid != aForPid) {
+      // Clear when RemoteTextureOwner is different.
+      mPendingRemoteTextureWrappers.clear();
+      mWaitingReadyCallback = false;
+    }
+  }
+
+  RefPtr<TextureHost> texture =
+      RemoteTextureMap::Get()->GetOrCreateRemoteTextureHostWrapper(
+          aTextureId, aOwnerId, aForPid, aSize, aFlags);
+  MOZ_ASSERT(texture);
+  mPendingRemoteTextureWrappers.push_back(
+      CompositableTextureHostRef(texture.get()));
+}
+
+void WebRenderImageHost::UseRemoteTexture() {
+  if (mPendingRemoteTextureWrappers.empty()) {
+    return;
+  }
+
+  const bool useAsyncRemoteTexture =
+      gfx::gfxVars::UseCanvasRenderThread() &&
+      StaticPrefs::webgl_out_of_process_async_present() &&
+      !gfx::gfxVars::WebglOopAsyncPresentForceSync();
+  const bool useReadyCallback = GetAsyncRef() && useAsyncRemoteTexture &&
+                                mRemoteTextureOwnerIdOfPushCallback.isNothing();
+  CompositableTextureHostRef texture;
+
+  if (useReadyCallback) {
+    if (mWaitingReadyCallback) {
+      return;
+    }
+    MOZ_ASSERT(!mWaitingReadyCallback);
+
+    auto readyCallback = [self = RefPtr<WebRenderImageHost>(this)](
+                             const RemoteTextureInfo aInfo) {
+      RefPtr<nsIRunnable> runnable = NS_NewRunnableFunction(
+          "WebRenderImageHost::UseRemoteTexture",
+          [self = std::move(self), aInfo]() {
+            MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
+
+            if (self->mPendingRemoteTextureWrappers.empty()) {
+              return;
+            }
+
+            auto* wrapper = self->mPendingRemoteTextureWrappers.front()
+                                ->AsRemoteTextureHostWrapper();
+            MOZ_ASSERT(wrapper);
+            if (wrapper->mOwnerId != aInfo.mOwnerId ||
+                wrapper->mForPid != aInfo.mForPid) {
+              // obsoleted callback
+              return;
+            }
+
+            self->mWaitingReadyCallback = false;
+            self->UseRemoteTexture();
+          });
+
+      CompositorThread()->Dispatch(runnable.forget());
+    };
+
+    // Check which of the pending remote textures is the most recent and ready.
+    while (!mPendingRemoteTextureWrappers.empty()) {
+      auto* wrapper =
+          mPendingRemoteTextureWrappers.front()->AsRemoteTextureHostWrapper();
+      mWaitingReadyCallback =
+          RemoteTextureMap::Get()->GetRemoteTextureForDisplayList(
+              wrapper, readyCallback);
+      MOZ_ASSERT_IF(mWaitingReadyCallback, !wrapper->IsReadyForRendering());
+      if (!wrapper->IsReadyForRendering()) {
+        break;
+      }
+      texture = mPendingRemoteTextureWrappers.front();
+      mPendingRemoteTextureWrappers.pop_front();
+    }
+  } else {
+    texture = mPendingRemoteTextureWrappers.front();
+    auto* wrapper = texture->AsRemoteTextureHostWrapper();
+    mPendingRemoteTextureWrappers.pop_front();
+    MOZ_ASSERT(mPendingRemoteTextureWrappers.empty());
+
+    std::function<void(const RemoteTextureInfo&)> function;
+    RemoteTextureMap::Get()->GetRemoteTextureForDisplayList(
+        wrapper, std::move(function));
+  }
+
+  if (!texture ||
+      !texture->AsRemoteTextureHostWrapper()->IsReadyForRendering()) {
+    return;
+  }
+
+  SetCurrentTextureHost(texture);
+
+  if (GetAsyncRef()) {
+    for (const auto& it : mWrBridges) {
+      RefPtr<WebRenderBridgeParent> wrBridge = it.second->WrBridge();
+      if (wrBridge && wrBridge->CompositorScheduler()) {
+        wrBridge->CompositorScheduler()->ScheduleComposition(
+            wr::RenderReasons::ASYNC_IMAGE);
+      }
+    }
+  }
+}
+
+void WebRenderImageHost::EnableRemoteTexturePushCallback(
+    const RemoteTextureOwnerId aOwnerId, const base::ProcessId aForPid,
+    const gfx::IntSize aSize, const TextureFlags aFlags) {
+  if (!GetAsyncRef()) {
+    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    return;
+  }
+
+  if (mRemoteTextureOwnerIdOfPushCallback.isSome()) {
+    RemoteTextureMap::Get()->UnregisterRemoteTexturePushListener(aOwnerId,
+                                                                 aForPid, this);
+  }
+
+  RemoteTextureMap::Get()->RegisterRemoteTexturePushListener(aOwnerId, aForPid,
+                                                             this);
+  mRemoteTextureOwnerIdOfPushCallback = Some(aOwnerId);
+  mForPidOfPushCallback = aForPid;
+  mSizeOfPushCallback = aSize;
+  mFlagsOfPushCallback = aFlags;
+}
+
+void WebRenderImageHost::NotifyPushTexture(const RemoteTextureId aTextureId,
+                                           const RemoteTextureOwnerId aOwnerId,
+                                           const base::ProcessId aForPid) {
+  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
+
+  if (mRemoteTextureOwnerIdOfPushCallback != Some(aOwnerId)) {
+    // RemoteTextureOwnerId is already obsoleted
+    return;
+  }
+  PushPendingRemoteTexture(aTextureId, aOwnerId, aForPid, mSizeOfPushCallback,
+                           mFlagsOfPushCallback);
+  UseRemoteTexture();
+}
+
 void WebRenderImageHost::CleanupResources() {
   ClearImages();
   SetCurrentTextureHost(nullptr);
@@ -135,6 +314,11 @@ void WebRenderImageHost::AppendImageCompositeNotification(
 
 TextureHost* WebRenderImageHost::GetAsTextureHostForComposite(
     AsyncImagePipelineManager* aAsyncImageManager) {
+  if (mCurrentTextureHost &&
+      mCurrentTextureHost->AsRemoteTextureHostWrapper()) {
+    return mCurrentTextureHost;
+  }
+
   mCurrentAsyncImageManager = aAsyncImageManager;
   const auto onExit =
       mozilla::MakeScopeExit([&]() { mCurrentAsyncImageManager = nullptr; });

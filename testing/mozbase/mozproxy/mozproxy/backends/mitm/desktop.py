@@ -2,12 +2,11 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-from __future__ import absolute_import
-
 import os
 import sys
 
 import mozinfo
+
 from mozproxy.backends.mitm.mitm import Mitmproxy
 from mozproxy.utils import LOG
 
@@ -138,7 +137,6 @@ class MitmproxyDesktop(Mitmproxy):
             ) in contents:
                 LOG.info("Verified mitmproxy CA certificate is installed in Firefox")
             else:
-
                 return False
         except Exception as e:
             LOG.info("failed to read Firefox policies file, exeption: %s" % e)

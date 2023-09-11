@@ -2,10 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import
-
 import os
-
 from functools import reduce
 
 from marionette_driver import Wait
@@ -13,7 +10,6 @@ from marionette_harness import MarionetteTestCase
 
 
 class TestSafeBrowsingInitialDownload(MarionetteTestCase):
-
     v2_file_extensions = [
         "vlpset",
         "sbstore",
@@ -41,12 +37,7 @@ class TestSafeBrowsingInitialDownload(MarionetteTestCase):
 
     prefs_safebrowsing = {
         "browser.safebrowsing.debug": True,
-        "browser.safebrowsing.blockedURIs.enabled": True,
-        "browser.safebrowsing.downloads.enabled": True,
-        "browser.safebrowsing.phishing.enabled": True,
-        "browser.safebrowsing.malware.enabled": True,
-        "privacy.trackingprotection.enabled": True,
-        "privacy.trackingprotection.pbmode.enabled": True,
+        "browser.safebrowsing.update.enabled": True,
     }
 
     def get_safebrowsing_files(self, is_v4):
@@ -114,7 +105,7 @@ class TestSafeBrowsingInitialDownload(MarionetteTestCase):
     def tearDown(self):
         try:
             # Restart with a fresh profile
-            self.marionette.restart(clean=True)
+            self.marionette.restart(in_app=False, clean=True)
         finally:
             super(TestSafeBrowsingInitialDownload, self).tearDown()
 

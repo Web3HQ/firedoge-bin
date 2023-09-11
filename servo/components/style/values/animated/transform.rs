@@ -8,7 +8,6 @@
 
 use super::animate_multiplicative_factor;
 use super::{Animate, Procedure, ToAnimatedZero};
-use crate::properties::animated_properties::ListAnimation;
 use crate::values::computed::transform::Rotate as ComputedRotate;
 use crate::values::computed::transform::Scale as ComputedScale;
 use crate::values::computed::transform::Transform as ComputedTransform;
@@ -258,22 +257,18 @@ impl Animate for Matrix {
         let other = Matrix3D::from(*other);
         let this = MatrixDecomposed2D::from(this);
         let other = MatrixDecomposed2D::from(other);
-        Ok(Matrix3D::from(this.animate(&other, procedure)?).into_2d()?)
+        Matrix3D::from(this.animate(&other, procedure)?).into_2d()
     }
 
     #[cfg(feature = "gecko")]
     // Gecko doesn't exactly follow the spec here; we use a different procedure
     // to match it
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        let from = decompose_2d_matrix(&(*self).into());
-        let to = decompose_2d_matrix(&(*other).into());
-        match (from, to) {
-            (Ok(from), Ok(to)) => Matrix3D::from(from.animate(&to, procedure)?).into_2d(),
-            // Matrices can be undecomposable due to couple reasons, e.g.,
-            // non-invertible matrices. In this case, we should report Err here,
-            // and let the caller do the fallback procedure.
-            _ => Err(()),
-        }
+        let this = Matrix3D::from(*self);
+        let other = Matrix3D::from(*other);
+        let from = decompose_2d_matrix(&this)?;
+        let to = decompose_2d_matrix(&other)?;
+        Matrix3D::from(from.animate(&to, procedure)?).into_2d()
     }
 }
 
@@ -351,6 +346,13 @@ impl Quaternion {
             (vector.length() - 1.).abs() < 0.0001,
             "Only accept an unit direction vector to create a quaternion"
         );
+
+        // Quaternions between the range [360, 720] will treated as rotations at the other
+        // direction: [-360, 0]. And quaternions between the range [720*k, 720*(k+1)] will be
+        // treated as rotations [0, 720]. So it does not make sense to use quaternions to rotate
+        // the element more than ±360deg. Therefore, we have to make sure its range is (-360, 360).
+        let half_angle = angle.abs().rem_euclid(std::f64::consts::TAU).copysign(angle) / 2.;
+
         // Reference:
         // https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
         //
@@ -361,10 +363,10 @@ impl Quaternion {
         //     = cos(theta/2) +
         //       x*sin(theta/2)i + y*sin(theta/2)j + z*sin(theta/2)k
         Quaternion(
-            vector.x as f64 * (angle / 2.).sin(),
-            vector.y as f64 * (angle / 2.).sin(),
-            vector.z as f64 * (angle / 2.).sin(),
-            (angle / 2.).cos(),
+            vector.x as f64 * half_angle.sin(),
+            vector.y as f64 * half_angle.sin(),
+            vector.z as f64 * half_angle.sin(),
+            half_angle.cos(),
         )
     }
 
@@ -388,8 +390,6 @@ impl Quaternion {
 
 impl Animate for Quaternion {
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        use std::f64;
-
         let (this_weight, other_weight) = procedure.weights();
         debug_assert!(
             // Doule EPSILON since both this_weight and other_weght have calculation errors
@@ -702,8 +702,127 @@ fn decompose_3d_matrix(mut matrix: Matrix3D) -> Result<MatrixDecomposed3D, ()> {
     })
 }
 
-/// Decompose a 2D matrix for Gecko.
-// Use the algorithm from nsStyleTransformMatrix::Decompose2DMatrix() in Gecko.
+/**
+ * The relevant section of the transitions specification:
+ * https://drafts.csswg.org/web-animations-1/#animation-types
+ * http://dev.w3.org/csswg/css3-transitions/#animation-of-property-types-
+ * defers all of the details to the 2-D and 3-D transforms specifications.
+ * For the 2-D transforms specification (all that's relevant for us, right
+ * now), the relevant section is:
+ * https://drafts.csswg.org/css-transforms-1/#interpolation-of-transforms
+ * This, in turn, refers to the unmatrix program in Graphics Gems,
+ * available from http://graphicsgems.org/ , and in
+ * particular as the file GraphicsGems/gemsii/unmatrix.c
+ * in http://graphicsgems.org/AllGems.tar.gz
+ *
+ * The unmatrix reference is for general 3-D transform matrices (any of the
+ * 16 components can have any value).
+ *
+ * For CSS 2-D transforms, we have a 2-D matrix with the bottom row constant:
+ *
+ * [ A C E ]
+ * [ B D F ]
+ * [ 0 0 1 ]
+ *
+ * For that case, I believe the algorithm in unmatrix reduces to:
+ *
+ *  (1) If A * D - B * C == 0, the matrix is singular.  Fail.
+ *
+ *  (2) Set translation components (Tx and Ty) to the translation parts of
+ *      the matrix (E and F) and then ignore them for the rest of the time.
+ *      (For us, E and F each actually consist of three constants:  a
+ *      length, a multiplier for the width, and a multiplier for the
+ *      height.  This actually requires its own decomposition, but I'll
+ *      keep that separate.)
+ *
+ *  (3) Let the X scale (Sx) be sqrt(A^2 + B^2).  Then divide both A and B
+ *      by it.
+ *
+ *  (4) Let the XY shear (K) be A * C + B * D.  From C, subtract A times
+ *      the XY shear.  From D, subtract B times the XY shear.
+ *
+ *  (5) Let the Y scale (Sy) be sqrt(C^2 + D^2).  Divide C, D, and the XY
+ *      shear (K) by it.
+ *
+ *  (6) At this point, A * D - B * C is either 1 or -1.  If it is -1,
+ *      negate the XY shear (K), the X scale (Sx), and A, B, C, and D.
+ *      (Alternatively, we could negate the XY shear (K) and the Y scale
+ *      (Sy).)
+ *
+ *  (7) Let the rotation be R = atan2(B, A).
+ *
+ * Then the resulting decomposed transformation is:
+ *
+ *   translate(Tx, Ty) rotate(R) skewX(atan(K)) scale(Sx, Sy)
+ *
+ * An interesting result of this is that all of the simple transform
+ * functions (i.e., all functions other than matrix()), in isolation,
+ * decompose back to themselves except for:
+ *   'skewY(φ)', which is 'matrix(1, tan(φ), 0, 1, 0, 0)', which decomposes
+ *   to 'rotate(φ) skewX(φ) scale(sec(φ), cos(φ))' since (ignoring the
+ *   alternate sign possibilities that would get fixed in step 6):
+ *     In step 3, the X scale factor is sqrt(1+tan²(φ)) = sqrt(sec²(φ)) =
+ * sec(φ). Thus, after step 3, A = 1/sec(φ) = cos(φ) and B = tan(φ) / sec(φ) =
+ * sin(φ). In step 4, the XY shear is sin(φ). Thus, after step 4, C =
+ * -cos(φ)sin(φ) and D = 1 - sin²(φ) = cos²(φ). Thus, in step 5, the Y scale is
+ * sqrt(cos²(φ)(sin²(φ) + cos²(φ)) = cos(φ). Thus, after step 5, C = -sin(φ), D
+ * = cos(φ), and the XY shear is tan(φ). Thus, in step 6, A * D - B * C =
+ * cos²(φ) + sin²(φ) = 1. In step 7, the rotation is thus φ.
+ *
+ *   skew(θ, φ), which is matrix(1, tan(φ), tan(θ), 1, 0, 0), which decomposes
+ *   to 'rotate(φ) skewX(θ + φ) scale(sec(φ), cos(φ))' since (ignoring
+ *   the alternate sign possibilities that would get fixed in step 6):
+ *     In step 3, the X scale factor is sqrt(1+tan²(φ)) = sqrt(sec²(φ)) =
+ * sec(φ). Thus, after step 3, A = 1/sec(φ) = cos(φ) and B = tan(φ) / sec(φ) =
+ * sin(φ). In step 4, the XY shear is cos(φ)tan(θ) + sin(φ). Thus, after step 4,
+ *     C = tan(θ) - cos(φ)(cos(φ)tan(θ) + sin(φ)) = tan(θ)sin²(φ) - cos(φ)sin(φ)
+ *     D = 1 - sin(φ)(cos(φ)tan(θ) + sin(φ)) = cos²(φ) - sin(φ)cos(φ)tan(θ)
+ *     Thus, in step 5, the Y scale is sqrt(C² + D²) =
+ *     sqrt(tan²(θ)(sin⁴(φ) + sin²(φ)cos²(φ)) -
+ *          2 tan(θ)(sin³(φ)cos(φ) + sin(φ)cos³(φ)) +
+ *          (sin²(φ)cos²(φ) + cos⁴(φ))) =
+ *     sqrt(tan²(θ)sin²(φ) - 2 tan(θ)sin(φ)cos(φ) + cos²(φ)) =
+ *     cos(φ) - tan(θ)sin(φ) (taking the negative of the obvious solution so
+ *     we avoid flipping in step 6).
+ *     After step 5, C = -sin(φ) and D = cos(φ), and the XY shear is
+ *     (cos(φ)tan(θ) + sin(φ)) / (cos(φ) - tan(θ)sin(φ)) =
+ *     (dividing both numerator and denominator by cos(φ))
+ *     (tan(θ) + tan(φ)) / (1 - tan(θ)tan(φ)) = tan(θ + φ).
+ *     (See http://en.wikipedia.org/wiki/List_of_trigonometric_identities .)
+ *     Thus, in step 6, A * D - B * C = cos²(φ) + sin²(φ) = 1.
+ *     In step 7, the rotation is thus φ.
+ *
+ *     To check this result, we can multiply things back together:
+ *
+ *     [ cos(φ) -sin(φ) ] [ 1 tan(θ + φ) ] [ sec(φ)    0   ]
+ *     [ sin(φ)  cos(φ) ] [ 0      1     ] [   0    cos(φ) ]
+ *
+ *     [ cos(φ)      cos(φ)tan(θ + φ) - sin(φ) ] [ sec(φ)    0   ]
+ *     [ sin(φ)      sin(φ)tan(θ + φ) + cos(φ) ] [   0    cos(φ) ]
+ *
+ *     but since tan(θ + φ) = (tan(θ) + tan(φ)) / (1 - tan(θ)tan(φ)),
+ *     cos(φ)tan(θ + φ) - sin(φ)
+ *      = cos(φ)(tan(θ) + tan(φ)) - sin(φ) + sin(φ)tan(θ)tan(φ)
+ *      = cos(φ)tan(θ) + sin(φ) - sin(φ) + sin(φ)tan(θ)tan(φ)
+ *      = cos(φ)tan(θ) + sin(φ)tan(θ)tan(φ)
+ *      = tan(θ) (cos(φ) + sin(φ)tan(φ))
+ *      = tan(θ) sec(φ) (cos²(φ) + sin²(φ))
+ *      = tan(θ) sec(φ)
+ *     and
+ *     sin(φ)tan(θ + φ) + cos(φ)
+ *      = sin(φ)(tan(θ) + tan(φ)) + cos(φ) - cos(φ)tan(θ)tan(φ)
+ *      = tan(θ) (sin(φ) - sin(φ)) + sin(φ)tan(φ) + cos(φ)
+ *      = sec(φ) (sin²(φ) + cos²(φ))
+ *      = sec(φ)
+ *     so the above is:
+ *     [ cos(φ)  tan(θ) sec(φ) ] [ sec(φ)    0   ]
+ *     [ sin(φ)     sec(φ)     ] [   0    cos(φ) ]
+ *
+ *     [    1   tan(θ) ]
+ *     [ tan(φ)    1   ]
+ */
+
+/// Decompose a 2D matrix for Gecko. This implements the above decomposition algorithm.
 #[cfg(feature = "gecko")]
 fn decompose_2d_matrix(matrix: &Matrix3D) -> Result<MatrixDecomposed3D, ()> {
     // The index is column-major, so the equivalent transform matrix is:
@@ -781,17 +900,14 @@ impl Animate for Matrix3D {
     // to match it
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
         let (from, to) = if self.is_3d() || other.is_3d() {
-            (decompose_3d_matrix(*self), decompose_3d_matrix(*other))
+            (decompose_3d_matrix(*self)?, decompose_3d_matrix(*other)?)
         } else {
-            (decompose_2d_matrix(self), decompose_2d_matrix(other))
+            (decompose_2d_matrix(self)?, decompose_2d_matrix(other)?)
         };
-        match (from, to) {
-            (Ok(from), Ok(to)) => Ok(Matrix3D::from(from.animate(&to, procedure)?)),
-            // Matrices can be undecomposable due to couple reasons, e.g.,
-            // non-invertible matrices. In this case, we should report Err here,
-            // and let the caller do the fallback procedure.
-            _ => Err(()),
-        }
+        // Matrices can be undecomposable due to couple reasons, e.g.,
+        // non-invertible matrices. In this case, we should report Err here,
+        // and let the caller do the fallback procedure.
+        Ok(Matrix3D::from(from.animate(&to, procedure)?))
     }
 }
 
@@ -891,25 +1007,12 @@ impl Animate for ComputedTransform {
         match (this_remainder, other_remainder) {
             // If there is a remainder from *both* lists we must have had mismatched functions.
             // => Add the remainders to a suitable ___Matrix function.
-            (Some(this_remainder), Some(other_remainder)) => match procedure {
-                Procedure::Add => {
-                    debug_assert!(false, "Should have already dealt with add by the point");
-                    return Err(());
-                },
-                Procedure::Interpolate { progress } => {
-                    result.push(TransformOperation::InterpolateMatrix {
-                        from_list: Transform(this_remainder.to_vec().into()),
-                        to_list: Transform(other_remainder.to_vec().into()),
-                        progress: Percentage(progress as f32),
-                    });
-                },
-                Procedure::Accumulate { count } => {
-                    result.push(TransformOperation::AccumulateMatrix {
-                        from_list: Transform(this_remainder.to_vec().into()),
-                        to_list: Transform(other_remainder.to_vec().into()),
-                        count: cmp::min(count, i32::max_value() as u64) as i32,
-                    });
-                },
+            (Some(this_remainder), Some(other_remainder)) => {
+                result.push(TransformOperation::animate_mismatched_transforms(
+                    this_remainder,
+                    other_remainder,
+                    procedure,
+                )?);
             },
             // If there is a remainder from just one list, then one list must be shorter but
             // completely match the type of the corresponding functions in the longer list.
@@ -923,36 +1026,19 @@ impl Animate for ComputedTransform {
                             let identity = transform.to_animated_zero().unwrap();
 
                             match transform {
-                                // We can't interpolate/accumulate ___Matrix types directly with a
-                                // matrix. Instead we need to wrap it in another ___Matrix type.
                                 TransformOperation::AccumulateMatrix { .. } |
                                 TransformOperation::InterpolateMatrix { .. } => {
-                                    let transform_list = Transform(vec![transform.clone()].into());
-                                    let identity_list = Transform(vec![identity].into());
-                                    let (from_list, to_list) = if fill_right {
-                                        (transform_list, identity_list)
+                                    let (from, to) = if fill_right {
+                                        (transform, &identity)
                                     } else {
-                                        (identity_list, transform_list)
+                                        (&identity, transform)
                                     };
 
-                                    match procedure {
-                                        Procedure::Add => Err(()),
-                                        Procedure::Interpolate { progress } => {
-                                            Ok(TransformOperation::InterpolateMatrix {
-                                                from_list,
-                                                to_list,
-                                                progress: Percentage(progress as f32),
-                                            })
-                                        },
-                                        Procedure::Accumulate { count } => {
-                                            Ok(TransformOperation::AccumulateMatrix {
-                                                from_list,
-                                                to_list,
-                                                count: cmp::min(count, i32::max_value() as u64)
-                                                    as i32,
-                                            })
-                                        },
-                                    }
+                                    TransformOperation::animate_mismatched_transforms(
+                                        &[from.clone()],
+                                        &[to.clone()],
+                                        procedure,
+                                    )
                                 },
                                 _ => {
                                     let (lhs, rhs) = if fill_right {
@@ -977,13 +1063,17 @@ impl Animate for ComputedTransform {
 impl ComputeSquaredDistance for ComputedTransform {
     #[inline]
     fn compute_squared_distance(&self, other: &Self) -> Result<SquaredDistance, ()> {
-        let squared_dist = self.0.squared_distance_with_zero(&other.0);
+        let squared_dist = super::lists::with_zero::squared_distance(&self.0, &other.0);
 
         // Roll back to matrix interpolation if there is any Err(()) in the
         // transform lists, such as mismatched transform functions.
+        //
+        // FIXME: Using a zero size here seems a bit sketchy but matches the
+        // previous behavior.
         if squared_dist.is_err() {
-            let matrix1: Matrix3D = self.to_transform_3d_matrix(None)?.0.into();
-            let matrix2: Matrix3D = other.to_transform_3d_matrix(None)?.0.into();
+            let rect = euclid::Rect::zero();
+            let matrix1: Matrix3D = self.to_transform_3d_matrix(Some(&rect))?.0.into();
+            let matrix2: Matrix3D = other.to_transform_3d_matrix(Some(&rect))?.0.into();
             return matrix1.compute_squared_distance(&matrix2);
         }
 
@@ -1141,6 +1231,50 @@ impl Animate for ComputedTransformOperation {
     }
 }
 
+impl ComputedTransformOperation {
+    /// If there are no size dependencies, we try to animate in-place, to avoid
+    /// creating deeply nested Interpolate* operations.
+    fn try_animate_mismatched_transforms_in_place(
+        left: &[Self],
+        right: &[Self],
+        procedure: Procedure,
+    ) -> Result<Self, ()> {
+        let (left, _left_3d) = Transform::components_to_transform_3d_matrix(left, None)?;
+        let (right, _right_3d) = Transform::components_to_transform_3d_matrix(right, None)?;
+        Ok(Self::Matrix3D(
+            Matrix3D::from(left).animate(&Matrix3D::from(right), procedure)?,
+        ))
+    }
+
+    fn animate_mismatched_transforms(
+        left: &[Self],
+        right: &[Self],
+        procedure: Procedure,
+    ) -> Result<Self, ()> {
+        if let Ok(op) = Self::try_animate_mismatched_transforms_in_place(left, right, procedure) {
+            return Ok(op);
+        }
+        let from_list = Transform(left.to_vec().into());
+        let to_list = Transform(right.to_vec().into());
+        Ok(match procedure {
+            Procedure::Add => {
+                debug_assert!(false, "Addition should've been handled earlier");
+                return Err(());
+            },
+            Procedure::Interpolate { progress } => Self::InterpolateMatrix {
+                from_list,
+                to_list,
+                progress: Percentage(progress as f32),
+            },
+            Procedure::Accumulate { count } => Self::AccumulateMatrix {
+                from_list,
+                to_list,
+                count: cmp::min(count, i32::max_value() as u64) as i32,
+            },
+        })
+    }
+}
+
 // This might not be the most useful definition of distance. It might be better, for example,
 // to trace the distance travelled by a point as its transform is interpolated between the two
 // lists. That, however, proves to be quite complicated so we take a simple approach for now.
@@ -1256,6 +1390,7 @@ impl ComputedRotate {
 impl Animate for ComputedRotate {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
+        use euclid::approxeq::ApproxEq;
         match (self, other) {
             (&Rotate::None, &Rotate::None) => Ok(Rotate::None),
             (&Rotate::Rotate3D(fx, fy, fz, fa), &Rotate::None) => {
@@ -1282,28 +1417,48 @@ impl Animate for ComputedRotate {
                 ))
             },
             (&Rotate::Rotate3D(_, ..), _) | (_, &Rotate::Rotate3D(_, ..)) => {
+                // https://drafts.csswg.org/css-transforms-2/#interpolation-of-transform-functions
+
                 let (from, to) = (self.resolve(), other.resolve());
-                let (mut fx, mut fy, mut fz, fa) =
+                // For interpolations with the primitive rotate3d(), the direction vectors of the
+                // transform functions get normalized first.
+                let (fx, fy, fz, fa) =
                     transform::get_normalized_vector_and_angle(from.0, from.1, from.2, from.3);
-                let (mut tx, mut ty, mut tz, ta) =
+                let (tx, ty, tz, ta) =
                     transform::get_normalized_vector_and_angle(to.0, to.1, to.2, to.3);
 
-                if fa == Angle::from_degrees(0.) {
-                    fx = tx;
-                    fy = ty;
-                    fz = tz;
-                } else if ta == Angle::from_degrees(0.) {
-                    tx = fx;
-                    ty = fy;
-                    tz = fz;
-                }
-
-                if (fx, fy, fz) == (tx, ty, tz) {
-                    return Ok(Rotate::Rotate3D(fx, fy, fz, fa.animate(&ta, procedure)?));
-                }
-
+                // The rotation angle gets interpolated numerically and the rotation vector of the
+                // non-zero angle is used or (0, 0, 1) if both angles are zero.
+                //
+                // Note: the normalization may get two different vectors because of the
+                // floating-point precision, so we have to use approx_eq to compare two
+                // vectors.
                 let fv = DirectionVector::new(fx, fy, fz);
                 let tv = DirectionVector::new(tx, ty, tz);
+                if fa.is_zero() || ta.is_zero() || fv.approx_eq(&tv) {
+                    let (x, y, z) = if fa.is_zero() && ta.is_zero() {
+                        (0., 0., 1.)
+                    } else if fa.is_zero() {
+                        (tx, ty, tz)
+                    } else {
+                        // ta.is_zero() or both vectors are equal.
+                        (fx, fy, fz)
+                    };
+                    return Ok(Rotate::Rotate3D(x, y, z, fa.animate(&ta, procedure)?));
+                }
+
+                // If the normalized vectors are not equal and both rotation angles are non-zero
+                // the transform functions get converted into 4x4 matrices first and interpolated
+                // as defined in section Interpolation of Matrices afterwards. However, per the
+                // spec issue [1], we prefer to converting the rotate3D into quaternion vectors
+                // directly, and then apply Slerp algorithm.
+                //
+                // Both ways should be identical, and converting rotate3D into quaternion vectors
+                // directly can avoid redundant math operations, e.g. the generation of the
+                // equivalent matrix3D and the unnecessary decomposition parts of translation,
+                // scale, skew, and persepctive in the matrix3D.
+                //
+                // [1] https://github.com/w3c/csswg-drafts/issues/9278
                 let fq = Quaternion::from_direction_and_angle(&fv, fa.radians64());
                 let tq = Quaternion::from_direction_and_angle(&tv, ta.radians64());
 
@@ -1329,6 +1484,7 @@ impl Animate for ComputedRotate {
 impl ComputeSquaredDistance for ComputedRotate {
     #[inline]
     fn compute_squared_distance(&self, other: &Self) -> Result<SquaredDistance, ()> {
+        use euclid::approxeq::ApproxEq;
         match (self, other) {
             (&Rotate::None, &Rotate::None) => Ok(SquaredDistance::from_sqrt(0.)),
             (&Rotate::Rotate3D(_, _, _, a), &Rotate::None) |
@@ -1342,21 +1498,20 @@ impl ComputeSquaredDistance for ComputedRotate {
                 let (mut tx, mut ty, mut tz, angle2) =
                     transform::get_normalized_vector_and_angle(to.0, to.1, to.2, to.3);
 
-                if angle1 == Angle::zero() {
-                    fx = tx;
-                    fy = ty;
-                    fz = tz;
-                } else if angle2 == Angle::zero() {
-                    tx = fx;
-                    ty = fy;
-                    tz = fz;
+                if angle1.is_zero() && angle2.is_zero() {
+                    (fx, fy, fz) = (0., 0., 1.);
+                    (tx, ty, tz) = (0., 0., 1.);
+                } else if angle1.is_zero() {
+                    (fx, fy, fz) = (tx, ty, tz);
+                } else if angle2.is_zero() {
+                    (tx, ty, tz) = (fx, fy, fz);
                 }
 
-                if (fx, fy, fz) == (tx, ty, tz) {
+                let v1 = DirectionVector::new(fx, fy, fz);
+                let v2 = DirectionVector::new(tx, ty, tz);
+                if v1.approx_eq(&v2) {
                     angle1.compute_squared_distance(&angle2)
                 } else {
-                    let v1 = DirectionVector::new(fx, fy, fz);
-                    let v2 = DirectionVector::new(tx, ty, tz);
                     let q1 = Quaternion::from_direction_and_angle(&v1, angle1.radians64());
                     let q2 = Quaternion::from_direction_and_angle(&v2, angle2.radians64());
                     q1.compute_squared_distance(&q2)

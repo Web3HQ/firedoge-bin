@@ -6,7 +6,7 @@ DOM Property Viewer
 
   The DOM Property Viewer is new in Firefox 48. It is disabled by default. Enable it in the :ref:`Developer Tools Settings <tool-toolbox-settings>`
 
-The DOM Property Viewer lets you inspect the properties of the `DOM <https://developer.mozilla.org/en-US/docs/Glossary/DOM>`_ as an expandable tree structure, starting from the `window <https://developer.mozilla.org/en-US/docs/Web/API/Window>`_ object of the current page or the `selected iframe <https://developer.mozilla.org/en-US/docs/Tools/Working_with_iframes>`_.
+The DOM Property Viewer lets you inspect the properties of the `DOM <https://developer.mozilla.org/en-US/docs/Glossary/DOM>`_ as an expandable tree structure, starting from the `window <https://developer.mozilla.org/en-US/docs/Web/API/Window>`_ object of the current page or the :doc:`selected iframe <../working_with_iframes/index>`.
 
 .. image:: dom_inspector.png
   :class: center
@@ -21,7 +21,7 @@ The DOM Property Viewer is not enabled by default. To enable it, open the :ref:`
 Opening the DOM Property Viewer
 *******************************
 
-Once enabled, you can open the DOM Property Viewer by selecting "DOM" from the Web Developer submenu in the Firefox Menu Panel (or Tools menu if you display the menu bar or are on macOS), or by pressing its :kbd:`Ctrl` + :kbd:`Shift` + :kbd:`W` keyboard shortcut.
+Once enabled, you can select the *DOM* panel in the Web Developer Tools, accessible from the Browser Tools submenu
 
 The :doc:`Toolbox <../tools_toolbox/index>` will appear at the bottom of the browser window, with the DOM Property Viewer activated. It's just called "DOM" in the Toolbox.
 

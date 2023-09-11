@@ -2,18 +2,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function, unicode_literals
-
 r"""This module contains code for managing clobbering of the tree."""
 
 import errno
 import os
 import subprocess
 import sys
-
-from mozfile.mozfile import remove as mozfileremove
 from textwrap import TextWrapper
 
+from mozfile.mozfile import remove as mozfileremove
 
 CLOBBER_MESSAGE = "".join(
     [
@@ -83,7 +80,6 @@ class Clobberer(object):
 
         # Object directory clobber older than current is fine.
         if os.path.getmtime(self.src_clobber) <= os.path.getmtime(self.obj_clobber):
-
             return False
 
         return True
@@ -235,7 +231,7 @@ class Clobberer(object):
             self.remove_objdir(False)
             print("Successfully completed auto clobber.", file=fh)
             return True, True, None
-        except (IOError) as error:
+        except IOError as error:
             return (
                 True,
                 False,

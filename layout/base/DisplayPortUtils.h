@@ -71,25 +71,18 @@ struct DisplayPortMargins {
   // were saved.
   CSSPoint mLayoutOffset;
 
-  // The scale required to convert between the CSS cordinates of
-  // mVisualOffset and mLayoutOffset, and the Screen coordinates of mMargins.
-  CSSToScreenScale2D mScale;
-
   // Create displayport margins requested by APZ, relative to an async visual
   // offset provided by APZ.
   static DisplayPortMargins FromAPZ(const ScreenMargin& aMargins,
                                     const CSSPoint& aVisualOffset,
-                                    const CSSPoint& aLayoutOffset,
-                                    const CSSToScreenScale2D& aScale);
+                                    const CSSPoint& aLayoutOffset);
 
   // Create displayport port margins for the given scroll frame.
   // This is for use in cases where we don't have async scroll information from
   // APZ to use to adjust the margins. The visual and layout offset are set
-  // based on the main thread's view of them. If a scale isn't provided, one
-  // is computed based on the main thread's knowledge.
-  static DisplayPortMargins ForScrollFrame(
-      nsIScrollableFrame* aScrollFrame, const ScreenMargin& aMargins,
-      const Maybe<CSSToScreenScale2D>& aScale = Nothing());
+  // based on the main thread's view of them.
+  static DisplayPortMargins ForScrollFrame(nsIScrollableFrame* aScrollFrame,
+                                           const ScreenMargin& aMargins);
 
   // Convenience version of the above that takes a content element.
   static DisplayPortMargins ForContent(nsIContent* aContent,
@@ -107,8 +100,8 @@ struct DisplayPortMargins {
   // applied to (or, in the case of fixed content), the scroll frame wrt. which
   // the content is fixed.
   ScreenMargin GetRelativeToLayoutViewport(
-      ContentGeometryType aGeometryType,
-      nsIScrollableFrame* aScrollableFrame) const;
+      ContentGeometryType aGeometryType, nsIScrollableFrame* aScrollableFrame,
+      const CSSToScreenScale2D& aDisplayportScale) const;
 
   friend std::ostream& operator<<(std::ostream& aOs,
                                   const DisplayPortMargins& aMargins);
@@ -184,8 +177,10 @@ class DisplayPortUtils {
    * @return the display port for the given element which should be used for
    * visibility testing purposes, relative to the scroll frame.
    *
-   * If low-precision buffers are enabled, this is the critical display port;
-   * otherwise, it's the same display port returned by GetDisplayPort().
+   * This is the display port computed with a multipler of 1 which is the normal
+   * display port unless low-precision buffers are enabled. If low-precision
+   * buffers are enabled then GetDisplayPort() uses a multiplier to expand the
+   * displayport, so this will differ from GetDisplayPort.
    */
   static bool GetDisplayPortForVisibilityTesting(nsIContent* aContent,
                                                  nsRect* aResult);
@@ -234,18 +229,6 @@ class DisplayPortUtils {
                                          const nsRect& aBase);
 
   /**
-   * Get the critical display port for the given element.
-   */
-  static bool GetCriticalDisplayPort(
-      nsIContent* aContent, nsRect* aResult,
-      const DisplayPortOptions& aOptions = DisplayPortOptions());
-
-  /**
-   * Check whether the given element has a critical display port.
-   */
-  static bool HasCriticalDisplayPort(nsIContent* aContent);
-
-  /**
    * Remove the displayport for the given element.
    */
   static void RemoveDisplayPort(nsIContent* aContent);
@@ -288,9 +271,9 @@ class DisplayPortUtils {
    * Returns true if there is a displayport on an async scrollable scrollframe
    * after this call, either because one was just added or it already existed.
    */
-  static bool MaybeCreateDisplayPort(nsDisplayListBuilder* aBuilder,
-                                     nsIFrame* aScrollFrame,
-                                     RepaintMode aRepaintMode);
+  static bool MaybeCreateDisplayPort(
+      nsDisplayListBuilder* aBuilder, nsIFrame* aScrollFrame,
+      nsIScrollableFrame* aScrollFrameAsScrollable, RepaintMode aRepaintMode);
 
   /**
    * Sets a zero margin display port on all proper ancestors of aFrame that

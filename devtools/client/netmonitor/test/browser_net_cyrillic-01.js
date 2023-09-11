@@ -7,10 +7,7 @@
  * Tests if cyrillic text is rendered correctly in the source editor.
  */
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   const { tab, monitor } = await initNetMonitor(CYRILLIC_URL, {
     requestCount: 1,
   });

@@ -7,7 +7,7 @@ It can also be useful for patch authors: if the changes comply with these guidel
 ## Bug status and patch file
 
 * Bug status is assigned, and assignee is correctly set.
-* Commit title and message follow [the conventions](https://developer.mozilla.org/en-US/docs/Mercurial/Using_Mercurial#Commit_Message_Conventions).
+* Commit title and message follow [the conventions](https://firefox-source-docs.mozilla.org/mobile/android/geckoview/contributor/contributing-to-mc.html).
 * Commit message says [what is being changed and why](http://mozilla-version-control-tools.readthedocs.org/en/latest/mozreview/commits.html#write-detailed-commit-messages).
 * Patch applies locally to current sources with no merge required.
 * Check that every new file introduced by the patch has the proper Mozilla license header: https://www.mozilla.org/en-US/MPL/headers/
@@ -40,13 +40,13 @@ It can also be useful for patch authors: if the changes comply with these guidel
 * Test changes:
   * The feature or bug is [tested by new tests, or a modification of existing tests](../tests/writing-tests.md).
   * [Test logging](../tests/writing-tests.md#logs-and-comments) is sufficient to help investigating test failures/timeouts.
-  * [Test is e10s compliant](../tests/writing-tests.md#e10s-electrolysis) (doesn't try to access web content from the parent process, etc…).
+  * [Test is e10s compliant](../tests/writing-tests.md#electrolysis) (doesn't try to access web content from the parent process, etc…).
   * Tests are [clean and maintainable](../tests/writing-tests.md#writing-clean-maintainable-test-code).
   * A try push has started (or even better, is green already).
 * User facing changes:
   * If any user-facing interfaces are added/modified, double-check the changes with the UX mockups or specs, if available. If there's any confusion, need-info the UX designer.<!--TODO this needs updating with the new process-->
   * If a user facing string has been added, it is localized and follows [the localization guidelines](../files/adding-files.md#localization-l10n).
-  * If a user-facing string has changed meaning, [the key has been updated](https://developer.mozilla.org/en-US/docs/Mozilla/Localization/Localization_content_best_practices#Changing_existing_strings).
+  * If a user-facing string has changed meaning, [the key has been updated](https://mozilla-l10n.github.io/documentation/localization/making_string_changes.html).
   * If a new image is added, it is a SVG image or there is a reason for not using a SVG.
   * If a SVG is added/modified, it follows [the SVG guidelines](../frontend/svgs.md).
   * If a documented feature has been modified, the keyword `dev-doc-needed` is present on the bug.
@@ -56,4 +56,3 @@ It can also be useful for patch authors: if the changes comply with these guidel
 * R+: the code should land as soon as possible.
 * R+ with comments: there are some comments, but they are minor enough, or don't require a new review once addressed, trust the author.
 * R cancel / R- / F+: there is something wrong with the code, and a new review is required.
-

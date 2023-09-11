@@ -71,6 +71,8 @@ EXPORTS.mozilla = [
     "MaybeStorageBase.h",
     "MemoryChecking.h",
     "MemoryReporting.h",
+    "MoveOnlyFunction.h",
+    "MruCache.h",
     "NonDereferenceable.h",
     "NotNull.h",
     "Opaque.h",
@@ -108,12 +110,11 @@ EXPORTS.mozilla = [
     "TemplateLib.h",
     "TextUtils.h",
     "ThreadLocal.h",
+    "ThreadSafety.h",
     "ThreadSafeWeakPtr.h",
     "ToString.h",
-    "Tuple.h",
     "TypedEnumBits.h",
     "Types.h",
-    "TypeTraits.h",
     "UniquePtr.h",
     "UniquePtrExtensions.h",
     "Unused.h",
@@ -130,6 +131,10 @@ EXPORTS["double-conversion"] = [
     "double-conversion/double-conversion/double-to-string.h",
     "double-conversion/double-conversion/string-to-double.h",
     "double-conversion/double-conversion/utils.h",
+]
+
+EXPORTS.function2 += [
+    "/third_party/function2/include/function2/function2.hpp",
 ]
 
 LOCAL_INCLUDES += [
@@ -186,6 +191,7 @@ DEFINES["IMPL_MFBT"] = True
 
 SOURCES += [
     "lz4/lz4.c",
+    "lz4/lz4file.c",
     "lz4/lz4frame.c",
     "lz4/lz4hc.c",
     "lz4/xxhash.c",
@@ -200,4 +206,7 @@ if CONFIG["MOZ_NEEDS_LIBATOMIC"]:
 
 DEFINES["LZ4LIB_VISIBILITY"] = ""
 
-REQUIRES_UNIFIED_BUILD = True
+# This is kind of gross because this is not a subdirectory,
+# but pure_virtual requires mfbt to build and some projects
+# don't use mfbt.
+DIRS += ["../build/pure_virtual"]

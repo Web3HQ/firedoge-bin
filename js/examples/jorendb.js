@@ -59,7 +59,14 @@ wrap(this, 'putstr');
 
 // Convert a debuggee value v to a string.
 function dvToString(v) {
-    return (typeof v !== 'object' || v === null) ? uneval(v) : "[object " + v.class + "]";
+    if (typeof(v) === 'object' && v !== null) {
+        return `[object ${v.class}]`;
+    }
+    const s = uneval(v);
+    if (s.length > 400) {
+        return s.substr(0, 400) + "...<" + (s.length - 400) + " more bytes>...";
+    }
+    return s;
 }
 
 function summaryObject(dv) {
@@ -76,7 +83,7 @@ function summaryObject(dv) {
 
 function debuggeeValueToString(dv, style) {
     var dvrepr = dvToString(dv);
-    if (!style.pretty || (typeof dv !== 'object'))
+    if (!style.pretty || (typeof dv !== 'object') || (dv === null))
         return [dvrepr, undefined];
 
     const exec = debuggeeGlobalWrapper.executeInGlobalWithBindings.bind(debuggeeGlobalWrapper);
@@ -874,6 +881,7 @@ while (rerun) {
             } catch (exc) {
                 print("Caught exception " + exc);
                 print(exc.stack);
+                break;
             }
         } else if (task.action == 'repl') {
             repl();

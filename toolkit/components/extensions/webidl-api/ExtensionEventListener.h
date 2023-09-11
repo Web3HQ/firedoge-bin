@@ -14,6 +14,8 @@
 #include "mozilla/dom/WorkerRunnable.h"
 #include "mozilla/dom/WorkerPrivate.h"
 
+#include "ExtensionBrowser.h"
+
 class nsIGlobalObject;
 
 namespace mozilla {
@@ -112,7 +114,7 @@ class ExtensionEventListener final : public mozIExtensionEventListener {
   // Used to make sure we are not going to release the
   // instance on the worker thread, while we are in the
   // process of forwarding a call from the main thread.
-  Mutex mMutex;
+  Mutex mMutex MOZ_UNANNOTATED;
 };
 
 // A WorkerRunnable subclass used to call an ExtensionEventListener
@@ -200,8 +202,10 @@ class ExtensionListenerCallPromiseResultHandler
       dom::ThreadSafeWorkerRef* aWorkerRef);
 
   // PromiseNativeHandler
-  void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue) override;
-  void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue) override;
+  void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                        ErrorResult& aRv) override;
+  void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                        ErrorResult& aRv) override;
 
   enum class PromiseCallbackType { Resolve, Reject };
 

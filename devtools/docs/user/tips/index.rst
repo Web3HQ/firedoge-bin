@@ -121,7 +121,7 @@ Style Editor
   :width: 20
 
 - The black box icon |image4| in the style sheet pane toggles the visibility of a style sheet.
-- Click an :ref:`@media rule <style-editor-the-media-sidebar>` to apply it in :doc:`Responsive Design Mode <../responsive_design_mode/index>`.
+- Click an :ref:`@media rule <style-editor-the-at-rules-sidebar>` to apply it in :doc:`Responsive Design Mode <../responsive_design_mode/index>`.
 - Click the import button |image5| to import a style sheet or the create button |image6| to create a new one.
 - Click the options button in the :ref:`style sheet pane <style-editor-the-style-sheet-pane>` and click :ref:`"Show original sources" <style-editor-source-map-support>` to toggle the display of CSS preprocessor files.
 
@@ -142,4 +142,3 @@ Storage Inspector
 - Right-click the column headers to open a menu allowing to toggle the display of the columns.
 - Right-click an entry and click "Delete *name*" to delete it or "Delete All" to delete all entries.
 - Select an entry to see the parsed value of it in the sidebar.
-

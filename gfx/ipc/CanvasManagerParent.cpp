@@ -6,11 +6,14 @@
 
 #include "CanvasManagerParent.h"
 #include "mozilla/dom/WebGLParent.h"
+#include "mozilla/gfx/CanvasRenderThread.h"
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/ipc/Endpoint.h"
 #include "mozilla/layers/CompositorThread.h"
+#include "mozilla/webgpu/WebGPUParent.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "nsIThread.h"
+#include "nsThreadUtils.h"
 
 namespace mozilla::gfx {
 
@@ -22,9 +25,7 @@ CanvasManagerParent::ManagerSet CanvasManagerParent::sManagers;
 
   auto manager = MakeRefPtr<CanvasManagerParent>();
 
-  if (gfxVars::SupportsThreadsafeGL()) {
-    manager->Bind(std::move(aEndpoint));
-  } else {
+  if (!gfxVars::SupportsThreadsafeGL()) {
     nsCOMPtr<nsIThread> owningThread;
     owningThread = wr::RenderThread::GetRenderThread();
     MOZ_ASSERT(owningThread);
@@ -32,6 +33,16 @@ CanvasManagerParent::ManagerSet CanvasManagerParent::sManagers;
     owningThread->Dispatch(NewRunnableMethod<Endpoint<PCanvasManagerParent>&&>(
         "CanvasManagerParent::Bind", manager, &CanvasManagerParent::Bind,
         std::move(aEndpoint)));
+  } else if (gfxVars::UseCanvasRenderThread()) {
+    nsCOMPtr<nsIThread> owningThread;
+    owningThread = gfx::CanvasRenderThread::GetCanvasRenderThread();
+    MOZ_ASSERT(owningThread);
+
+    owningThread->Dispatch(NewRunnableMethod<Endpoint<PCanvasManagerParent>&&>(
+        "CanvasManagerParent::Bind", manager, &CanvasManagerParent::Bind,
+        std::move(aEndpoint)));
+  } else {
+    manager->Bind(std::move(aEndpoint));
   }
 }
 
@@ -39,20 +50,22 @@ CanvasManagerParent::ManagerSet CanvasManagerParent::sManagers;
   MOZ_ASSERT(NS_IsMainThread());
 
   nsCOMPtr<nsISerialEventTarget> owningThread;
-  if (gfxVars::SupportsThreadsafeGL()) {
-    owningThread = layers::CompositorThread();
-  } else {
+  if (!gfxVars::SupportsThreadsafeGL()) {
     owningThread = wr::RenderThread::GetRenderThread();
+  } else if (gfxVars::UseCanvasRenderThread()) {
+    owningThread = gfx::CanvasRenderThread::GetCanvasRenderThread();
+  } else {
+    owningThread = layers::CompositorThread();
   }
   if (!owningThread) {
     return;
   }
 
-  owningThread->Dispatch(
-      NS_NewRunnableFunction(
-          "CanvasManagerParent::Shutdown",
-          []() -> void { CanvasManagerParent::ShutdownInternal(); }),
-      NS_DISPATCH_SYNC);
+  NS_DispatchAndSpinEventLoopUntilComplete(
+      "CanvasManagerParent::Shutdown"_ns, owningThread,
+      NS_NewRunnableFunction("CanvasManagerParent::Shutdown", []() -> void {
+        CanvasManagerParent::ShutdownInternal();
+      }));
 }
 
 /* static */ void CanvasManagerParent::ShutdownInternal() {
@@ -85,6 +98,84 @@ void CanvasManagerParent::ActorDestroy(ActorDestroyReason aWhy) {
 
 already_AddRefed<dom::PWebGLParent> CanvasManagerParent::AllocPWebGLParent() {
   return MakeAndAddRef<dom::WebGLParent>();
+}
+
+already_AddRefed<webgpu::PWebGPUParent>
+CanvasManagerParent::AllocPWebGPUParent() {
+  if (!gfxVars::AllowWebGPU()) {
+    return nullptr;
+  }
+
+  return MakeAndAddRef<webgpu::WebGPUParent>();
+}
+
+mozilla::ipc::IPCResult CanvasManagerParent::RecvInitialize(
+    const uint32_t& aId) {
+  if (!aId) {
+    return IPC_FAIL(this, "invalid id");
+  }
+  if (mId) {
+    return IPC_FAIL(this, "already initialized");
+  }
+  mId = aId;
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult CanvasManagerParent::RecvGetSnapshot(
+    const uint32_t& aManagerId, const int32_t& aProtocolId,
+    const Maybe<RemoteTextureOwnerId>& aOwnerId,
+    webgl::FrontBufferSnapshotIpc* aResult) {
+  if (!aManagerId) {
+    return IPC_FAIL(this, "invalid id");
+  }
+
+  IProtocol* actor = nullptr;
+  for (CanvasManagerParent* i : sManagers) {
+    if (i->OtherPidMaybeInvalid() == OtherPidMaybeInvalid() &&
+        i->mId == aManagerId) {
+      actor = i->Lookup(aProtocolId);
+      break;
+    }
+  }
+
+  if (!actor) {
+    return IPC_FAIL(this, "invalid actor");
+  }
+
+  if (actor->GetSide() != mozilla::ipc::Side::ParentSide) {
+    return IPC_FAIL(this, "unsupported actor");
+  }
+
+  webgl::FrontBufferSnapshotIpc buffer;
+  switch (actor->GetProtocolId()) {
+    case ProtocolId::PWebGLMsgStart: {
+      RefPtr<dom::WebGLParent> webgl = static_cast<dom::WebGLParent*>(actor);
+      mozilla::ipc::IPCResult rv = webgl->GetFrontBufferSnapshot(&buffer, this);
+      if (!rv) {
+        return rv;
+      }
+    } break;
+    case ProtocolId::PWebGPUMsgStart: {
+      RefPtr<webgpu::WebGPUParent> webgpu =
+          static_cast<webgpu::WebGPUParent*>(actor);
+      IntSize size;
+      if (aOwnerId.isNothing()) {
+        return IPC_FAIL(this, "invalid OwnerId");
+      }
+      mozilla::ipc::IPCResult rv =
+          webgpu->GetFrontBufferSnapshot(this, *aOwnerId, buffer.shmem, size);
+      if (!rv) {
+        return rv;
+      }
+      buffer.surfSize.x = static_cast<uint32_t>(size.width);
+      buffer.surfSize.y = static_cast<uint32_t>(size.height);
+    } break;
+    default:
+      return IPC_FAIL(this, "unsupported protocol");
+  }
+
+  *aResult = std::move(buffer);
+  return IPC_OK();
 }
 
 }  // namespace mozilla::gfx

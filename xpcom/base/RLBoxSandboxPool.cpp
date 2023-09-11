@@ -8,6 +8,9 @@
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/RLBoxSandboxPool.h"
+#ifdef MOZ_USING_WASM_SANDBOXING
+#  include "wasm2c_rt_mem.h"
+#endif
 
 using namespace mozilla;
 
@@ -28,7 +31,7 @@ void RLBoxSandboxPool::StartTimer() {
   }
   DebugOnly<nsresult> rv = NS_NewTimerWithCallback(
       getter_AddRefs(mTimer), this, mDelaySeconds * 1000,
-      nsITimer::TYPE_ONE_SHOT, GetMainThreadEventTarget());
+      nsITimer::TYPE_ONE_SHOT, GetMainThreadSerialEventTarget());
   MOZ_ASSERT(NS_SUCCEEDED(rv), "failed to create timer");
 }
 
@@ -63,18 +66,44 @@ void RLBoxSandboxPool::Push(UniquePtr<RLBoxSandboxDataBase> sbxData) {
   }
 }
 
-UniquePtr<RLBoxSandboxPoolData> RLBoxSandboxPool::PopOrCreate() {
+UniquePtr<RLBoxSandboxPoolData> RLBoxSandboxPool::PopOrCreate(
+    uint64_t aMinSize) {
   MutexAutoLock lock(mMutex);
 
   UniquePtr<RLBoxSandboxDataBase> sbxData;
+
   if (!mPool.IsEmpty()) {
-    sbxData = mPool.PopLastElement();
-    CancelTimer();
-    if (!mPool.IsEmpty()) {
-      StartTimer();
+    const int64_t lastIndex = ReleaseAssertedCast<int64_t>(mPool.Length()) - 1;
+    for (int64_t i = lastIndex; i >= 0; i--) {
+      if (mPool[i]->mSize >= aMinSize) {
+        sbxData = std::move(mPool[i]);
+        mPool.RemoveElementAt(i);
+
+        // If we reuse a sandbox from the pool, reset the timer to clear the
+        // pool
+        CancelTimer();
+        if (!mPool.IsEmpty()) {
+          StartTimer();
+        }
+        break;
+      }
     }
-  } else {
-    sbxData = CreateSandboxData();
+  }
+
+  if (!sbxData) {
+#ifdef MOZ_USING_WASM_SANDBOXING
+    // RLBox's wasm sandboxes have a limited platform dependent capacity. We
+    // track this capacity in this pool.
+    const w2c_mem_capacity w2c_capacity = get_valid_wasm2c_memory_capacity(
+        aMinSize, true /* 32-bit wasm memory*/);
+    const uint64_t chosenCapacity = w2c_capacity.max_size;
+#else
+    // Note the noop sandboxes have no capacity limit. In this case we simply
+    // specify a value of 4gb. This is not actually enforced by the noop
+    // sandbox.
+    const uint64_t chosenCapacity = static_cast<uint64_t>(1) << 32;
+#endif
+    sbxData = CreateSandboxData(chosenCapacity);
     NS_ENSURE_TRUE(sbxData, nullptr);
   }
 

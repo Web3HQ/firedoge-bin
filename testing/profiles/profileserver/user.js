@@ -6,8 +6,6 @@
 /* globals user_pref */
 // Turn off budget throttling for the profile server
 user_pref("dom.timeout.enable_budget_timer_throttling", false);
-
-// Explicitly turn off fission so we don't accidentally use the wrong default
-// value. This can be removed once harnesses and tasks assume fission by
-// default.
-user_pref("fission.autostart", false);
+// TODO: Bug 1795750 - Re-enable this pref when we have a new version of the
+// Quitter XPI with a simpler version format.
+user_pref("extensions.webextensions.warnings-as-errors", false);

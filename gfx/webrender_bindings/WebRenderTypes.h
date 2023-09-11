@@ -18,7 +18,7 @@
 #include "mozilla/layers/LayersTypes.h"
 #include "mozilla/PodOperations.h"
 #include "mozilla/Range.h"
-#include "mozilla/TypeTraits.h"
+#include "mozilla/ScrollGeneration.h"
 #include "Units.h"
 #include "nsIWidgetListener.h"
 
@@ -59,6 +59,14 @@ struct ExternalImageKeyPair {
 
 /* Generate a brand new window id and return it. */
 WindowId NewWindowId();
+
+inline bool WindowSizeSanityCheck(int32_t aWidth, int32_t aHeight) {
+  if (aWidth < 0 || aWidth > wr::MAX_RENDER_TASK_SIZE || aHeight < 0 ||
+      aHeight > wr::MAX_RENDER_TASK_SIZE) {
+    return false;
+  }
+  return true;
+}
 
 inline DebugFlags NewDebugFlags(uint32_t aFlags) { return {aFlags}; }
 
@@ -290,6 +298,8 @@ static inline MixBlendMode ToMixBlendMode(gfx::CompositionOp compositionOp) {
       return MixBlendMode::Color;
     case gfx::CompositionOp::OP_LUMINOSITY:
       return MixBlendMode::Luminosity;
+    case gfx::CompositionOp::OP_ADD:
+      return MixBlendMode::PlusLighter;
     default:
       return MixBlendMode::Normal;
   }
@@ -791,6 +801,8 @@ enum class WebRenderError : int8_t {
   NEW_SURFACE,
   BEGIN_DRAW,
   VIDEO_OVERLAY,
+  VIDEO_HW_OVERLAY,
+  VIDEO_SW_OVERLAY,
   EXCESSIVE_RESETS,
 
   Sentinel /* this must be last for serialization purposes. */
@@ -887,6 +899,17 @@ static inline wr::WindowSizeMode ToWrWindowSizeMode(nsSizeMode aSizeMode) {
       MOZ_ASSERT_UNREACHABLE("Tried to convert invalid size mode.");
       return wr::WindowSizeMode::Invalid;
   }
+}
+
+static inline wr::APZScrollGeneration ToWrAPZScrollGeneration(
+    const mozilla::APZScrollGeneration& aGeneration) {
+  return wr::APZScrollGeneration(aGeneration.Raw());
+}
+
+static inline wr::HasScrollLinkedEffect ToWrHasScrollLinkedEffect(
+    bool aHasScrollLinkedEffect) {
+  return aHasScrollLinkedEffect ? wr::HasScrollLinkedEffect::Yes
+                                : wr::HasScrollLinkedEffect::No;
 }
 
 }  // namespace wr

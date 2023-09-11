@@ -9,28 +9,22 @@ way, and certainly anything using mozharness should use this approach.
 """
 
 import json
-
 from textwrap import dedent
 
-from gecko_taskgraph.util.schema import Schema
-from voluptuous import Required, Optional, Any
+from mozpack import path as mozpath
+from taskgraph.util.schema import Schema
+from voluptuous import Any, Optional, Required
 from voluptuous.validators import Match
 
-from mozpack import path as mozpath
-
-from gecko_taskgraph.transforms.job import (
-    configure_taskdesc_for_run,
-    run_job_using,
-)
+from gecko_taskgraph.transforms.job import configure_taskdesc_for_run, run_job_using
 from gecko_taskgraph.transforms.job.common import (
-    setup_secrets,
     docker_worker_add_artifacts,
     generic_worker_add_artifacts,
+    get_expiration,
+    setup_secrets,
 )
-from gecko_taskgraph.transforms.task import (
-    get_branch_repo,
-    get_branch_rev,
-)
+from gecko_taskgraph.transforms.task import get_branch_repo, get_branch_rev
+from gecko_taskgraph.util.attributes import is_try
 
 mozharness_run_schema = Schema(
     {
@@ -76,8 +70,6 @@ mozharness_run_schema = Schema(
         # If true, taskcluster proxy will be enabled; note that it may also be enabled
         # automatically e.g., for secrets support.  Not supported on Windows.
         Required("taskcluster-proxy"): bool,
-        # If true, the build scripts will start Xvfb.  Not supported on Windows.
-        Required("need-xvfb"): bool,
         # If false, indicate that builds should skip producing artifacts.  Not
         # supported on Windows.
         Required("keep-artifacts"): bool,
@@ -97,6 +89,7 @@ mozharness_run_schema = Schema(
         Required("comm-checkout"): bool,
         # Base work directory used to set up the task.
         Optional("workdir"): str,
+        Optional("run-as-root"): bool,
     }
 )
 
@@ -105,12 +98,12 @@ mozharness_defaults = {
     "tooltool-downloads": False,
     "secrets": False,
     "taskcluster-proxy": False,
-    "need-xvfb": False,
     "keep-artifacts": True,
     "requires-signed-builds": False,
     "use-simple-package": True,
     "use-magic-mh-args": True,
     "comm-checkout": False,
+    "run-as-root": False,
 }
 
 
@@ -137,15 +130,16 @@ def mozharness_on_docker_worker_setup(config, job, taskdesc):
         )
 
     # Running via mozharness assumes an image that contains build.sh:
-    # by default, debian11-amd64-build, but it could be another image (like
+    # by default, debian12-amd64-build, but it could be another image (like
     # android-build).
-    worker.setdefault("docker-image", {"in-tree": "debian11-amd64-build"})
+    worker.setdefault("docker-image", {"in-tree": "debian12-amd64-build"})
 
     worker.setdefault("artifacts", []).append(
         {
             "name": "public/logs",
             "path": "{workdir}/logs/".format(**run),
             "type": "directory",
+            "expires-after": get_expiration(config, "medium"),
         }
     )
     worker["taskcluster-proxy"] = run.pop("taskcluster-proxy", None)
@@ -188,7 +182,7 @@ def mozharness_on_docker_worker_setup(config, job, taskdesc):
     if "job-script" in run:
         env["JOB_SCRIPT"] = run["job-script"]
 
-    if config.params.is_try():
+    if is_try(config.params):
         env["TRY_COMMIT_MSG"] = config.params["message"]
 
     # if we're not keeping artifacts, set some env variables to empty values
@@ -198,12 +192,6 @@ def mozharness_on_docker_worker_setup(config, job, taskdesc):
     if not run.pop("keep-artifacts"):
         env["DIST_TARGET_UPLOADS"] = ""
         env["DIST_UPLOADS"] = ""
-
-    # Xvfb
-    if run.pop("need-xvfb"):
-        env["NEED_XVFB"] = "true"
-    else:
-        env["NEED_XVFB"] = "false"
 
     # Retry if mozharness returns TBPL_RETRY
     worker["retry-exit-status"] = [4]
@@ -237,9 +225,6 @@ def mozharness_on_generic_worker(config, job, taskdesc):
 
     # fail if invalid run options are included
     invalid = []
-    for prop in ["need-xvfb"]:
-        if prop in run and run.pop(prop):
-            invalid.append(prop)
     if not run.pop("keep-artifacts", True):
         invalid.append("keep-artifacts")
     if invalid:
@@ -255,8 +240,14 @@ def mozharness_on_generic_worker(config, job, taskdesc):
     setup_secrets(config, job, taskdesc)
 
     taskdesc["worker"].setdefault("artifacts", []).append(
-        {"name": "public/logs", "path": "logs", "type": "directory"}
+        {
+            "name": "public/logs",
+            "path": "logs",
+            "type": "directory",
+            "expires-after": get_expiration(config, "medium"),
+        }
     )
+
     if not worker.get("skip-artifacts", False):
         generic_worker_add_artifacts(config, job, taskdesc)
 
@@ -281,7 +272,7 @@ def mozharness_on_generic_worker(config, job, taskdesc):
     # to commands.  Setting a variable to empty in a batch file unsets, so if
     # there is no `TRY_COMMIT_MESSAGE`, pass a space instead, so that
     # mozharness doesn't try to find the commit message on its own.
-    if config.params.is_try():
+    if is_try(config.params):
         env["TRY_COMMIT_MSG"] = config.params["message"] or "no commit message"
 
     if not job["attributes"]["build_platform"].startswith(("win", "macosx")):
@@ -292,10 +283,24 @@ def mozharness_on_generic_worker(config, job, taskdesc):
 
     mh_command = []
     if job["worker"]["os"] == "windows":
-        mh_command.append("c:/mozilla-build/python3/python3.exe")
+        system_python_dir = "c:/mozilla-build/python3/"
         gecko_path = "%GECKO_PATH%"
     else:
+        system_python_dir = ""
         gecko_path = "$GECKO_PATH"
+
+    if run.get("use-system-python", True):
+        python_bindir = system_python_dir
+    else:
+        # $MOZ_PYTHON_HOME is going to be substituted in run-task, when we
+        # know the actual MOZ_PYTHON_HOME value.
+        is_windows = job["worker"]["os"] == "windows"
+        if is_windows:
+            python_bindir = "%MOZ_PYTHON_HOME%/"
+        else:
+            python_bindir = "${MOZ_PYTHON_HOME}/bin/"
+
+    mh_command = ["{}python3".format(python_bindir)]
 
     mh_command += [
         f"{gecko_path}/mach",

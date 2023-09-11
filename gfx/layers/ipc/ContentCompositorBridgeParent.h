@@ -12,12 +12,7 @@
 #include "mozilla/layers/CompositorThread.h"
 #include "mozilla/UniquePtr.h"
 
-namespace mozilla {
-namespace webgpu {
-class PWebGPUParent;
-}  // namespace webgpu
-
-namespace layers {
+namespace mozilla::layers {
 
 class CompositorOptions;
 
@@ -84,6 +79,8 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
     return IPC_OK();
   }
 
+  mozilla::ipc::IPCResult RecvNotifyMemoryPressure() override;
+
   mozilla::ipc::IPCResult RecvCheckContentOnlyTDR(
       const uint32_t& sequenceNum, bool* isContentOnlyTDR) override;
 
@@ -94,14 +91,8 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
     return IPC_OK();
   }
 
-  mozilla::ipc::IPCResult RecvEndRecordingToDisk(
-      EndRecordingToDiskResolver&& aResolve) override {
-    aResolve(false);
-    return IPC_OK();
-  }
-
-  mozilla::ipc::IPCResult RecvEndRecordingToMemory(
-      EndRecordingToMemoryResolver&& aResolve) override {
+  mozilla::ipc::IPCResult RecvEndRecording(
+      EndRecordingResolver&& aResolve) override {
     aResolve(Nothing());
     return IPC_OK();
   }
@@ -167,11 +158,7 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
       const WindowKind& aWindowKind) override;
   bool DeallocPWebRenderBridgeParent(PWebRenderBridgeParent* aActor) override;
 
-  webgpu::PWebGPUParent* AllocPWebGPUParent() override;
-  bool DeallocPWebGPUParent(webgpu::PWebGPUParent* aActor) override;
-
-  void ObserveLayersUpdate(LayersId aLayersId, LayersObserverEpoch aEpoch,
-                           bool aActive) override;
+  void ObserveLayersUpdate(LayersId aLayersId, bool aActive) override;
 
   bool IsRemote() const override { return true; }
 
@@ -194,7 +181,6 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
   RefPtr<CanvasTranslator> mCanvasTranslator;
 };
 
-}  // namespace layers
-}  // namespace mozilla
+}  // namespace mozilla::layers
 
 #endif  // mozilla_layers_ContentCompositorBridgeParent_h

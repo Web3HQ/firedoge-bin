@@ -9,7 +9,7 @@ typedef DOMString CSSOMString;
 // GENERATED CONTENT - DO NOT EDIT
 // Content was automatically extracted by Reffy into webref
 // (https://github.com/w3c/webref)
-// Source: CSS Object Model (CSSOM) (https://drafts.csswg.org/cssom/)
+// Source: CSS Object Model (CSSOM) (https://drafts.csswg.org/cssom-1/)
 
 [Exposed=Window]
 interface MediaList {
@@ -97,16 +97,12 @@ interface CSSRule {
 };
 
 [Exposed=Window]
-interface CSSStyleRule : CSSRule {
-  attribute CSSOMString selectorText;
-  [SameObject, PutForwards=cssText] readonly attribute CSSStyleDeclaration style;
-};
-
-[Exposed=Window]
 interface CSSImportRule : CSSRule {
   readonly attribute USVString href;
   [SameObject, PutForwards=mediaText] readonly attribute MediaList media;
-  [SameObject] readonly attribute CSSStyleSheet styleSheet;
+  [SameObject] readonly attribute CSSStyleSheet? styleSheet;
+  readonly attribute CSSOMString? layerName;
+  readonly attribute CSSOMString? supportsText;
 };
 
 [Exposed=Window]
@@ -114,6 +110,12 @@ interface CSSGroupingRule : CSSRule {
   [SameObject] readonly attribute CSSRuleList cssRules;
   unsigned long insertRule(CSSOMString rule, optional unsigned long index = 0);
   undefined deleteRule(unsigned long index);
+};
+
+[Exposed=Window]
+interface CSSStyleRule : CSSGroupingRule {
+  attribute CSSOMString selectorText;
+  [SameObject, PutForwards=cssText] readonly attribute CSSStyleDeclaration style;
 };
 
 [Exposed=Window]

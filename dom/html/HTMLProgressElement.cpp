@@ -4,7 +4,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "mozilla/EventStates.h"
 #include "mozilla/dom/HTMLProgressElement.h"
 #include "mozilla/dom/HTMLProgressElementBinding.h"
 
@@ -12,30 +11,16 @@ NS_IMPL_NS_NEW_HTML_ELEMENT(Progress)
 
 namespace mozilla::dom {
 
-const double HTMLProgressElement::kIndeterminatePosition = -1.0;
-const double HTMLProgressElement::kDefaultValue = 0.0;
-const double HTMLProgressElement::kDefaultMax = 1.0;
-
 HTMLProgressElement::HTMLProgressElement(
     already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
     : nsGenericHTMLElement(std::move(aNodeInfo)) {
   // We start out indeterminate
-  AddStatesSilently(NS_EVENT_STATE_INDETERMINATE);
+  AddStatesSilently(ElementState::INDETERMINATE);
 }
 
 HTMLProgressElement::~HTMLProgressElement() = default;
 
 NS_IMPL_ELEMENT_CLONE(HTMLProgressElement)
-
-EventStates HTMLProgressElement::IntrinsicState() const {
-  EventStates state = nsGenericHTMLElement::IntrinsicState();
-
-  if (IsIndeterminate()) {
-    state |= NS_EVENT_STATE_INDETERMINATE;
-  }
-
-  return state;
-}
 
 bool HTMLProgressElement::ParseAttribute(int32_t aNamespaceID,
                                          nsAtom* aAttribute,
@@ -52,11 +37,25 @@ bool HTMLProgressElement::ParseAttribute(int32_t aNamespaceID,
                                               aMaybeScriptedPrincipal, aResult);
 }
 
+void HTMLProgressElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
+                                       const nsAttrValue* aValue,
+                                       const nsAttrValue* aOldValue,
+                                       nsIPrincipal* aSubjectPrincipal,
+                                       bool aNotify) {
+  if (aNameSpaceID == kNameSpaceID_None && aName == nsGkAtoms::value) {
+    const bool indeterminate =
+        !aValue || aValue->Type() != nsAttrValue::eDoubleValue;
+    SetStates(ElementState::INDETERMINATE, indeterminate, aNotify);
+  }
+  return nsGenericHTMLElement::AfterSetAttr(
+      aNameSpaceID, aName, aValue, aOldValue, aSubjectPrincipal, aNotify);
+}
+
 double HTMLProgressElement::Value() const {
   const nsAttrValue* attrValue = mAttrs.GetAttr(nsGkAtoms::value);
   if (!attrValue || attrValue->Type() != nsAttrValue::eDoubleValue ||
       attrValue->GetDoubleValue() < 0.0) {
-    return kDefaultValue;
+    return 0.0;
   }
 
   return std::min(attrValue->GetDoubleValue(), Max());
@@ -66,23 +65,18 @@ double HTMLProgressElement::Max() const {
   const nsAttrValue* attrMax = mAttrs.GetAttr(nsGkAtoms::max);
   if (!attrMax || attrMax->Type() != nsAttrValue::eDoubleValue ||
       attrMax->GetDoubleValue() <= 0.0) {
-    return kDefaultMax;
+    return 1.0;
   }
 
   return attrMax->GetDoubleValue();
 }
 
 double HTMLProgressElement::Position() const {
-  if (IsIndeterminate()) {
-    return kIndeterminatePosition;
+  if (State().HasState(ElementState::INDETERMINATE)) {
+    return -1.0;
   }
 
   return Value() / Max();
-}
-
-bool HTMLProgressElement::IsIndeterminate() const {
-  const nsAttrValue* attrValue = mAttrs.GetAttr(nsGkAtoms::value);
-  return !attrValue || attrValue->Type() != nsAttrValue::eDoubleValue;
 }
 
 JSObject* HTMLProgressElement::WrapNode(JSContext* aCx,

@@ -11,10 +11,25 @@
 
 // Worker contexts do not support Services; in that case we have to rely
 // on the support URL redirection.
-const Services = require("Services");
-const supportBaseURL = !isWorker
-  ? Services.urlFormatter.formatURLPref("app.support.baseURL")
-  : "https://support.mozilla.org/kb/";
+
+loader.lazyGetter(this, "supportBaseURL", () => {
+  // Fallback URL used for worker targets, as well as when app.support.baseURL
+  // cannot be formatted.
+  let url = "https://support.mozilla.org/kb/";
+
+  if (!isWorker) {
+    try {
+      // formatURLPref might throw if tokens used in app.support.baseURL
+      // are not available for the current binary. See Bug 1755626.
+      url = Services.urlFormatter.formatURLPref("app.support.baseURL");
+    } catch (e) {
+      console.warn(
+        `Failed to format app.support.baseURL, falling back to ${url} (${e.message})`
+      );
+    }
+  }
+  return url;
+});
 
 const baseErrorURL =
   "https://developer.mozilla.org/docs/Web/JavaScript/Reference/Errors/";
@@ -31,7 +46,6 @@ const ErrorDocs = {
   JSMSG_STMT_AFTER_RETURN: "Stmt_after_return",
   JSMSG_NOT_A_CODEPOINT: "Not_a_codepoint",
   JSMSG_BAD_SORT_ARG: "Array_sort_argument",
-  JSMSG_BAD_WITHSORTED_ARG: "Array_withSorted_argument",
   JSMSG_UNEXPECTED_TYPE: "Unexpected_type",
   JSMSG_NOT_DEFINED: "Not_defined",
   JSMSG_NOT_FUNCTION: "Not_a_function",
@@ -99,6 +113,7 @@ const ErrorDocs = {
   JSMSG_PROPERTY_FAIL: "cant_access_property",
   JSMSG_PROPERTY_FAIL_EXPR: "cant_access_property",
   JSMSG_REDECLARED_VAR: "Redeclared_parameter",
+  JSMSG_MISMATCHED_PLACEMENT: "Mismatched placement",
   JSMSG_SET_NON_OBJECT_RECEIVER: "Cant_assign_to_property",
 };
 
@@ -112,12 +127,10 @@ const PUBLIC_KEY_PINS_LEARN_MORE =
   "https://developer.mozilla.org/docs/Web/HTTP/Public_Key_Pinning";
 const STRICT_TRANSPORT_SECURITY_LEARN_MORE =
   "https://developer.mozilla.org/docs/Web/HTTP/Headers/Strict-Transport-Security";
-const WEAK_SIGNATURE_ALGORITHM_LEARN_MORE =
-  "https://developer.mozilla.org/docs/Web/Security/Weak_Signature_Algorithm";
 const MIME_TYPE_MISMATCH_LEARN_MORE =
   "https://developer.mozilla.org/docs/Web/HTTP/Headers/X-Content-Type-Options";
 const SOURCE_MAP_LEARN_MORE =
-  "https://developer.mozilla.org/en-US/docs/Tools/Debugger/Source_map_errors";
+  "https://firefox-source-docs.mozilla.org/devtools-user/debugger/source_map_errors/";
 const TLS_LEARN_MORE =
   "https://blog.mozilla.org/security/2018/10/15/removing-old-versions-of-tls/";
 const X_FRAME_OPTIONS_LEARN_MORE =
@@ -134,7 +147,6 @@ const ErrorCategories = {
   "Mixed Content Blocker": MIXED_CONTENT_LEARN_MORE,
   "Invalid HPKP Headers": PUBLIC_KEY_PINS_LEARN_MORE,
   "Invalid HSTS Headers": STRICT_TRANSPORT_SECURITY_LEARN_MORE,
-  "SHA-1 Signature": WEAK_SIGNATURE_ALGORITHM_LEARN_MORE,
   "Tracking Protection": TRACKING_PROTECTION_LEARN_MORE,
   MIMEMISMATCH: MIME_TYPE_MISMATCH_LEARN_MORE,
   "source map": SOURCE_MAP_LEARN_MORE,

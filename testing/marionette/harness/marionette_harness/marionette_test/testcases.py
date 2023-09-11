@@ -2,8 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import
-
 import imp
 import os
 import re
@@ -12,11 +10,9 @@ import time
 import unittest
 import warnings
 import weakref
-
 from unittest.case import SkipTest
 
 import six
-
 from marionette_driver.errors import TimeoutException, UnresponsiveInstanceException
 from mozlog import get_default_logger
 
@@ -86,7 +82,6 @@ class MetaParameterized(type):
 
 @six.add_metaclass(MetaParameterized)
 class CommonTestCase(unittest.TestCase):
-
     match_re = None
     failureException = AssertionError
     pydebugger = None
@@ -341,7 +336,6 @@ class CommonTestCase(unittest.TestCase):
 
 
 class MarionetteTestCase(CommonTestCase):
-
     match_re = re.compile(r"test_(.*)\.py$")
 
     def __init__(

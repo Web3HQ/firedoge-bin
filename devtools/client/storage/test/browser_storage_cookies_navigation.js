@@ -2,21 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-/* import-globals-from head.js */
 "use strict";
 
-// test without target switching
-add_task(async function() {
-  await testNavigation();
-});
-
-// test with target switching enabled
-add_task(async function() {
-  enableTargetSwitching();
-  await testNavigation();
-});
-
-async function testNavigation() {
+add_task(async function () {
   // Bug 1617611: Fix all the tests broken by "cookies SameSite=lax by default"
   await SpecialPowers.pushPrefEnv({
     set: [["network.cookie.sameSite.laxByDefault", false]],
@@ -94,9 +82,13 @@ async function testNavigation() {
   await SpecialPowers.spawn(
     gBrowser.selectedBrowser,
     [URL_IFRAME],
-    async function(url) {
+    async function (url) {
       const iframe = content.document.querySelector("iframe");
+      const onIframeLoaded = new Promise(loaded =>
+        iframe.addEventListener("load", loaded, { once: true })
+      );
       iframe.src = url;
+      await onIframeLoaded;
     }
   );
   info("Waiting for storage tree to update");
@@ -125,7 +117,11 @@ async function testNavigation() {
 
   info("Navigate backward to test bfcache navigation");
   gBrowser.goBack();
-  await waitUntil(() => isInTree(doc, ["cookies", "https://example.net"]));
+  await waitUntil(
+    () =>
+      isInTree(doc, ["cookies", "https://example.net"]) &&
+      isInTree(doc, ["cookies", "https://example.org"])
+  );
 
   ok(
     !isInTree(doc, ["cookies", "https://example.com"]),
@@ -140,4 +136,4 @@ async function testNavigation() {
   );
 
   SpecialPowers.clearUserPref("network.cookie.sameSite.laxByDefault");
-}
+});

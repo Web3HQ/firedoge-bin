@@ -4,12 +4,12 @@
     "types": [
       {
         "$extend": "PermissionNoPrompt",
-        "choices": [{
-          "type": "string",
-          "enum": [
-            "geckoProfiler"
-          ]
-        }]
+        "choices": [
+          {
+            "type": "string",
+            "enum": ["geckoProfiler"]
+          }
+        ]
       }
     ]
   },
@@ -25,19 +25,15 @@
         "enum": [
           "java",
           "js",
-          "leaf",
           "mainthreadio",
           "fileio",
           "fileioall",
-          "noiostacks",
+          "nomarkerstacks",
           "screenshots",
           "seqstyle",
           "stackwalk",
-          "threads",
-          "jstracer",
           "jsallocations",
           "nostacksampling",
-          "preferencereads",
           "nativeallocations",
           "ipcmessages",
           "audiocallbacktracing",
@@ -47,24 +43,25 @@
           "samplingallthreads",
           "markersallthreads",
           "unregisteredthreads",
-          "responsiveness"
+          "processcpu",
+          "power",
+          "responsiveness",
+          "cpufreq"
         ]
       },
       {
         "id": "supports",
         "type": "string",
-        "enum": [
-          "windowLength"
-        ]
+        "enum": ["windowLength"]
       }
     ],
     "functions": [
       {
-       "name": "start",
-       "type": "function",
-       "description": "Starts the profiler with the specified settings.",
-       "async": true,
-       "parameters": [
+        "name": "start",
+        "type": "function",
+        "description": "Starts the profiler with the specified settings.",
+        "async": true,
+        "parameters": [
           {
             "name": "settings",
             "type": "object",

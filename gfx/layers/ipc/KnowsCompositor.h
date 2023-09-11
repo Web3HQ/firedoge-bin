@@ -113,6 +113,11 @@ class KnowsCompositor {
     return lock.ref().mTextureFactoryIdentifier.mSupportsComponentAlpha;
   }
 
+  bool SupportsD3D11NV12() const {
+    auto lock = mData.Lock();
+    return lock.ref().mTextureFactoryIdentifier.mSupportsD3D11NV12;
+  }
+
   bool SupportsD3D11() const {
     auto lock = mData.Lock();
     return lock.ref().mTextureFactoryIdentifier.mParentBackend ==
@@ -142,6 +147,14 @@ class KnowsCompositor {
     MOZ_ASSERT(lock.ref().mTextureFactoryIdentifier.mParentBackend ==
                layers::LayersBackend::LAYERS_WR);
     return lock.ref().mTextureFactoryIdentifier.mWebRenderBackend;
+  }
+
+  bool UsingHardwareWebRender() const {
+    auto lock = mData.Lock();
+    return lock.ref().mTextureFactoryIdentifier.mParentBackend ==
+               layers::LayersBackend::LAYERS_WR &&
+           lock.ref().mTextureFactoryIdentifier.mWebRenderBackend ==
+               WebRenderBackend::HARDWARE;
   }
 
   bool UsingSoftwareWebRender() const {

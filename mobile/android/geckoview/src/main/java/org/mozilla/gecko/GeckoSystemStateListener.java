@@ -59,6 +59,15 @@ public class GeckoSystemStateListener implements InputManager.InputDeviceListene
         };
     contentResolver.registerContentObserver(animationSetting, false, mContentObserver);
 
+    final Uri invertSetting =
+        Settings.Secure.getUriFor(Settings.Secure.ACCESSIBILITY_DISPLAY_INVERSION_ENABLED);
+    contentResolver.registerContentObserver(invertSetting, false, mContentObserver);
+
+    final Uri textContrastSetting =
+        Settings.Secure.getUriFor(
+            /*Settings.Secure.ACCESSIBILITY_HIGH_TEXT_CONTRAST_ENABLED*/ "high_text_contrast_enabled");
+    contentResolver.registerContentObserver(textContrastSetting, false, mContentObserver);
+
     mIsNightMode =
         (sApplicationContext.getResources().getConfiguration().uiMode
                 & Configuration.UI_MODE_NIGHT_MASK)
@@ -104,6 +113,48 @@ public class GeckoSystemStateListener implements InputManager.InputDeviceListene
 
     return Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1)
         == 0.0f;
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
+  @WrapForJNI(calledFrom = "gecko")
+  /**
+   * For inverted-colors queries feature.
+   *
+   * <p>Uses `Settings.Secure.ACCESSIBILITY_DISPLAY_INVERSION_ENABLED` which was introduced in API
+   * version 21.
+   */
+  private static boolean isInvertedColors() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+      return false;
+    }
+
+    final ContentResolver contentResolver = sApplicationContext.getContentResolver();
+
+    return Settings.Secure.getInt(
+            contentResolver, Settings.Secure.ACCESSIBILITY_DISPLAY_INVERSION_ENABLED, 0)
+        == 1;
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
+  @WrapForJNI(calledFrom = "gecko")
+  /**
+   * For prefers-contrast queries feature.
+   *
+   * <p>Uses `Settings.Secure.ACCESSIBILITY_HIGH_TEXT_CONTRAST_ENABLED` which was introduced in API
+   * version 21.
+   */
+  private static boolean prefersContrast() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+      return false;
+    }
+
+    final ContentResolver contentResolver = sApplicationContext.getContentResolver();
+
+    return Settings.Secure.getInt(
+            contentResolver, /*Settings.Secure.ACCESSIBILITY_HIGH_TEXT_CONTRAST_ENABLED*/
+            "high_text_contrast_enabled",
+            0)
+        == 1;
   }
 
   /** For prefers-color-scheme media queries feature. */

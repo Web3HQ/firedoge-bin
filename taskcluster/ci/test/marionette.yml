@@ -21,42 +21,36 @@ job-defaults:
     test-manifest-loader: null  # don't load tests in the taskgraph
     tier:
         by-variant:
-            fission: 2
+            headless: 2
             default: default
     variants:
-        - fission
         - webrender-sw
+        - headless
     run-on-projects:
         by-variant:
-            fission:
+            headless:
                 by-test-platform:
-                    (linux.*64|windows10-64)(-shippable)?(-qr)?/.*: ['trunk']
-                    linux.*64-asan-qr/opt: ['trunk']
+                    (linux.*64)(-shippable)?-qr/opt: built-projects
                     default: []
             webrender-sw:
                 by-test-platform:
+                    .*wayland.*: []
                     .*/debug: built-projects
                     default: []
-            default: built-projects
-    virtualization:
-        by-test-platform:
-            windows10-64.*: hardware
-            default: virtual
-    python-3: true
+            default:
+                by-test-platform:
+                    .*(tsan|wayland).*: []
+                    default: built-projects
+    virtualization: virtual
 
 marionette:
     description: "Marionette unittest run"
     treeherder-symbol: Mn
-    max-run-time: 5400
+    max-run-time:
+        by-test-platform:
+            .*asan.*: 5400
+            .*ccov.*: 3600
+            .*debug.*: 3600
+            default: 2700
     instance-size: default
     chunks: 1
-
-marionette-headless:
-    description: "Marionette headless unittest run"
-    treeherder-symbol: MnH
-    max-run-time: 5400
-    instance-size: default
-    tier: 2
-    mozharness:
-        extra-options:
-            - --headless

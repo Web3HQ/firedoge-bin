@@ -18,6 +18,7 @@
 #include "jstypes.h"  // JS_PUBLIC_API
 
 #include "js/Class.h"  // JSTraceOp
+#include "js/RefCounted.h"
 
 struct JS_PUBLIC_API JSContext;
 class JS_PUBLIC_API JSObject;
@@ -58,6 +59,14 @@ enum class WeakRefSpecifier {
   Disabled,
   EnabledWithCleanupSome,
   EnabledWithoutCleanupSome
+};
+
+struct LocaleString : js::RefCounted<LocaleString> {
+  const char* chars_;
+
+  explicit LocaleString(const char* chars) : chars_(chars) {}
+
+  auto chars() const { return chars_; }
 };
 
 /**
@@ -172,40 +181,6 @@ class JS_PUBLIC_API RealmCreationOptions {
   bool getCoopAndCoepEnabled() const;
   RealmCreationOptions& setCoopAndCoepEnabled(bool flag);
 
-  bool getStreamsEnabled() const { return streams_; }
-  RealmCreationOptions& setStreamsEnabled(bool flag) {
-#ifndef MOZ_DOM_STREAMS
-    streams_ = flag;
-#else
-    MOZ_ASSERT(!streams_);
-#endif
-    return *this;
-  }
-
-  bool getReadableByteStreamsEnabled() const { return readableByteStreams_; }
-  RealmCreationOptions& setReadableByteStreamsEnabled(bool flag) {
-    readableByteStreams_ = flag;
-    return *this;
-  }
-
-  bool getBYOBStreamReadersEnabled() const { return byobStreamReaders_; }
-  RealmCreationOptions& setBYOBStreamReadersEnabled(bool enabled) {
-    byobStreamReaders_ = enabled;
-    return *this;
-  }
-
-  bool getWritableStreamsEnabled() const { return writableStreams_; }
-  RealmCreationOptions& setWritableStreamsEnabled(bool enabled) {
-    writableStreams_ = enabled;
-    return *this;
-  }
-
-  bool getReadableStreamPipeToEnabled() const { return readableStreamPipeTo_; }
-  RealmCreationOptions& setReadableStreamPipeToEnabled(bool enabled) {
-    readableStreamPipeTo_ = enabled;
-    return *this;
-  }
-
   WeakRefSpecifier getWeakRefsEnabled() const { return weakRefs_; }
   RealmCreationOptions& setWeakRefsEnabled(WeakRefSpecifier spec) {
     weakRefs_ = spec;
@@ -232,10 +207,36 @@ class JS_PUBLIC_API RealmCreationOptions {
     return *this;
   }
 
-#ifdef ENABLE_NEW_SET_METHODS
+  bool getShadowRealmsEnabled() const { return shadowRealms_; }
+  RealmCreationOptions& setShadowRealmsEnabled(bool flag) {
+    shadowRealms_ = flag;
+    return *this;
+  }
+
+  bool getWellFormedUnicodeStringsEnabled() const {
+    return wellFormedUnicodeStrings_;
+  }
+  RealmCreationOptions& setWellFormedUnicodeStringsEnabled(bool flag) {
+    wellFormedUnicodeStrings_ = flag;
+    return *this;
+  }
+
+#ifdef NIGHTLY_BUILD
+  bool getArrayGroupingEnabled() const { return arrayGrouping_; }
+  RealmCreationOptions& setArrayGroupingEnabled(bool flag) {
+    arrayGrouping_ = flag;
+    return *this;
+  }
+
   bool getNewSetMethodsEnabled() const { return newSetMethods_; }
   RealmCreationOptions& setNewSetMethodsEnabled(bool flag) {
     newSetMethods_ = flag;
+    return *this;
+  }
+
+  bool getArrayBufferTransferEnabled() const { return arrayBufferTransfer_; }
+  RealmCreationOptions& setArrayBufferTransferEnabled(bool flag) {
+    arrayBufferTransfer_ = flag;
     return *this;
   }
 #endif
@@ -247,6 +248,35 @@ class JS_PUBLIC_API RealmCreationOptions {
   bool secureContext() const { return secureContext_; }
   RealmCreationOptions& setSecureContext(bool flag) {
     secureContext_ = flag;
+    return *this;
+  }
+
+  // Non-standard option to freeze certain builtin constructors and seal their
+  // prototypes. Also defines these constructors on the global as non-writable
+  // and non-configurable.
+  bool freezeBuiltins() const { return freezeBuiltins_; }
+  RealmCreationOptions& setFreezeBuiltins(bool flag) {
+    freezeBuiltins_ = flag;
+    return *this;
+  }
+
+  // Force all date/time methods in JavaScript to use the UTC timezone for
+  // fingerprinting protection.
+  bool forceUTC() const { return forceUTC_; }
+  RealmCreationOptions& setForceUTC(bool flag) {
+    forceUTC_ = flag;
+    return *this;
+  }
+
+  RefPtr<LocaleString> locale() const { return locale_; }
+  RealmCreationOptions& setLocaleCopyZ(const char* locale);
+
+  // Always use the fdlibm implementation of math functions instead of the
+  // platform native libc implementations. Useful for fingerprinting protection
+  // and cross-platform consistency.
+  bool alwaysUseFdlibm() const { return alwaysUseFdlibm_; }
+  RealmCreationOptions& setAlwaysUseFdlibm(bool flag) {
+    alwaysUseFdlibm_ = flag;
     return *this;
   }
 
@@ -264,24 +294,30 @@ class JS_PUBLIC_API RealmCreationOptions {
     Zone* zone_;
   };
   uint64_t profilerRealmID_ = 0;
+  RefPtr<LocaleString> locale_;
   WeakRefSpecifier weakRefs_ = WeakRefSpecifier::Disabled;
   bool invisibleToDebugger_ = false;
   bool preserveJitCode_ = false;
   bool sharedMemoryAndAtomics_ = false;
   bool defineSharedArrayBufferConstructor_ = true;
   bool coopAndCoep_ = false;
-  bool streams_ = false;
-  bool readableByteStreams_ = false;
-  bool byobStreamReaders_ = false;
-  bool writableStreams_ = false;
-  bool readableStreamPipeTo_ = false;
   bool toSource_ = false;
   bool propertyErrorMessageFix_ = false;
   bool iteratorHelpers_ = false;
-#ifdef ENABLE_NEW_SET_METHODS
+  bool shadowRealms_ = false;
+  // Pref for String.prototype.{is,to}WellFormed() methods.
+  bool wellFormedUnicodeStrings_ = true;
+#ifdef NIGHTLY_BUILD
+  bool arrayGrouping_ = false;
+  // Pref for new Set.prototype methods.
   bool newSetMethods_ = false;
+  // Pref for ArrayBuffer.prototype.transfer{,ToFixedLength}() methods.
+  bool arrayBufferTransfer_ = false;
 #endif
   bool secureContext_ = false;
+  bool freezeBuiltins_ = false;
+  bool forceUTC_ = false;
+  bool alwaysUseFdlibm_ = false;
 };
 
 /**

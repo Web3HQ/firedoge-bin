@@ -5,15 +5,12 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import print_function
-
 import contextlib
 import io
 import os
-import tempfile
 import shutil
 import sys
-
+import tempfile
 from functools import partial
 from itertools import chain
 from operator import itemgetter
@@ -22,27 +19,36 @@ from operator import itemgetter
 UNSUPPORTED_FEATURES = set(
     [
         "tail-call-optimization",
-        "Intl.DateTimeFormat-quarter",
-        "Intl.Segmenter",
-        "Intl.Locale-info",
-        "Atomics.waitAsync",
-        "legacy-regexp",
-        "json-modules",
-        "resizable-arraybuffer",
-        "Temporal",
-        "callable-boundary-realms",
-        "array-find-from-last",
+        "Intl.Segmenter",  # Bug 1423593
+        "Intl.Locale-info",  # Bug 1693576
+        "Intl.DurationFormat",  # Bug 1648139
+        "Atomics.waitAsync",  # Bug 1467846
+        "legacy-regexp",  # Bug 1306461
+        "json-modules",  # Bug 1670176
+        "resizable-arraybuffer",  # Bug 1670026
+        "regexp-duplicate-named-groups",  # Bug 1773135
+        "symbols-as-weakmap-keys",  # Bug 1710433
+        "json-parse-with-source",  # Bug 1658310
     ]
 )
 FEATURE_CHECK_NEEDED = {
     "Atomics": "!this.hasOwnProperty('Atomics')",
     "FinalizationRegistry": "!this.hasOwnProperty('FinalizationRegistry')",
     "SharedArrayBuffer": "!this.hasOwnProperty('SharedArrayBuffer')",
+    "Temporal": "!this.hasOwnProperty('Temporal')",
     "WeakRef": "!this.hasOwnProperty('WeakRef')",
+    "array-grouping": "!Object.groupBy",  # Bug 1792650
+    "decorators": "!(this.hasOwnProperty('getBuildConfiguration')&&getBuildConfiguration()['decorators'])",  # Bug 1435869
+    "iterator-helpers": "!this.hasOwnProperty('Iterator')",  # Bug 1568906
+    "arraybuffer-transfer": "!ArrayBuffer.prototype.transfer",  # Bug 1519163
 }
 RELEASE_OR_BETA = set([])
 SHELL_OPTIONS = {
     "import-assertions": "--enable-import-assertions",
+    "ShadowRealm": "--enable-shadow-realms",
+    "array-grouping": "--enable-array-grouping",
+    "iterator-helpers": "--enable-iterator-helpers",
+    "arraybuffer-transfer": "--enable-arraybuffer-transfer",
 }
 
 
@@ -59,17 +65,30 @@ def loadTest262Parser(test262Dir):
     """
     Loads the test262 test record parser.
     """
-    import imp
+    import importlib.machinery
+    import importlib.util
 
-    fileObj = None
-    try:
-        moduleName = "parseTestRecord"
-        packagingDir = os.path.join(test262Dir, "tools", "packaging")
-        (fileObj, pathName, description) = imp.find_module(moduleName, [packagingDir])
-        return imp.load_module(moduleName, fileObj, pathName, description)
-    finally:
-        if fileObj:
-            fileObj.close()
+    packagingDir = os.path.join(test262Dir, "tools", "packaging")
+    moduleName = "parseTestRecord"
+
+    # Create a FileFinder to load Python source files.
+    loader_details = (
+        importlib.machinery.SourceFileLoader,
+        importlib.machinery.SOURCE_SUFFIXES,
+    )
+    finder = importlib.machinery.FileFinder(packagingDir, loader_details)
+
+    # Find the module spec.
+    spec = finder.find_spec(moduleName)
+    if spec is None:
+        raise RuntimeError("Can't find parseTestRecord module")
+
+    # Create and execute the module.
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Return the executed module
+    return module
 
 
 def tryParseTestFile(test262parser, source, testName):
@@ -284,13 +303,19 @@ def convertTestFile(test262parser, testSource, testName, includeSet, strictTests
         "Can't have both async and negative attributes: %s" % testName
     )
 
-    # Only async tests may use the $DONE function.  However, negative parse
-    # tests may "use" the $DONE function (of course they don't actually use it!)
-    # without specifying the "async" attribute.  Otherwise, $DONE must not
-    # appear in the test.
-    assert b"$DONE" not in testSource or isAsync or isNegative, (
-        "Missing async attribute in: %s" % testName
-    )
+    # Only async tests may use the $DONE or asyncTest function. However,
+    # negative parse tests may "use" the $DONE (or asyncTest) function (of
+    # course they don't actually use it!) without specifying the "async"
+    # attribute. Otherwise, neither $DONE nor asyncTest must appear in the test.
+    #
+    # Some "harness" tests redefine $DONE, so skip this check when the test file
+    # is in the "harness" directory.
+    assert (
+        (b"$DONE" not in testSource and b"asyncTest" not in testSource)
+        or isAsync
+        or isNegative
+        or testName.split(os.path.sep)[0] == "harness"
+    ), ("Missing async attribute in: %s" % testName)
 
     # When the "module" attribute is set, the source code is module code.
     isModule = "module" in testRec
@@ -470,6 +495,7 @@ def process_test262(test262Dir, test262OutDir, strictTests, externManifests):
         "byteConversionValues.js"
     ]
     explicitIncludes[os.path.join("built-ins", "Promise")] = ["promiseHelper.js"]
+    explicitIncludes[os.path.join("built-ins", "Temporal")] = ["temporalHelpers.js"]
     explicitIncludes[os.path.join("built-ins", "TypedArray")] = [
         "byteConversionValues.js",
         "detachArrayBuffer.js",
@@ -478,9 +504,10 @@ def process_test262(test262Dir, test262OutDir, strictTests, externManifests):
     explicitIncludes[os.path.join("built-ins", "TypedArrays")] = [
         "detachArrayBuffer.js"
     ]
+    explicitIncludes[os.path.join("built-ins", "Temporal")] = ["temporalHelpers.js"]
 
     # Process all test directories recursively.
-    for (dirPath, dirNames, fileNames) in os.walk(testDir):
+    for dirPath, dirNames, fileNames in os.walk(testDir):
         relPath = os.path.relpath(dirPath, testDir)
         if relPath == ".":
             continue
@@ -523,7 +550,7 @@ def process_test262(test262Dir, test262OutDir, strictTests, externManifests):
                     test262parser, testSource, testName, includeSet, strictTests
                 )
 
-            for (newFileName, newSource, externRefTest) in convert:
+            for newFileName, newSource, externRefTest in convert:
                 writeTestFile(test262OutDir, newFileName, newSource)
 
                 if externRefTest is not None:
@@ -553,7 +580,6 @@ def fetch_local_changes(inDir, outDir, srcDir, strictTests):
     import subprocess
 
     # TODO: fail if it's in the default branch? or require a branch name?
-
     # Checks for unstaged or non committed files. A clean branch provides a clean status.
     status = subprocess.check_output(
         ("git -C %s status --porcelain" % srcDir).split(" ")
@@ -852,7 +878,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update the test262 test suite.")
     parser.add_argument(
         "--url",
-        default="git://github.com/tc39/test262.git",
+        default="https://github.com/tc39/test262.git",
         help="URL to git repository (default: %(default)s)",
     )
     parser.add_argument(

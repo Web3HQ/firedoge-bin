@@ -2,11 +2,9 @@
  * http://creativecommons.org/publicdomain/zero/1.0/
  */
 
-const { CookieXPCShellUtils } = ChromeUtils.import(
-  "resource://testing-common/CookieXPCShellUtils.jsm"
+const { CookieXPCShellUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/CookieXPCShellUtils.sys.mjs"
 );
-
-const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 
 CookieXPCShellUtils.init(this);
 

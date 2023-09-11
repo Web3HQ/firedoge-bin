@@ -257,14 +257,18 @@ public class GeckoResult<T> {
     }
   }
 
-  /** @return a {@link GeckoResult} that resolves to {@link AllowOrDeny#DENY} */
+  /**
+   * @return a {@link GeckoResult} that resolves to {@link AllowOrDeny#DENY}
+   */
   @AnyThread
   @NonNull
   public static GeckoResult<AllowOrDeny> deny() {
     return GeckoResult.fromValue(AllowOrDeny.DENY);
   }
 
-  /** @return a {@link GeckoResult} that resolves to {@link AllowOrDeny#ALLOW} */
+  /**
+   * @return a {@link GeckoResult} that resolves to {@link AllowOrDeny#ALLOW}
+   */
   @AnyThread
   @NonNull
   public static GeckoResult<AllowOrDeny> allow() {
@@ -797,7 +801,7 @@ public class GeckoResult<T> {
    *
    * @param other The result that this result should mirror
    */
-  private void completeFrom(final GeckoResult<T> other) {
+  public void completeFrom(final @Nullable GeckoResult<T> other) {
     if (other == null) {
       complete(null);
       return;

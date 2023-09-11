@@ -24,11 +24,6 @@ extern crate bitflags;
 extern crate byteorder;
 #[cfg(feature = "nightly")]
 extern crate core;
-#[cfg(target_os = "macos")]
-extern crate core_foundation;
-#[cfg(target_os = "macos")]
-extern crate core_graphics;
-extern crate derive_more;
 #[macro_use]
 extern crate malloc_size_of_derive;
 extern crate serde;
@@ -164,8 +159,39 @@ impl PipelineId {
     pub fn dummy() -> Self {
         PipelineId(!0, !0)
     }
+
+    pub const INVALID: Self = PipelineId(!0, !0);
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct FramePublishId(pub u64);
+
+impl FramePublishId {
+    /// Returns a FramePublishId corresponding to the first frame.
+    ///
+    /// Note that we use 0 as the internal id here because the current code
+    /// increments the frame publish id just before ResultMsg::PublishDocument,
+    /// and we want the first id to be 1.
+    pub fn first() -> Self {
+        FramePublishId(0)
+    }
+
+    /// Advances this FramePublishId to the next.
+    pub fn advance(&mut self) {
+        self.0 += 1;
+    }
+
+    /// An invalid sentinel FramePublishId, which will always compare less than
+    /// any valid FrameId.
+    pub const INVALID: Self = FramePublishId(0);
+}
+
+impl Default for FramePublishId {
+    fn default() -> Self {
+        FramePublishId::INVALID
+    }
+}
 
 /// An opaque pointer-sized value.
 #[repr(C)]
@@ -187,13 +213,29 @@ impl ExternalEvent {
     }
 }
 
-/// Describe whether or not scrolling should be clamped by the content bounds.
-#[derive(Copy, Clone, Deserialize, Serialize)]
-pub enum ScrollClamping {
-    ///
-    ToContentBounds,
-    ///
-    NoClamping,
+pub type APZScrollGeneration = u64;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize, Default)]
+pub struct SampledScrollOffset {
+    pub offset: LayoutVector2D,
+    pub generation: APZScrollGeneration,
+}
+
+/// A flag in each scrollable frame to represent whether the owner of the frame document
+/// has any scroll-linked effect.
+/// See https://firefox-source-docs.mozilla.org/performance/scroll-linked_effects.html
+/// for a definition of scroll-linked effect.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize, PeekPoke)]
+pub enum HasScrollLinkedEffect {
+    Yes,
+    No,
+}
+
+impl Default for HasScrollLinkedEffect {
+    fn default() -> Self {
+        HasScrollLinkedEffect::No
+    }
 }
 
 /// A handler to integrate WebRender with the thread that contains the `Renderer`.
@@ -207,7 +249,7 @@ pub trait RenderNotifier: Send {
         composite_needed: bool,
     );
     /// Notify the thread containing the `Renderer` that a new frame is ready.
-    fn new_frame_ready(&self, _: DocumentId, scrolled: bool, composite_needed: bool, render_time_ns: Option<u64>);
+    fn new_frame_ready(&self, _: DocumentId, scrolled: bool, composite_needed: bool, frame_publish_id: FramePublishId);
     /// A Gecko-specific notification mechanism to get some code executed on the
     /// `Renderer`'s thread, mostly replaced by `NotificationHandler`. You should
     /// probably use the latter instead.
@@ -299,28 +341,22 @@ impl HitTesterRequest {
 
 /// Describe an item that matched a hit-test query.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct HitTestItem {
+pub struct HitTestResultItem {
     /// The pipeline that the display item that was hit belongs to.
     pub pipeline: PipelineId,
 
     /// The tag of the hit display item.
     pub tag: ItemTag,
 
-    /// The hit point in the coordinate space of the "viewport" of the display item. The
-    /// viewport is the scroll node formed by the root reference frame of the display item's
-    /// pipeline.
-    pub point_in_viewport: LayoutPoint,
-
-    /// The coordinates of the original hit test point relative to the origin of this item.
-    /// This is useful for calculating things like text offsets in the client.
-    pub point_relative_to_item: LayoutPoint,
+    /// The animation id from the stacking context.
+    pub animation_id: u64,
 }
 
 /// Returned by `RenderApi::hit_test`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct HitTestResult {
     /// List of items that are match the hit-test query.
-    pub items: Vec<HitTestItem>,
+    pub items: Vec<HitTestResultItem>,
 }
 
 impl Drop for NotificationRequest {
@@ -363,6 +399,11 @@ impl PropertyBindingId {
             uid: value as u32,
         }
     }
+
+    /// Decompose the ID back into the raw integer.
+    pub fn to_u64(&self) -> u64 {
+        ((self.namespace.0 as u64) << 32) | self.uid as u64
+    }
 }
 
 /// A unique key that is used for connecting animated property
@@ -381,6 +422,12 @@ impl<T: Copy> PropertyBindingKey<T> {
     ///
     pub fn with(self, value: T) -> PropertyValue<T> {
         PropertyValue { key: self, value }
+    }
+}
+
+impl<T> Into<u64> for PropertyBindingKey<T> {
+    fn into(self) -> u64 {
+        self.id.to_u64()
     }
 }
 
@@ -559,6 +606,11 @@ bitflags! {
         /// to see which frames were driven by the vsync scheduler so
         /// we store a bit for it.
         const VSYNC                         = 1 << 16;
+        const SKIPPED_COMPOSITE             = 1 << 17;
+        /// Gecko does some special things when it starts observing vsync
+        /// so it can be useful to know what frames are associated with it.
+        const START_OBSERVING_VSYNC         = 1 << 18;
+        const ASYNC_IMAGE_COMPOSITE_UNTIL   = 1 << 19;
     }
 }
 
@@ -634,6 +686,9 @@ bitflags! {
         const FORCE_PICTURE_INVALIDATION = (1 as u32) << 26;
         /// Display window visibility on screen.
         const WINDOW_VISIBILITY_DBG     = 1 << 27;
+        /// Render large blobs with at a smaller size (incorrectly). This is a temporary workaround for
+        /// fuzzing.
+        const RESTRICT_BLOB_SIZE        = 1 << 28;
     }
 }
 

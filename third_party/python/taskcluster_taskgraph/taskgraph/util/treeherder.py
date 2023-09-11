@@ -4,6 +4,8 @@
 
 import re
 
+_JOINED_SYMBOL_RE = re.compile(r"([^(]*)\(([^)]*)\)$")
+
 
 def split_symbol(treeherder_symbol):
     """Split a symbol expressed as grp(sym) into its two parts.  If no group is
@@ -11,7 +13,11 @@ def split_symbol(treeherder_symbol):
     groupSymbol = "?"
     symbol = treeherder_symbol
     if "(" in symbol:
-        groupSymbol, symbol = re.match(r"([^(]*)\(([^)]*)\)", symbol).groups()
+        match = _JOINED_SYMBOL_RE.match(symbol)
+        if match:
+            groupSymbol, symbol = match.groups()
+        else:
+            raise Exception(f"`{symbol}` is not a valid treeherder symbol.")
     return groupSymbol, symbol
 
 
@@ -49,7 +55,6 @@ def inherit_treeherder_from_dep(job, dep_job):
     dep_th_collection = list(
         dep_job.task.get("extra", {}).get("treeherder", {}).get("collection", {}).keys()
     )[0]
-    # XXX Doesn't yet support non-opt
     treeherder.setdefault("platform", f"{dep_th_platform}/{dep_th_collection}")
     treeherder.setdefault(
         "tier", dep_job.task.get("extra", {}).get("treeherder", {}).get("tier", 1)
@@ -57,3 +62,23 @@ def inherit_treeherder_from_dep(job, dep_job):
     # Does not set symbol
     treeherder.setdefault("kind", "build")
     return treeherder
+
+
+def treeherder_defaults(kind, label):
+    defaults = {
+        # Despite its name, this is expected to be a platform+collection
+        "platform": "default/opt",
+        "tier": 1,
+    }
+    if "build" in kind:
+        defaults["kind"] = "build"
+    elif "test" in kind:
+        defaults["kind"] = "test"
+    else:
+        defaults["kind"] = "other"
+
+    # Takes the uppercased first letter of each part of the kind name, eg:
+    # apple-banana -> AB
+    defaults["symbol"] = "".join([c[0] for c in kind.split("-")]).upper()
+
+    return defaults

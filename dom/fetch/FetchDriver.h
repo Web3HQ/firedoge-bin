@@ -9,6 +9,7 @@
 
 #include "nsIChannelEventSink.h"
 #include "nsIInterfaceRequestor.h"
+#include "nsINetworkInterceptController.h"
 #include "nsIStreamListener.h"
 #include "nsIThreadRetargetableStreamListener.h"
 #include "mozilla/ConsoleReportCollector.h"
@@ -38,6 +39,7 @@ class Document;
 class InternalRequest;
 class InternalResponse;
 class PerformanceStorage;
+class PerformanceTimingData;
 
 /**
  * Provides callbacks to be called when response is available or on error.
@@ -51,18 +53,15 @@ class FetchDriverObserver {
       : mReporter(new ConsoleReportCollector()), mGotResponseAvailable(false) {}
 
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(FetchDriverObserver);
-  void OnResponseAvailable(SafeRefPtr<InternalResponse> aResponse) {
-    MOZ_ASSERT(!mGotResponseAvailable);
-    mGotResponseAvailable = true;
-    OnResponseAvailableInternal(std::move(aResponse));
-  }
+  void OnResponseAvailable(SafeRefPtr<InternalResponse> aResponse);
 
   enum EndReason {
     eAborted,
     eByNetworking,
   };
 
-  virtual void OnResponseEnd(EndReason aReason){};
+  virtual void OnResponseEnd(EndReason aReason,
+                             JS::Handle<JS::Value> aReasonDetails){};
 
   nsIConsoleReportCollector* GetReporter() const { return mReporter; }
 
@@ -76,6 +75,10 @@ class FetchDriverObserver {
   // Called once when the first byte of data is received iff
   // NeedOnDataAvailable() returned true when called in OnStartRequest().
   virtual void OnDataAvailable() = 0;
+
+  virtual void OnReportPerformanceTiming() {}
+
+  virtual void OnNotifyNetworkMonitorAlternateStack(uint64_t aChannelID) {}
 
  protected:
   virtual ~FetchDriverObserver() = default;
@@ -94,6 +97,7 @@ class AlternativeDataStreamListener;
 class FetchDriver final : public nsIStreamListener,
                           public nsIChannelEventSink,
                           public nsIInterfaceRequestor,
+                          public nsINetworkInterceptController,
                           public nsIThreadRetargetableStreamListener,
                           public AbortFollower {
  public:
@@ -102,6 +106,7 @@ class FetchDriver final : public nsIStreamListener,
   NS_DECL_NSISTREAMLISTENER
   NS_DECL_NSICHANNELEVENTSINK
   NS_DECL_NSIINTERFACEREQUESTOR
+  NS_DECL_NSINETWORKINTERCEPTCONTROLLER
   NS_DECL_NSITHREADRETARGETABLESTREAMLISTENER
 
   FetchDriver(SafeRefPtr<InternalRequest> aRequest, nsIPrincipal* aPrincipal,
@@ -128,8 +133,18 @@ class FetchDriver final : public nsIStreamListener,
     mOriginStack = std::move(aOriginStack);
   }
 
+  PerformanceTimingData* GetPerformanceTimingData(nsAString& aInitiatorType,
+                                                  nsAString& aEntryName);
+
   // AbortFollower
   void RunAbortAlgorithm() override;
+  void FetchDriverAbortActions(AbortSignalImpl* aSignalImpl);
+
+  void EnableNetworkInterceptControl();
+
+  void SetAssociatedBrowsingContextID(uint64_t aID) {
+    mAssociatedBrowsingContextID = aID;
+  }
 
  private:
   nsCOMPtr<nsIPrincipal> mPrincipal;
@@ -179,6 +194,9 @@ class FetchDriver final : public nsIStreamListener,
   bool mResponseAvailableCalled;
   bool mFetchCalled;
 #endif
+  nsCOMPtr<nsINetworkInterceptController> mInterceptController;
+
+  uint64_t mAssociatedBrowsingContextID{0};
 
   friend class AlternativeDataStreamListener;
 
@@ -199,8 +217,8 @@ class FetchDriver final : public nsIStreamListener,
   // response.
   void FailWithNetworkError(nsresult rv);
 
-  void SetRequestHeaders(nsIHttpChannel* aChannel,
-                         bool aStripRequestBodyHeader) const;
+  void SetRequestHeaders(nsIHttpChannel* aChannel, bool aStripRequestBodyHeader,
+                         bool aStripAuthHeader) const;
 
   void FinishOnStopRequest(AlternativeDataStreamListener* aAltDataListener);
 };

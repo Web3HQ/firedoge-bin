@@ -20,6 +20,10 @@ namespace jxl {
 namespace HWY_NAMESPACE {
 namespace {
 
+// These templates are not found via ADL.
+using hwy::HWY_NAMESPACE::Div;
+using hwy::HWY_NAMESPACE::MulAdd;
+
 // Primary template: default to actual division.
 template <typename T, class V>
 struct FastDivision {
@@ -31,14 +35,14 @@ struct FastDivision<float, V> {
   // One Newton-Raphson iteration.
   static HWY_INLINE V ReciprocalNR(const V x) {
     const auto rcp = ApproximateReciprocal(x);
-    const auto sum = rcp + rcp;
-    const auto x_rcp = x * rcp;
+    const auto sum = Add(rcp, rcp);
+    const auto x_rcp = Mul(x, rcp);
     return NegMulAdd(x_rcp, rcp, sum);
   }
 
   V operator()(const V n, const V d) const {
 #if 1  // Faster on SKX
-    return n / d;
+    return Div(n, d);
 #else
     return n * ReciprocalNR(d);
 #endif
@@ -82,6 +86,9 @@ HWY_INLINE HWY_MAYBE_UNUSED V EvalRationalPolynomial(const D d, const V x,
   HWY_FENCE;
   if (kDegP >= 7) yp = MulAdd(yp, x, LoadDup128(d, p + ((kDegP - 7) * 4)));
   if (kDegQ >= 7) yq = MulAdd(yq, x, LoadDup128(d, q + ((kDegQ - 7) * 4)));
+
+  static_assert(kDegP < 8, "Polynomial degree is too high");
+  static_assert(kDegQ < 8, "Polynomial degree is too high");
 
   return FastDivision<T, V>()(yp, yq);
 }

@@ -15,8 +15,10 @@
 #include <string>
 #include <vector>
 
+#include "absl/strings/string_view.h"
 #include "api/array_view.h"
 #include "api/rtp_parameters.h"
+#include "api/units/timestamp.h"
 #include "modules/rtp_rtcp/include/rtp_header_extension_map.h"
 #include "modules/rtp_rtcp/include/rtp_rtcp_defines.h"
 #include "modules/rtp_rtcp/source/rtp_header_extension_size.h"
@@ -39,7 +41,7 @@ class FlexfecSender : public VideoFecGenerator {
   FlexfecSender(int payload_type,
                 uint32_t ssrc,
                 uint32_t protected_media_ssrc,
-                const std::string& mid,
+                absl::string_view mid,
                 const std::vector<RtpExtension>& rtp_header_extensions,
                 rtc::ArrayView<const RtpExtensionSize> extension_sizes,
                 const RtpState* rtp_state,
@@ -76,7 +78,7 @@ class FlexfecSender : public VideoFecGenerator {
   // Utility.
   Clock* const clock_;
   Random random_;
-  int64_t last_generated_packet_ms_;
+  Timestamp last_generated_packet_ = Timestamp::MinusInfinity();
 
   // Config.
   const int payload_type_;

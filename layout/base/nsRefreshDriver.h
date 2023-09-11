@@ -277,7 +277,9 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
    */
   void Disconnect();
 
-  bool IsFrozen() { return mFreezeCount > 0; }
+  bool IsFrozen() const { return mFreezeCount > 0; }
+
+  bool IsThrottled() const { return mThrottled; }
 
   /**
    * Freeze the refresh driver.  It should stop delivering future
@@ -298,7 +300,7 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
    * Throttle or unthrottle the refresh driver.  This is done if the
    * corresponding presshell is hidden or shown.
    */
-  void SetThrottled(bool aThrottled);
+  void SetActivity(bool aIsActive);
 
   /**
    * Return the prescontext we were initialized with
@@ -320,6 +322,12 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
    */
   static int32_t DefaultInterval();
 
+  /**
+   * Returns true if a recent vsync interval has been less than a half of
+   * DefaultInterval.
+   */
+  static bool IsInHighRateMode();
+
   bool IsInRefresh() { return mInRefresh; }
 
   void SetIsResizeSuppressed() { mResizeSuppressed = true; }
@@ -337,6 +345,8 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
   mozilla::TimeStamp GetVsyncStart() override;
 
   bool IsWaitingForPaint(mozilla::TimeStamp aTime);
+
+  void ScheduleAutoFocusFlush(Document* aDocument);
 
   // nsARefreshObserver
   NS_IMETHOD_(MozExternalRefCountType) AddRef(void) override {
@@ -357,8 +367,19 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
    *
    * If we're animating and we have skipped paints a time in the past
    * is returned.
+   *
+   * If aCheckType is AllVsyncListeners and we're in the parent process,
+   * which doesn't have a RefreshDriver ticking, but some other process does
+   * have, the return value is
+   * (now + refreshrate - layout.idle_period.time_limit) as an approximation
+   * when something will happen.
+   * This can be useful check when parent process tries to avoid having too
+   * long idle periods for example when it is sending input events to an
+   * active child process.
    */
-  static mozilla::TimeStamp GetIdleDeadlineHint(mozilla::TimeStamp aDefault);
+  enum IdleCheck { OnlyThisProcessRefreshDriver, AllVsyncListeners };
+  static mozilla::TimeStamp GetIdleDeadlineHint(mozilla::TimeStamp aDefault,
+                                                IdleCheck aCheckType);
 
   /**
    * It returns the expected timestamp of the next tick or nothing if the next
@@ -398,6 +419,16 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
     mNeedToUpdateIntersectionObservations = true;
   }
 
+  void ScheduleMediaQueryListenerUpdate() {
+    EnsureTimerStarted();
+    mMightNeedMediaQueryListenerUpdate = true;
+  }
+
+  void EnsureContentRelevancyUpdateHappens() {
+    EnsureTimerStarted();
+    mNeedToUpdateContentRelevancy = true;
+  }
+
   // Register a composition payload that will be forwarded to the layer manager
   // if the current or upcoming refresh tick does a paint.
   // If no paint happens, the payload is discarded.
@@ -410,9 +441,11 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
     eHasObservers = 1 << 0,
     eHasImageRequests = 1 << 1,
     eNeedsToUpdateIntersectionObservations = 1 << 2,
-    eHasVisualViewportResizeEvents = 1 << 3,
-    eHasScrollEvents = 1 << 4,
-    eHasVisualViewportScrollEvents = 1 << 5,
+    eNeedsToUpdateContentRelevancy = 1 << 3,
+    eHasVisualViewportResizeEvents = 1 << 4,
+    eHasScrollEvents = 1 << 5,
+    eHasVisualViewportScrollEvents = 1 << 6,
+    eHasPendingMediaQueryListeners = 1 << 7,
   };
 
   void AddForceNotifyContentfulPaintPresContext(nsPresContext* aPresContext);
@@ -421,6 +454,8 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
   // Mark that we've just run a tick from vsync, used to throttle 'extra'
   // paints to one per vsync (see CanDoExtraTick).
   void FinishedVsyncTick() { mAttemptedExtraTickSinceLastVsync = false; }
+
+  void CancelFlushAutoFocus(Document* aDocument);
 
  private:
   typedef nsTArray<RefPtr<VVPResizeEvent>> VisualViewportResizeEventArray;
@@ -448,12 +483,17 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
     }
     operator RefPtr<nsARefreshObserver>() { return mObserver; }
   };
-  typedef nsTObserverArray<ObserverData> ObserverArray;
+  using ObserverArray = nsTObserverArray<ObserverData>;
+  MOZ_CAN_RUN_SCRIPT
+  void FlushAutoFocusDocuments();
   void RunFullscreenSteps();
   void DispatchAnimationEvents();
   MOZ_CAN_RUN_SCRIPT
   void RunFrameRequestCallbacks(mozilla::TimeStamp aNowTime);
   void UpdateIntersectionObservations(mozilla::TimeStamp aNowTime);
+  void UpdateRelevancyOfContentVisibilityAutoFrames();
+  void MaybeIncreaseMeasuredTicksSinceLoading();
+  void EvaluateMediaQueriesAndReportChanges();
 
   enum class IsExtraTick {
     No,
@@ -472,6 +512,8 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
   void EnsureTimerStarted(EnsureTimerStartedFlags aFlags = eNone);
   void StopTimer();
 
+  void UpdateThrottledState();
+
   bool HasObservers() const;
   void AppendObserverDescriptionsToString(nsACString& aStr) const;
   // Note: This should only be called in the dtor of nsRefreshDriver.
@@ -482,6 +524,10 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
   ObserverArray& ArrayFor(mozilla::FlushType aFlushType);
   // Trigger a refresh immediately, if haven't been disconnected or frozen.
   void DoRefresh();
+
+  // Starts pending image animations, and refreshes ongoing animations.
+  void UpdateAnimatedImages(mozilla::TimeStamp aPreviousRefresh,
+                            mozilla::TimeStamp aNowTime);
 
   TickReasons GetReasonsToTick() const;
   void AppendTickReasonsToString(TickReasons aReasons, nsACString& aStr) const;
@@ -581,6 +627,14 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
   // all our documents.
   bool mNeedToUpdateIntersectionObservations : 1;
 
+  // True if we might need to report media query changes in any of our
+  // documents.
+  bool mMightNeedMediaQueryListenerUpdate : 1;
+
+  // True if we need to update the relevancy of `content-visibility: auto`
+  // elements in our documents.
+  bool mNeedToUpdateContentRelevancy : 1;
+
   // True if we're currently within the scope of Tick() handling a normal
   // (timer-driven) tick.
   bool mInNormalTick : 1;
@@ -593,10 +647,6 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
 
   bool mHasStartedTimerAtLeastOnce : 1;
 
-  // Number of seconds that the refresh driver is blocked waiting for a
-  // compositor transaction to be completed before we append a note to the gfx
-  // critical log. The number is doubled every time the threshold is hit.
-  uint64_t mWarningThreshold;
   mozilla::TimeStamp mMostRecentRefresh;
   mozilla::TimeStamp mTickStart;
   mozilla::VsyncId mTickVsyncId;
@@ -631,6 +681,7 @@ class nsRefreshDriver final : public mozilla::layers::TransactionIdAllocator,
   // nsTArray on purpose, because we want to be able to swap.
   nsTArray<Document*> mFrameRequestCallbackDocs;
   nsTArray<Document*> mThrottledFrameRequestCallbackDocs;
+  nsTArray<RefPtr<Document>> mAutoFocusFlushDocuments;
   nsTObserverArray<nsAPostRefreshObserver*> mPostRefreshObservers;
   nsTArray<mozilla::UniquePtr<mozilla::PendingFullscreenEvent>>
       mPendingFullscreenEvents;

@@ -16,7 +16,9 @@
 #include "nsAppShellWindowEnumerator.h"
 #include "nsWindowMediator.h"
 #include "nsIWindowMediatorListener.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
+#include "nsGlobalWindowOuter.h"
+#include "nsServiceManagerUtils.h"
 
 #include "nsIDocShell.h"
 #include "nsIInterfaceRequestor.h"

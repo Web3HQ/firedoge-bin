@@ -10,11 +10,9 @@
  * Author: Kipp E.B. Hickman
  */
 
-#include "double-conversion/double-conversion.h"
+#include "double-conversion/double-to-string.h"
 #include "mozilla/AllocPolicy.h"
-#include "mozilla/Likely.h"
 #include "mozilla/Printf.h"
-#include "mozilla/Sprintf.h"
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/Vector.h"
 
@@ -29,18 +27,6 @@
 
 using double_conversion::DoubleToStringConverter;
 using DTSC = DoubleToStringConverter;
-
-/*
- * Note: on some platforms va_list is defined as an array,
- * and requires array notation.
- */
-#ifdef HAVE_VA_COPY
-#  define VARARGS_ASSIGN(foo, bar) VA_COPY(foo, bar)
-#elif defined(HAVE_VA_LIST_AS_ARRAY)
-#  define VARARGS_ASSIGN(foo, bar) foo[0] = bar[0]
-#else
-#  define VARARGS_ASSIGN(foo, bar) (foo) = (bar)
-#endif
 
 /*
  * Numbered Argument State
@@ -122,25 +108,21 @@ bool mozilla::PrintfTarget::fill_n(const char* src, int srclen, int width,
                                    int prec, int type, int flags) {
   int zerowidth = 0;
   int precwidth = 0;
-  int signwidth = 0;
   int leftspaces = 0;
   int rightspaces = 0;
   int cvtwidth;
-  char sign;
+  char sign = 0;
 
   if ((type & 1) == 0) {
     if (flags & FLAG_NEG) {
       sign = '-';
-      signwidth = 1;
     } else if (flags & FLAG_SIGNED) {
       sign = '+';
-      signwidth = 1;
     } else if (flags & FLAG_SPACED) {
       sign = ' ';
-      signwidth = 1;
     }
   }
-  cvtwidth = signwidth + srclen;
+  cvtwidth = (sign ? 1 : 0) + srclen;
 
   if (prec > 0 && (type != TYPE_DOUBLE)) {
     if (prec > srclen) {
@@ -172,7 +154,7 @@ bool mozilla::PrintfTarget::fill_n(const char* src, int srclen, int width,
       return false;
     }
   }
-  if (signwidth) {
+  if (sign) {
     if (!emit(&sign, 1)) {
       return false;
     }
@@ -654,7 +636,7 @@ static bool BuildArgArray(const char* fmt, va_list ap, NumArgStateVector& nas) {
     // earlier argument.
     MOZ_ASSERT(nas[cn].type != TYPE_UNKNOWN);
 
-    VARARGS_ASSIGN(nas[cn].ap, ap);
+    va_copy(nas[cn].ap, ap);
 
     switch (nas[cn].type) {
       case TYPE_SCHAR:

@@ -5,7 +5,7 @@
 Firefox DevTools Contributor Docs
 =================================
 
-This is a guide to working on the code for Firefox Developer Tools. If you're looking for help with using the tools, see the `user docs <https://developer.mozilla.org/en-US/docs/Tools>`__. For other ways to get involved, check out our `community site <https://firefox-dev.tools/>`__.
+This is a guide to working on the code for Firefox Developer Tools. If you're looking for help with using the tools, see the `user docs </devtools-user>`_. For other ways to get involved, check out our `community site <https://firefox-dev.tools/>`__.
 
 
 Getting Started
@@ -111,7 +111,6 @@ Backend
    Debugger API <backend/debugger-api.md>
    Backward Compatibility <backend/backward-compatibility.md>
    Actors Organization <backend/actor-hierarchy.md>
-   Handling Multi-Processes in Actors <backend/actor-e10s-handling.md>
    Writing Actors With protocol.js <backend/protocol.js.md>
    Registering A New Actor <backend/actor-registration.md>
    Actor Best Practices <backend/actor-best-practices.md>

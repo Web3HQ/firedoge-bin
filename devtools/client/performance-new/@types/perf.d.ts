@@ -9,12 +9,17 @@
 import {
   Reducer as ReduxReducer,
   Store as ReduxStore,
-} from "devtools/client/shared/vendor/redux";
+} from "resource://devtools/client/shared/vendor/redux.js";
 
 export interface PanelWindow {
   gToolbox?: any;
   gStore?: Store;
-  gInit(perfFront: PerfFront, pageContext: PageContext): Promise<void>;
+  gInit(
+    perfFront: PerfFront,
+    traits: RootTraits,
+    pageContext: PageContext,
+    openAboutProfiling: () => void
+  ): Promise<void>;
   gDestroy(): void;
   gIsPanelDestroyed?: boolean;
 }
@@ -39,6 +44,13 @@ export interface Toolbox {
  */
 export interface Commands {
   client: any;
+  targetCommand: {
+    targetFront: {
+      getTrait: (
+        traitName: string
+      ) => unknown;
+    };
+  };
 }
 
 /**
@@ -54,7 +66,6 @@ export interface PerfFront {
   ) => Promise<[number[], number[], number[]]>;
   isActive: () => Promise<boolean>;
   isSupportedPlatform: () => Promise<boolean>;
-  isLockedForPrivateBrowsing: () => Promise<boolean>;
   on: (type: string, listener: () => void) => void;
   off: (type: string, listener: () => void) => void;
   destroy: () => void;
@@ -74,6 +85,10 @@ export interface PreferenceFront {
   setIntPref: (prefName: string, value: number) => Promise<void>;
 }
 
+export interface RootTraits {
+  // There are no traits used by the performance front end at the moment.
+}
+
 export type RecordingState =
   // The initial state before we've queried the PerfActor
   | "not-yet-known"
@@ -87,9 +102,7 @@ export type RecordingState =
   | "request-to-stop-profiler"
   // The profiler notified us that our request to start it actually started
   // it, or it was already started.
-  | "recording"
-  // Profiling is not available when in private browsing mode.
-  | "locked-by-private-browsing";
+  | "recording";
 
 // We are currently migrating to a new UX workflow with about:profiling.
 // This type provides an easy way to change the implementation based
@@ -97,6 +110,7 @@ export type RecordingState =
 export type PageContext =
   | "devtools"
   | "devtools-remote"
+  | "aboutlogging"
   | "aboutprofiling"
   | "aboutprofiling-remote";
 
@@ -186,12 +200,6 @@ export type RestartBrowserWithEnvironmentVariable = (
 export type OnProfileReceived = (profile: MinimallyTypedGeckoProfile) => void;
 
 /**
- * This is the type signature for a function to query the browser for an
- * environment variable. Currently only implemented for the popup.
- */
-export type GetEnvironmentVariable = (envName: string) => string;
-
-/**
  * This is the type signature for a function to query the browser for the
  * ID of the active tab.
  */
@@ -242,19 +250,12 @@ export type Action =
   | {
       type: "REPORT_PROFILER_READY";
       isActive: boolean;
-      isLockedForPrivateBrowsing: boolean;
     }
   | {
       type: "REPORT_PROFILER_STARTED";
     }
   | {
       type: "REPORT_PROFILER_STOPPED";
-    }
-  | {
-      type: "REPORT_PRIVATE_BROWSING_STARTED";
-    }
-  | {
-      type: "REPORT_PRIVATE_BROWSING_STOPPED";
     }
   | {
       type: "REQUESTING_TO_START_RECORDING";
@@ -376,6 +377,13 @@ export interface PerformancePref {
    * test the profile injection mechanism.
    */
   UIBaseUrlPathPref: "devtools.performance.recording.ui-base-url-path";
+  /**
+   * This controls whether we enable the active tab view when capturing in web
+   * developer preset.
+   * We're not enabling the active-tab view in all environments until we
+   * iron out all its issues.
+   */
+  UIEnableActiveTabView: "devtools.performance.recording.active-tab-view.enabled";
   /**
    * The profiler popup has some introductory text explaining what it is the first
    * time that you open it. After that, it is not displayed by default.
@@ -535,7 +543,7 @@ type QuerySymbolicationApiResponse = string;
 
 /**
  * This represents an event channel that can talk to a content page on the web.
- * This interface is a manually typed version of toolkit/modules/WebChannel.jsm
+ * This interface is a manually typed version of toolkit/modules/WebChannel.sys.mjs
  * and is opinionated about the types of messages we can send with it.
  *
  * The definition is here rather than gecko.d.ts because it was simpler than getting

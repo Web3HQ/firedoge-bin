@@ -7,7 +7,6 @@
 #ifndef NSSUBDOCUMENTFRAME_H_
 #define NSSUBDOCUMENTFRAME_H_
 
-#include "LayerState.h"
 #include "mozilla/Attributes.h"
 #include "nsDisplayList.h"
 #include "nsAtomicContainerFrame.h"
@@ -54,8 +53,7 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   void Init(nsIContent* aContent, nsContainerFrame* aParent,
             nsIFrame* aPrevInFlow) override;
 
-  void DestroyFrom(nsIFrame* aDestructRoot,
-                   PostDestroyData& aPostDestroyData) override;
+  void Destroy(DestroyContext&) override;
 
   nscoord GetMinISize(gfxContext* aRenderingContext) override;
   nscoord GetPrefISize(gfxContext* aRenderingContext) override;
@@ -109,6 +107,7 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   nsIFrame* GetSubdocumentRootFrame();
   enum { IGNORE_PAINT_SUPPRESSION = 0x1 };
   mozilla::PresShell* GetSubdocumentPresShellForPainting(uint32_t aFlags);
+  nsRect GetDestRect();
   mozilla::ScreenIntSize GetSubdocumentSize();
 
   // nsIReflowCallback
@@ -133,6 +132,9 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   void ResetFrameLoader(RetainPaintData);
   void ClearRetainedPaintData();
 
+  void MaybeUpdateEmbedderColorScheme();
+
+  void MaybeUpdateRemoteStyle(ComputedStyle* aOldComputedStyle = nullptr);
   void PropagateIsUnderHiddenEmbedderElementToSubView(
       bool aIsUnderHiddenEmbedderElement);
 
@@ -161,6 +163,9 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   }
 
   nscoord GetIntrinsicISize() {
+    if (Maybe<nscoord> containISize = ContainIntrinsicISize()) {
+      return *containISize;
+    }
     auto size = GetIntrinsicSize();
     Maybe<nscoord> iSize =
         GetWritingMode().IsVertical() ? size.height : size.width;
@@ -188,6 +193,7 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   bool mPostedReflowCallback : 1;
   bool mDidCreateDoc : 1;
   bool mCallingShow : 1;
+  bool mIsInObjectOrEmbed : 1;
 };
 
 namespace mozilla {
@@ -200,10 +206,8 @@ class nsDisplayRemote final : public nsPaintedDisplayItem {
   typedef mozilla::dom::TabId TabId;
   typedef mozilla::gfx::Matrix4x4 Matrix4x4;
   typedef mozilla::layers::EventRegionsOverride EventRegionsOverride;
-  typedef mozilla::layers::Layer Layer;
   typedef mozilla::layers::LayersId LayersId;
   typedef mozilla::layers::StackingContextHelper StackingContextHelper;
-  typedef mozilla::LayerState LayerState;
   typedef mozilla::LayoutDeviceRect LayoutDeviceRect;
   typedef mozilla::LayoutDevicePoint LayoutDevicePoint;
 

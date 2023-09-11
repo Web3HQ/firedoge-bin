@@ -2,17 +2,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function, unicode_literals
-
 import codecs
 import errno
 import io
 import itertools
 import logging
 import os
+import pprint
 import sys
 import textwrap
-
 from collections.abc import Iterable
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -20,8 +18,11 @@ sys.path.insert(0, os.path.join(base_dir, "python", "mach"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozboot"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozbuild"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "packaging"))
-sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "pyparsing"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "six"))
+sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "looseversion"))
+import mozpack.path as mozpath
+import six
+from mach.requirements import MachEnvRequirements
 from mach.site import (
     CommandSiteManager,
     ExternalPythonSite,
@@ -29,26 +30,88 @@ from mach.site import (
     MozSiteMetadata,
     SitePackagesSource,
 )
-from mach.requirements import MachEnvRequirements
-from mozbuild.configure import (
-    ConfigureSandbox,
-    TRACE,
-)
-from mozbuild.pythonutil import iter_modules_in_path
 from mozbuild.backend.configenvironment import PartialConfigEnvironment
-from mozbuild.util import write_indented_repr
-import mozpack.path as mozpath
-import six
+from mozbuild.configure import TRACE, ConfigureSandbox
+from mozbuild.pythonutil import iter_modules_in_path
 
 
 def main(argv):
-    _activate_build_virtualenv()
+    # Check for CRLF line endings.
+    with open(__file__, "r") as fh:
+        data = fh.read()
+        if "\r" in data:
+            print(
+                "\n ***\n"
+                " * The source tree appears to have Windows-style line endings.\n"
+                " *\n"
+                " * If using Git, Git is likely configured to use Windows-style\n"
+                " * line endings.\n"
+                " *\n"
+                " * To convert the working copy to UNIX-style line endings, run\n"
+                " * the following:\n"
+                " *\n"
+                " * $ git config core.autocrlf false\n"
+                " * $ git config core.eof lf\n"
+                " * $ git rm --cached -r .\n"
+                " * $ git reset --hard\n"
+                " *\n"
+                " * If not using Git, the tool you used to obtain the source\n"
+                " * code likely converted files to Windows line endings. See\n"
+                " * usage information for that tool for more.\n"
+                " ***",
+                file=sys.stderr,
+            )
+            return 1
+
     config = {}
 
     if "OLD_CONFIGURE" not in os.environ:
         os.environ["OLD_CONFIGURE"] = os.path.join(base_dir, "old-configure")
 
     sandbox = ConfigureSandbox(config, os.environ, argv)
+
+    if not sandbox._help:
+        # This limitation has mostly to do with GNU make. Since make can't represent
+        # variables with spaces without correct quoting and many paths are used
+        # without proper quoting, using paths with spaces commonly results in
+        # targets or dependencies being treated as multiple paths. This, of course,
+        # undermines the ability for make to perform up-to-date checks and makes
+        # the build system not work very efficiently. In theory, a non-make build
+        # backend will make this limitation go away. But there is likely a long tail
+        # of things that will need fixing due to e.g. lack of proper path quoting.
+        topsrcdir = os.path.realpath(os.path.dirname(__file__))
+        if len(topsrcdir.split()) > 1:
+            print(
+                "Source directory cannot be located in a path with spaces: %s"
+                % topsrcdir,
+                file=sys.stderr,
+            )
+            return 1
+        topobjdir = os.path.realpath(os.curdir)
+        if len(topobjdir.split()) > 1:
+            print(
+                "Object directory cannot be located in a path with spaces: %s"
+                % topobjdir,
+                file=sys.stderr,
+            )
+            return 1
+
+        # Do not allow topobjdir == topsrcdir
+        if os.path.samefile(topsrcdir, topobjdir):
+            print(
+                "  ***\n"
+                "  * Building directly in the main source directory is not allowed.\n"
+                "  *\n"
+                "  * To build, you must run configure from a separate directory\n"
+                "  * (referred to as an object directory).\n"
+                "  *\n"
+                "  * If you are building with a mozconfig, you will need to change your\n"
+                "  * mozconfig to point to a different object directory.\n"
+                "  ***",
+                file=sys.stderr,
+            )
+            return 1
+        _activate_build_virtualenv()
 
     clobber_file = "CLOBBER"
     if not os.path.exists(clobber_file):
@@ -158,23 +221,6 @@ def config_status(config, execute=True):
         print("Please file a bug for the above.", file=sys.stderr)
         sys.exit(1)
 
-    # Some values in sanitized_config also have more complex types, such as
-    # EnumString, which using when calling config_status would currently
-    # break the build, as well as making it inconsistent with re-running
-    # config.status, for which they are normalized to plain strings via
-    # indented_repr. Likewise for non-dict non-string iterables being
-    # converted to lists.
-    def normalize(obj):
-        if isinstance(obj, dict):
-            return {k: normalize(v) for k, v in six.iteritems(obj)}
-        if isinstance(obj, six.text_type):
-            return six.text_type(obj)
-        if isinstance(obj, Iterable):
-            return [normalize(o) for o in obj]
-        return obj
-
-    sanitized_config = normalize(sanitized_config)
-
     # Create config.status. Eventually, we'll want to just do the work it does
     # here, when we're able to skip configure tests/use cached results/not rely
     # on autoconf.
@@ -184,14 +230,14 @@ def config_status(config, execute=True):
                 """\
             #!%(python)s
             # coding=utf-8
-            from __future__ import unicode_literals
+            from mozbuild.configure.constants import *
         """
             )
             % {"python": config["PYTHON3"]}
         )
         for k, v in sorted(six.iteritems(sanitized_config)):
             fh.write("%s = " % k)
-            write_indented_repr(fh, v)
+            pprint.pprint(v, stream=fh, indent=4)
         fh.write(
             "__all__ = ['topobjdir', 'topsrcdir', 'defines', " "'substs', 'mozconfig']"
         )
@@ -254,7 +300,6 @@ def _activate_build_virtualenv():
     # virtualenv), so we should activate the build virtualenv as expected by the rest of
     # configure.
 
-    topobjdir = os.path.realpath(".")
     topsrcdir = os.path.realpath(os.path.dirname(__file__))
 
     mach_site = MachSiteManager(
@@ -265,11 +310,14 @@ def _activate_build_virtualenv():
         SitePackagesSource.NONE,
     )
     mach_site.activate()
+
+    from mach.util import get_virtualenv_base_dir
+
     build_site = CommandSiteManager.from_environment(
         topsrcdir,
         None,
         "build",
-        os.path.join(topobjdir, "_virtualenvs"),
+        get_virtualenv_base_dir(topsrcdir),
     )
     if not build_site.ensure():
         print("Created Python 3 virtualenv")

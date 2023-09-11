@@ -12,7 +12,6 @@
 #include "nsPluginArray.h"
 #include "nsMimeTypeArray.h"
 #include "mozilla/Components.h"
-#include "mozilla/ContentBlocking.h"
 #include "mozilla/ContentBlockingNotifier.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/dom/BodyExtractor.h"
@@ -30,9 +29,14 @@
 #include "nsUnicharUtils.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/StaticPrefs_dom.h"
+#ifdef FUZZING
+#  include "mozilla/StaticPrefs_fuzzing.h"
+#endif
 #include "mozilla/StaticPrefs_media.h"
 #include "mozilla/StaticPrefs_network.h"
+#include "mozilla/StaticPrefs_pdfjs.h"
 #include "mozilla/StaticPrefs_privacy.h"
+#include "mozilla/StorageAccess.h"
 #include "mozilla/Telemetry.h"
 #include "BatteryManager.h"
 #include "mozilla/dom/CredentialsContainer.h"
@@ -41,7 +45,6 @@
 #include "mozilla/dom/GamepadServiceTest.h"
 #include "mozilla/dom/MediaCapabilities.h"
 #include "mozilla/dom/MediaSession.h"
-#include "mozilla/dom/WakeLock.h"
 #include "mozilla/dom/power/PowerManagerService.h"
 #include "mozilla/dom/LockManager.h"
 #include "mozilla/dom/MIDIAccessManager.h"
@@ -61,7 +64,7 @@
 #include "mozilla/StaticPtr.h"
 #include "Connection.h"
 #include "mozilla/dom/Event.h"  // for Event
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsIPermissionManager.h"
 #include "nsMimeTypes.h"
 #include "nsNetUtil.h"
@@ -90,7 +93,6 @@
 
 #include "nsJSUtils.h"
 
-#include "mozilla/dom/NavigatorBinding.h"
 #include "mozilla/dom/Promise.h"
 
 #include "nsIUploadChannel2.h"
@@ -99,10 +101,6 @@
 
 #include "mozilla/dom/WorkerPrivate.h"
 #include "mozilla/dom/WorkerRunnable.h"
-
-#if defined(XP_LINUX)
-#  include "mozilla/Hal.h"
-#endif
 
 #if defined(XP_WIN)
 #  include "mozilla/WindowsVersion.h"
@@ -116,6 +114,9 @@
 #include "mozilla/dom/WindowGlobalChild.h"
 
 #include "mozilla/intl/LocaleService.h"
+#include "mozilla/dom/AudioContext.h"
+#include "mozilla/dom/HTMLMediaElement.h"
+#include "AutoplayPolicy.h"
 
 namespace mozilla::dom {
 
@@ -133,7 +134,7 @@ NS_INTERFACE_MAP_END
 NS_IMPL_CYCLE_COLLECTING_ADDREF(Navigator)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(Navigator)
 
-NS_IMPL_CYCLE_COLLECTION_CLASS(Navigator)
+NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(Navigator)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(Navigator)
   tmp->Invalidate();
@@ -143,7 +144,6 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(Navigator)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
-  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMimeTypes)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPlugins)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPermissions)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mGeolocation)
@@ -169,21 +169,18 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mXRSystem)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
-NS_IMPL_CYCLE_COLLECTION_TRACE_WRAPPERCACHE(Navigator)
-
 void Navigator::Invalidate() {
   // Don't clear mWindow here so we know we've got a non-null mWindow
   // until we're unlinked.
 
-  mMimeTypes = nullptr;
-
-  if (mPlugins) {
-    mPlugins = nullptr;
-  }
+  mPlugins = nullptr;
 
   mPermissions = nullptr;
 
-  mStorageManager = nullptr;
+  if (mStorageManager) {
+    mStorageManager->Shutdown();
+    mStorageManager = nullptr;
+  }
 
   // If there is a page transition, make sure delete the geolocation object.
   if (mGeolocation) {
@@ -270,9 +267,9 @@ void Navigator::GetUserAgent(nsAString& aUserAgent, CallerType aCallerType,
   }
 
   nsCOMPtr<Document> doc = mWindow->GetExtantDoc();
-
-  nsresult rv = GetUserAgent(window, doc ? doc->NodePrincipal() : nullptr,
-                             aCallerType == CallerType::System, aUserAgent);
+  nsresult rv = GetUserAgent(
+      mWindow, doc, aCallerType == CallerType::System ? Some(false) : Nothing(),
+      aUserAgent);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     aRv.Throw(rv);
   }
@@ -303,18 +300,15 @@ void Navigator::GetAppVersion(nsAString& aAppVersion, CallerType aCallerType,
   nsCOMPtr<Document> doc = mWindow->GetExtantDoc();
 
   nsresult rv = GetAppVersion(
-      aAppVersion, doc ? doc->NodePrincipal() : nullptr,
+      aAppVersion, doc,
       /* aUsePrefOverriddenValue = */ aCallerType != CallerType::System);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     aRv.Throw(rv);
   }
 }
 
-void Navigator::GetAppName(nsAString& aAppName, CallerType aCallerType) const {
-  nsCOMPtr<Document> doc = mWindow->GetExtantDoc();
-
-  AppName(aAppName, doc ? doc->NodePrincipal() : nullptr,
-          /* aUsePrefOverriddenValue = */ aCallerType != CallerType::System);
+void Navigator::GetAppName(nsAString& aAppName) const {
+  aAppName.AssignLiteral("Netscape");
 }
 
 /**
@@ -418,7 +412,7 @@ void Navigator::GetPlatform(nsAString& aPlatform, CallerType aCallerType,
   nsCOMPtr<Document> doc = mWindow->GetExtantDoc();
 
   nsresult rv = GetPlatform(
-      aPlatform, doc ? doc->NodePrincipal() : nullptr,
+      aPlatform, doc,
       /* aUsePrefOverriddenValue = */ aCallerType != CallerType::System);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     aRv.Throw(rv);
@@ -430,7 +424,8 @@ void Navigator::GetOscpu(nsAString& aOSCPU, CallerType aCallerType,
   if (aCallerType != CallerType::System) {
     // If fingerprinting resistance is on, we will spoof this value. See
     // nsRFPService.h for details about spoofed values.
-    if (nsContentUtils::ShouldResistFingerprinting(GetDocShell())) {
+    if (nsContentUtils::ShouldResistFingerprinting(GetDocShell(),
+                                                   RFPTarget::NavigatorOscpu)) {
       aOSCPU.AssignLiteral(SPOOFED_OSCPU);
       return;
     }
@@ -475,15 +470,12 @@ void Navigator::GetProductSub(nsAString& aProductSub) {
 }
 
 nsMimeTypeArray* Navigator::GetMimeTypes(ErrorResult& aRv) {
-  if (!mMimeTypes) {
-    if (!mWindow) {
-      aRv.Throw(NS_ERROR_UNEXPECTED);
-      return nullptr;
-    }
-    mMimeTypes = new nsMimeTypeArray(mWindow);
+  auto* plugins = GetPlugins(aRv);
+  if (!plugins) {
+    return nullptr;
   }
 
-  return mMimeTypes;
+  return plugins->MimeTypeArray();
 }
 
 nsPluginArray* Navigator::GetPlugins(ErrorResult& aRv) {
@@ -492,11 +484,13 @@ nsPluginArray* Navigator::GetPlugins(ErrorResult& aRv) {
       aRv.Throw(NS_ERROR_UNEXPECTED);
       return nullptr;
     }
-    mPlugins = new nsPluginArray(mWindow);
+    mPlugins = MakeRefPtr<nsPluginArray>(mWindow);
   }
 
   return mPlugins;
 }
+
+bool Navigator::PdfViewerEnabled() { return !StaticPrefs::pdfjs_disabled(); }
 
 Permissions* Navigator::GetPermissions(ErrorResult& aRv) {
   if (!mWindow) {
@@ -552,6 +546,13 @@ bool Navigator::CookieEnabled() {
     return cookieEnabled;
   }
 
+  // We should return true if the cookie is partitioned because the cookie is
+  // still available in this case.
+  if (!granted &&
+      StoragePartitioningEnabled(rejectedReason, doc->CookieJarSettings())) {
+    granted = true;
+  }
+
   ContentBlockingNotifier::OnDecision(
       mWindow,
       granted ? ContentBlockingNotifier::BlockingDecision::eAllow
@@ -567,7 +568,8 @@ void Navigator::GetBuildID(nsAString& aBuildID, CallerType aCallerType,
   if (aCallerType != CallerType::System) {
     // If fingerprinting resistance is on, we will spoof this value. See
     // nsRFPService.h for details about spoofed values.
-    if (nsContentUtils::ShouldResistFingerprinting(GetDocShell())) {
+    if (nsContentUtils::ShouldResistFingerprinting(
+            GetDocShell(), RFPTarget::NavigatorBuildID)) {
       aBuildID.AssignLiteral(LEGACY_BUILD_ID);
       return;
     }
@@ -645,7 +647,9 @@ uint64_t Navigator::HardwareConcurrency() {
     return 1;
   }
 
-  return rts->ClampedHardwareConcurrency();
+  return rts->ClampedHardwareConcurrency(
+      nsGlobalWindowInner::Cast(mWindow)->ShouldResistFingerprinting(
+          RFPTarget::NavigatorHWConcurrency));
 }
 
 namespace {
@@ -855,7 +859,8 @@ uint32_t Navigator::MaxTouchPoints(CallerType aCallerType) {
   // The maxTouchPoints is going to reveal the detail of users' hardware. So,
   // we will spoof it into 0 if fingerprinting resistance is on.
   if (aCallerType != CallerType::System &&
-      nsContentUtils::ShouldResistFingerprinting(GetDocShell())) {
+      nsContentUtils::ShouldResistFingerprinting(GetDocShell(),
+                                                 RFPTarget::PointerEvents)) {
     return 0;
   }
 
@@ -872,11 +877,35 @@ uint32_t Navigator::MaxTouchPoints(CallerType aCallerType) {
 
 // This list should be kept up-to-date with the spec:
 // https://html.spec.whatwg.org/multipage/system-state.html#custom-handlers
-// If you change this list, please also update the copy in E10SUtils.jsm.
+// If you change this list, please also update the copy in E10SUtils.sys.mjs.
 static const char* const kSafeSchemes[] = {
-    "bitcoin", "geo", "im",   "irc",  "ircs",        "magnet", "mailto",
-    "matrix",  "mms", "news", "nntp", "openpgp4fpr", "sip",    "sms",
-    "smsto",   "ssh", "tel",  "urn",  "webcal",      "wtai",   "xmpp"};
+    // clang-format off
+    "bitcoin",
+    "ftp",
+    "ftps",
+    "geo",
+    "im",
+    "irc",
+    "ircs",
+    "magnet",
+    "mailto",
+    "matrix",
+    "mms",
+    "news",
+    "nntp",
+    "openpgp4fpr",
+    "sftp",
+    "sip",
+    "sms",
+    "smsto",
+    "ssh",
+    "tel",
+    "urn",
+    "webcal",
+    "wtai",
+    "xmpp",
+    // clang-format on
+};
 
 void Navigator::CheckProtocolHandlerAllowed(const nsAString& aScheme,
                                             nsIURI* aHandlerURI,
@@ -1288,11 +1317,15 @@ void Navigator::MozGetUserMedia(const MediaStreamConstraints& aConstraints,
                                 NavigatorUserMediaErrorCallback& aOnError,
                                 CallerType aCallerType, ErrorResult& aRv) {
   MOZ_ASSERT(NS_IsMainThread());
-
   if (!mWindow || !mWindow->IsFullyActive()) {
     aRv.ThrowInvalidStateError("The document is not fully active.");
     return;
   }
+  GetMediaDevices(aRv);
+  if (aRv.Failed()) {
+    return;
+  }
+  MOZ_ASSERT(mMediaDevices);
   if (Document* doc = mWindow->GetExtantDoc()) {
     if (!mWindow->IsSecureContext()) {
       doc->SetUseCounter(eUseCounter_custom_MozGetUserMediaInsec);
@@ -1306,7 +1339,7 @@ void Navigator::MozGetUserMedia(const MediaStreamConstraints& aConstraints,
                                   "audio and/or video is required"),
         __func__);
   } else {
-    sp = MediaManager::Get()->GetUserMedia(mWindow, aConstraints, aCallerType);
+    sp = mMediaDevices->GetUserMedia(mWindow, aConstraints, aCallerType);
   }
   RefPtr<NavigatorUserMediaSuccessCallback> onsuccess(&aOnSuccess);
   RefPtr<NavigatorUserMediaErrorCallback> onerror(&aOnError);
@@ -1369,7 +1402,8 @@ Promise* Navigator::GetBattery(ErrorResult& aRv) {
 //    Navigator::Share() - Web Share API
 //*****************************************************************************
 
-Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
+already_AddRefed<Promise> Navigator::Share(const ShareData& aData,
+                                           ErrorResult& aRv) {
   if (!mWindow || !mWindow->IsFullyActive()) {
     aRv.ThrowInvalidStateError("The document is not fully active.");
     return nullptr;
@@ -1467,7 +1501,7 @@ Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
         }
         self->mSharePromise = nullptr;
       });
-  return mSharePromise;
+  return do_AddRef(mSharePromise);
 }
 
 //*****************************************************************************
@@ -1534,6 +1568,12 @@ void Navigator::ValidateShareData(const ShareData& aData, ErrorResult& aRv) {
   }
 }
 
+static bool ShouldResistFingerprinting(const Document* aDoc,
+                                       RFPTarget aTarget) {
+  return aDoc ? aDoc->ShouldResistFingerprinting(aTarget)
+              : nsContentUtils::ShouldResistFingerprinting("Fallback", aTarget);
+}
+
 already_AddRefed<LegacyMozTCPSocket> Navigator::MozTCPSocket() {
   RefPtr<LegacyMozTCPSocket> socket = new LegacyMozTCPSocket(GetWindow());
   return socket.forget();
@@ -1559,7 +1599,19 @@ void Navigator::GetGamepads(nsTArray<RefPtr<Gamepad>>& aGamepads,
   win->GetGamepads(aGamepads);
 }
 
-GamepadServiceTest* Navigator::RequestGamepadServiceTest() {
+GamepadServiceTest* Navigator::RequestGamepadServiceTest(ErrorResult& aRv) {
+#ifdef FUZZING
+  if (!StaticPrefs::fuzzing_enabled()) {
+    aRv.Throw(NS_ERROR_UNEXPECTED);
+    return nullptr;
+  }
+#else
+  if (!xpc::IsInAutomation()) {
+    aRv.Throw(NS_ERROR_UNEXPECTED);
+    return nullptr;
+  }
+#endif
+
   if (!mGamepadServiceTest) {
     mGamepadServiceTest = GamepadServiceTest::CreateTestService(mWindow);
   }
@@ -1682,7 +1734,7 @@ void Navigator::GetActiveVRDisplays(
    * GetActiveVRDisplays should only enumerate displays that
    * are already active without causing any other hardware to be
    * activated.
-   * We must not call nsGlobalWindow::NotifyHasXRSession here,
+   * We must not call nsGlobalWindowInner::NotifyHasXRSession here,
    * as that would cause enumeration and activation of other VR hardware.
    * Activating VR hardware is intrusive to the end user, as it may
    * involve physically powering on devices that the user did not
@@ -1724,7 +1776,12 @@ void Navigator::NotifyActiveVRDisplaysChanged() {
   Navigator_Binding::ClearCachedActiveVRDisplaysValue(this);
 }
 
-VRServiceTest* Navigator::RequestVRServiceTest() {
+VRServiceTest* Navigator::RequestVRServiceTest(ErrorResult& aRv) {
+  if (!xpc::IsInAutomation()) {
+    aRv.Throw(NS_ERROR_UNEXPECTED);
+    return nullptr;
+  }
+
   // Ensure that the Mock VR devices are not released prematurely
   nsGlobalWindowInner* win = nsGlobalWindowInner::Cast(mWindow);
   win->NotifyHasXRSession();
@@ -1778,7 +1835,9 @@ network::Connection* Navigator::GetConnection(ErrorResult& aRv) {
       aRv.Throw(NS_ERROR_UNEXPECTED);
       return nullptr;
     }
-    mConnection = network::Connection::CreateForWindow(mWindow);
+    mConnection = network::Connection::CreateForWindow(
+        mWindow, nsGlobalWindowInner::Cast(mWindow)->ShouldResistFingerprinting(
+                     RFPTarget::NavigatorConnection));
   }
 
   return mConnection;
@@ -1796,6 +1855,16 @@ already_AddRefed<ServiceWorkerContainer> Navigator::ServiceWorker() {
   return ref.forget();
 }
 
+already_AddRefed<ServiceWorkerContainer> Navigator::ServiceWorkerJS() {
+  if (mWindow->AsGlobal()->GetStorageAccess() ==
+      StorageAccess::ePrivateBrowsing) {
+    SetUseCounter(mWindow->AsGlobal()->GetGlobalJSObject(),
+                  eUseCounter_custom_PrivateBrowsingNavigatorServiceWorker);
+  }
+
+  return ServiceWorker();
+}
+
 size_t Navigator::SizeOfIncludingThis(
     mozilla::MallocSizeOf aMallocSizeOf) const {
   size_t n = aMallocSizeOf(this);
@@ -1806,10 +1875,6 @@ size_t Navigator::SizeOfIncludingThis(
   // TODO: add SizeOfIncludingThis() to DesktopNotificationCenter, bug 674116.
 
   return n;
-}
-
-void Navigator::SetWindow(nsPIDOMWindowInner* aInnerWindow) {
-  mWindow = aInnerWindow;
 }
 
 void Navigator::OnNavigation() {
@@ -1853,6 +1918,16 @@ bool Navigator::HasShareSupport(JSContext* cx, JSObject* obj) {
 }
 
 /* static */
+bool Navigator::HasMidiSupport(JSContext* cx, JSObject* obj) {
+  nsIPrincipal* principal = nsContentUtils::SubjectPrincipal(cx);
+
+  // Enable on secure contexts but exclude file schemes.
+  return StaticPrefs::dom_webmidi_enabled() &&
+         IsSecureContextOrObjectIsFromSecureContext(cx, obj) &&
+         !principal->SchemeIs("file");
+}
+
+/* static */
 already_AddRefed<nsPIDOMWindowInner> Navigator::GetWindowFromGlobal(
     JSObject* aGlobal) {
   nsCOMPtr<nsPIDOMWindowInner> win = xpc::WindowOrNull(aGlobal);
@@ -1863,15 +1938,14 @@ void Navigator::ClearPlatformCache() {
   Navigator_Binding::ClearCachedPlatformValue(this);
 }
 
-nsresult Navigator::GetPlatform(nsAString& aPlatform,
-                                nsIPrincipal* aCallerPrincipal,
+nsresult Navigator::GetPlatform(nsAString& aPlatform, Document* aCallerDoc,
                                 bool aUsePrefOverriddenValue) {
   MOZ_ASSERT(NS_IsMainThread());
 
   if (aUsePrefOverriddenValue) {
     // If fingerprinting resistance is on, we will spoof this value. See
     // nsRFPService.h for details about spoofed values.
-    if (nsContentUtils::ShouldResistFingerprinting(aCallerPrincipal)) {
+    if (ShouldResistFingerprinting(aCallerDoc, RFPTarget::NavigatorPlatform)) {
       aPlatform.AssignLiteral(SPOOFED_PLATFORM);
       return NS_OK;
     }
@@ -1907,15 +1981,15 @@ nsresult Navigator::GetPlatform(nsAString& aPlatform,
 }
 
 /* static */
-nsresult Navigator::GetAppVersion(nsAString& aAppVersion,
-                                  nsIPrincipal* aCallerPrincipal,
+nsresult Navigator::GetAppVersion(nsAString& aAppVersion, Document* aCallerDoc,
                                   bool aUsePrefOverriddenValue) {
   MOZ_ASSERT(NS_IsMainThread());
 
   if (aUsePrefOverriddenValue) {
     // If fingerprinting resistance is on, we will spoof this value. See
     // nsRFPService.h for details about spoofed values.
-    if (nsContentUtils::ShouldResistFingerprinting(aCallerPrincipal)) {
+    if (ShouldResistFingerprinting(aCallerDoc,
+                                   RFPTarget::NavigatorAppVersion)) {
       aAppVersion.AssignLiteral(SPOOFED_APPVERSION);
       return NS_OK;
     }
@@ -1951,45 +2025,39 @@ nsresult Navigator::GetAppVersion(nsAString& aAppVersion,
   return rv;
 }
 
-/* static */
-void Navigator::AppName(nsAString& aAppName, nsIPrincipal* aCallerPrincipal,
-                        bool aUsePrefOverriddenValue) {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  if (aUsePrefOverriddenValue) {
-    // If fingerprinting resistance is on, we will spoof this value. See
-    // nsRFPService.h for details about spoofed values.
-    if (nsContentUtils::ShouldResistFingerprinting(aCallerPrincipal)) {
-      aAppName.AssignLiteral(SPOOFED_APPNAME);
-      return;
-    }
-
-    nsAutoString override;
-    nsresult rv =
-        mozilla::Preferences::GetString("general.appname.override", override);
-
-    if (NS_SUCCEEDED(rv)) {
-      aAppName = override;
-      return;
-    }
-  }
-
-  aAppName.AssignLiteral("Netscape");
-}
-
 void Navigator::ClearUserAgentCache() {
   Navigator_Binding::ClearCachedUserAgentValue(this);
 }
 
 nsresult Navigator::GetUserAgent(nsPIDOMWindowInner* aWindow,
-                                 nsIPrincipal* aCallerPrincipal,
-                                 bool aIsCallerChrome, nsAString& aUserAgent) {
+                                 Document* aCallerDoc,
+                                 Maybe<bool> aShouldResistFingerprinting,
+                                 nsAString& aUserAgent) {
   MOZ_ASSERT(NS_IsMainThread());
+
+  /*
+    ResistFingerprinting is migrating to fine-grained control based off
+    either a channel or Principal+OriginAttributes
+
+    This function can be called from Workers, Main Thread, and at least one
+    other (unusual) case.
+
+    For Main Thread, we will generally have a window and an associated
+    Document, for Workers we will not.
+
+    If aShouldResistFingerprinting is provided, we should respect it.
+    If it is not provided, we will use aCallerDoc to determine our behavior.
+  */
+
+  bool shouldResistFingerprinting =
+      aShouldResistFingerprinting.isSome()
+          ? aShouldResistFingerprinting.value()
+          : ShouldResistFingerprinting(aCallerDoc,
+                                       RFPTarget::NavigatorUserAgent);
 
   // We will skip the override and pass to httpHandler to get spoofed userAgent
   // when 'privacy.resistFingerprinting' is true.
-  if (!aIsCallerChrome &&
-      !nsContentUtils::ShouldResistFingerprinting(aCallerPrincipal)) {
+  if (!shouldResistFingerprinting) {
     nsAutoString override;
     nsresult rv =
         mozilla::Preferences::GetString("general.useragent.override", override);
@@ -2003,8 +2071,7 @@ nsresult Navigator::GetUserAgent(nsPIDOMWindowInner* aWindow,
   // When the caller is content and 'privacy.resistFingerprinting' is true,
   // return a spoofed userAgent which reveals the platform but not the
   // specific OS version, etc.
-  if (!aIsCallerChrome &&
-      nsContentUtils::ShouldResistFingerprinting(aCallerPrincipal)) {
+  if (shouldResistFingerprinting) {
     nsAutoCString spoofedUA;
     nsRFPService::GetSpoofedUserAgent(spoofedUA, false);
     CopyASCIItoUTF16(spoofedUA, aUserAgent);
@@ -2026,12 +2093,7 @@ nsresult Navigator::GetUserAgent(nsPIDOMWindowInner* aWindow,
 
   CopyASCIItoUTF16(ua, aUserAgent);
 
-  // When the caller is content, we will always return spoofed userAgent and
-  // ignore the User-Agent header from the document channel when
-  // 'privacy.resistFingerprinting' is true.
-  if (!aWindow ||
-      (nsContentUtils::ShouldResistFingerprinting(aCallerPrincipal) &&
-       !aIsCallerChrome)) {
+  if (!aWindow) {
     return NS_OK;
   }
 
@@ -2095,9 +2157,7 @@ already_AddRefed<Promise> Navigator::RequestMediaKeySystemAccess(
   }
 
   RefPtr<DetailedPromise> promise = DetailedPromise::Create(
-      mWindow->AsGlobal(), aRv, "navigator.requestMediaKeySystemAccess"_ns,
-      Telemetry::VIDEO_EME_REQUEST_SUCCESS_LATENCY_MS,
-      Telemetry::VIDEO_EME_REQUEST_FAILURE_LATENCY_MS);
+      mWindow->AsGlobal(), aRv, "navigator.requestMediaKeySystemAccess"_ns);
   if (aRv.Failed()) {
     return nullptr;
   }
@@ -2169,7 +2229,7 @@ webgpu::Instance* Navigator::Gpu() {
 
 dom::LockManager* Navigator::Locks() {
   if (!mLocks) {
-    mLocks = new dom::LockManager(GetWindow()->AsGlobal());
+    mLocks = dom::LockManager::Create(*GetWindow()->AsGlobal());
   }
   return mLocks;
 }
@@ -2188,15 +2248,34 @@ bool Navigator::Webdriver() {
 
   nsCOMPtr<nsIRemoteAgent> agent = do_GetService(NS_REMOTEAGENT_CONTRACTID);
   if (agent) {
-    bool remoteAgentListening = false;
-    agent->GetListening(&remoteAgentListening);
-    if (remoteAgentListening) {
+    bool remoteAgentRunning = false;
+    agent->GetRunning(&remoteAgentRunning);
+    if (remoteAgentRunning) {
       return true;
     }
   }
 #endif
 
   return false;
+}
+
+AutoplayPolicy Navigator::GetAutoplayPolicy(AutoplayPolicyMediaType aType) {
+  if (!mWindow) {
+    return AutoplayPolicy::Disallowed;
+  }
+  nsCOMPtr<Document> doc = mWindow->GetExtantDoc();
+  if (!doc) {
+    return AutoplayPolicy::Disallowed;
+  }
+  return media::AutoplayPolicy::GetAutoplayPolicy(aType, *doc);
+}
+
+AutoplayPolicy Navigator::GetAutoplayPolicy(HTMLMediaElement& aElement) {
+  return media::AutoplayPolicy::GetAutoplayPolicy(aElement);
+}
+
+AutoplayPolicy Navigator::GetAutoplayPolicy(AudioContext& aContext) {
+  return media::AutoplayPolicy::GetAutoplayPolicy(aContext);
 }
 
 }  // namespace mozilla::dom

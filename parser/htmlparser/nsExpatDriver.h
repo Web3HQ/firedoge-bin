@@ -11,10 +11,10 @@
 #include "nsCOMPtr.h"
 #include "nsString.h"
 #include "nsIDTD.h"
-#include "nsITokenizer.h"
 #include "nsIInputStream.h"
 #include "nsIParser.h"
 #include "nsCycleCollectionParticipant.h"
+#include "nsScanner.h"
 
 #include "rlbox_expat.h"
 #include "nsRLBoxExpatDriver.h"
@@ -23,17 +23,24 @@
 class nsIExpatSink;
 struct nsCatalogData;
 class RLBoxExpatSandboxData;
+namespace mozilla {
+template <typename, size_t>
+class Array;
+}
 
-class nsExpatDriver : public nsIDTD, public nsITokenizer {
+class nsExpatDriver : public nsIDTD {
   virtual ~nsExpatDriver();
 
  public:
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS_FINAL
   NS_DECL_NSIDTD
-  NS_DECL_NSITOKENIZER
-  NS_DECL_CYCLE_COLLECTION_CLASS_AMBIGUOUS(nsExpatDriver, nsIDTD)
+  NS_DECL_CYCLE_COLLECTION_CLASS(nsExpatDriver)
 
   nsExpatDriver();
+
+  nsresult Initialize(nsIURI* aURI, nsIContentSink* aSink);
+
+  nsresult ResumeParse(nsScanner& aScanner, bool aIsFinalChunk);
 
   int HandleExternalEntityRef(const char16_t* aOpenEntityNames,
                               const char16_t* aBase, const char16_t* aSystemId,
@@ -71,9 +78,15 @@ class nsExpatDriver : public nsIDTD, public nsITokenizer {
   // Load up an external stream to get external entity information
   nsresult OpenInputStreamFromExternalDTD(const char16_t* aFPIStr,
                                           const char16_t* aURLStr,
-                                          const char16_t* aBaseURL,
+                                          nsIURI* aBaseURI,
                                           nsIInputStream** aStream,
-                                          nsAString& aAbsURL);
+                                          nsIURI** aAbsURI);
+
+  enum class ChunkOrBufferIsFinal {
+    None,
+    FinalChunk,
+    FinalChunkAndBuffer,
+  };
 
   /**
    * Pass a buffer to Expat. If Expat is blocked aBuffer should be null and
@@ -85,14 +98,42 @@ class nsExpatDriver : public nsIDTD, public nsITokenizer {
    * @param aLength the length of the buffer to pass to Expat (in number of
    *                char16_t's). Must be 0 if aBuffer is null and > 0 if
    *                aBuffer is not null.
+   * @param aIsFinal whether this is the last chunk in a row passed to
+   *                 ParseChunk, and if so whether it's the last chunk and
+   *                 buffer passed to ParseChunk (meaning there will be no more
+   *                 calls to ParseChunk for the document being parsed).
+   * @param aConsumed [out] the number of PRUnichars that Expat consumed. This
+   *                        doesn't include the PRUnichars that Expat stored in
+   *                        its buffer but didn't parse yet.
+   * @param aLastLineLength [out] the length of the last line that Expat has
+   *                              consumed. This will only be computed if
+   *                              aIsFinal is not None or mInternalState is set
+   *                              to a failure.
+   */
+  void ParseChunk(const char16_t* aBuffer, uint32_t aLength,
+                  ChunkOrBufferIsFinal aIsFinal, uint32_t* aConsumed,
+                  XML_Size* aLastLineLength);
+  /**
+   * Wrapper for ParseBuffer. If the buffer is too large to be copied into the
+   * sandbox all at once, splits it into chunks and invokes ParseBuffer in a
+   * loop.
+   *
+   * @param aBuffer the buffer to pass to Expat. May be null.
+   * @param aLength the length of the buffer to pass to Expat (in number of
+   *                char16_t's). Must be 0 if aBuffer is null and > 0 if
+   *                aBuffer is not null.
    * @param aIsFinal whether there will definitely not be any more new buffers
    *                 passed in to ParseBuffer
    * @param aConsumed [out] the number of PRUnichars that Expat consumed. This
    *                        doesn't include the PRUnichars that Expat stored in
    *                        its buffer but didn't parse yet.
+   * @param aLastLineLength [out] the length of the last line that Expat has
+   *                              consumed.
    */
-  void ParseBuffer(const char16_t* aBuffer, uint32_t aLength, bool aIsFinal,
-                   uint32_t* aConsumed);
+  void ChunkAndParseBuffer(const char16_t* aBuffer, uint32_t aLength,
+                           bool aIsFinal, uint32_t* aPassedToExpat,
+                           uint32_t* aConsumed, XML_Size* aLastLineLength);
+
   nsresult HandleError();
 
   void MaybeStopParser(nsresult aState);
@@ -101,6 +142,34 @@ class nsExpatDriver : public nsIDTD, public nsITokenizer {
     return mInternalState == NS_ERROR_HTMLPARSER_BLOCK ||
            mInternalState == NS_ERROR_HTMLPARSER_INTERRUPTED;
   }
+
+  // Expat allows us to set the base URI for entities. It doesn't use the base
+  // URI itself, but just passes it along to all the entity handlers (just the
+  // external entity reference handler for us). It does expect the base URI as a
+  // null-terminated string, with the same character type as the parsed buffers
+  // (char16_t in our case). Because nsIURI stores a UTF-8 string we have to do
+  // a conversion to UTF-16 for Expat. We also RLBox the Expat parser, so we
+  // also do 2 copies (into RLBox sandbox, and Expat does a copy into its pool).
+  // Most of the time this base URI is unused (the external entity handler is
+  // rarely called), but when it is we also convert it back to a nsIURI, so we
+  // convert the string back to UTF-8.
+  //
+  // We'd rather not do any of these conversions and copies, so we use a (hacky)
+  // workaround. We store all base URIs in an array of nsIURIs. Instead of
+  // passing the real URI to Expat as a string, we pass it a null-terminated
+  // 2-character buffer. The first character of that buffer stores the index of
+  // the corresponding nsIURI in the array (incremented with 1 because 0 is used
+  // to terminate a string). The entity handler can then use the index from the
+  // base URI that Expat passes it to look up the right nsIURI from the array.
+  //
+  // GetExpatBaseURI pushes the nsIURI to the array, and creates the
+  // two-character buffer for it.
+  //
+  // GetBaseURI looks up the right nsIURI in the array, based on the index from
+  // the two-character buffer.
+  using ExpatBaseURI = mozilla::Array<XML_Char, 2>;
+  ExpatBaseURI GetExpatBaseURI(nsIURI* aURI);
+  nsIURI* GetBaseURI(const XML_Char* aBase) const;
 
   RLBoxExpatSandboxData* SandboxData() const;
   rlbox_sandbox_expat* Sandbox() const;
@@ -125,9 +194,6 @@ class nsExpatDriver : public nsIDTD, public nsITokenizer {
 
   // Used to track if we're in the parser.
   bool mInParser;
-  // Whether we're sure that we won't be getting more buffers to parse from
-  // Necko
-  bool mIsFinalChunk;
 
   nsresult mInternalState;
 
@@ -143,7 +209,7 @@ class nsExpatDriver : public nsIDTD, public nsITokenizer {
   nsCOMPtr<nsIExpatSink> mSink;
 
   const nsCatalogData* mCatalogData;  // weak
-  nsString mURISpec;
+  nsTArray<nsCOMPtr<nsIURI>> mURIs;
 
   // Used for error reporting.
   uint64_t mInnerWindowID;
@@ -154,7 +220,10 @@ class RLBoxExpatSandboxData : public mozilla::RLBoxSandboxDataBase {
   friend class nsExpatDriver;
 
  public:
-  MOZ_COUNTED_DEFAULT_CTOR(RLBoxExpatSandboxData);
+  explicit RLBoxExpatSandboxData(uint64_t aSize)
+      : mozilla::RLBoxSandboxDataBase(aSize) {
+    MOZ_COUNT_CTOR(RLBoxExpatSandboxData);
+  }
   ~RLBoxExpatSandboxData();
   rlbox_sandbox_expat* Sandbox() const { return mSandbox.get(); }
   // After getting a sandbox from the pool we need to register the

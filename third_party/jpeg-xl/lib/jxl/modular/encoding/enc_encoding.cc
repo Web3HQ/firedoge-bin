@@ -20,7 +20,9 @@
 #include "lib/jxl/dec_ans.h"
 #include "lib/jxl/dec_bit_reader.h"
 #include "lib/jxl/enc_ans.h"
+#include "lib/jxl/enc_aux_out.h"
 #include "lib/jxl/enc_bit_writer.h"
+#include "lib/jxl/enc_fields.h"
 #include "lib/jxl/entropy_coder.h"
 #include "lib/jxl/fields.h"
 #include "lib/jxl/image_ops.h"
@@ -37,8 +39,8 @@ namespace jxl {
 
 namespace {
 // Plot tree (if enabled) and predictor usage map.
-constexpr bool kWantDebug = false;
-constexpr bool kPrintTree = false;
+constexpr bool kWantDebug = true;
+// constexpr bool kPrintTree = false;
 
 inline std::array<uint8_t, 3> PredictorColor(Predictor p) {
   switch (p) {
@@ -87,7 +89,8 @@ void GatherTreeData(const Image &image, pixel_type chan, size_t group_id,
   }
   uint64_t threshold =
       (std::numeric_limits<uint64_t>::max() >> 32) * pixel_fraction;
-  uint64_t s[2] = {0x94D049BB133111EBull, 0xBF58476D1CE4E5B9ull};
+  uint64_t s[2] = {static_cast<uint64_t>(0x94D049BB133111EBull),
+                   static_cast<uint64_t>(0xBF58476D1CE4E5B9ull)};
   // Xorshift128+ adapted from xorshift128+-inl.h
   auto use_sample = [&]() {
     auto s1 = s[0];
@@ -104,29 +107,62 @@ void GatherTreeData(const Image &image, pixel_type chan, size_t group_id,
   Channel references(properties.size() - kNumNonrefProperties, channel.w);
   weighted::State wp_state(wp_header, channel.w, channel.h);
   tree_samples.PrepareForSamples(pixel_fraction * channel.h * channel.w + 64);
+  const bool multiple_predictors = tree_samples.NumPredictors() != 1;
+  auto compute_sample = [&](const pixel_type *p, size_t x, size_t y) {
+    pixel_type_w pred[kNumModularPredictors];
+    if (multiple_predictors) {
+      PredictLearnAll(&properties, channel.w, p + x, onerow, x, y, references,
+                      &wp_state, pred);
+    } else {
+      pred[static_cast<int>(tree_samples.PredictorFromIndex(0))] =
+          PredictLearn(&properties, channel.w, p + x, onerow, x, y,
+                       tree_samples.PredictorFromIndex(0), references,
+                       &wp_state)
+              .guess;
+    }
+    (*total_pixels)++;
+    if (use_sample()) {
+      tree_samples.AddSample(p[x], properties, pred);
+    }
+    wp_state.UpdateErrors(p[x], x, y, channel.w);
+  };
+
   for (size_t y = 0; y < channel.h; y++) {
     const pixel_type *JXL_RESTRICT p = channel.Row(y);
     PrecomputeReferences(channel, y, image, chan, &references);
     InitPropsRow(&properties, static_props, y);
+
     // TODO(veluca): avoid computing WP if we don't use its property or
     // predictions.
-    for (size_t x = 0; x < channel.w; x++) {
-      pixel_type_w pred[kNumModularPredictors];
-      if (tree_samples.NumPredictors() != 1) {
-        PredictLearnAll(&properties, channel.w, p + x, onerow, x, y, references,
-                        &wp_state, pred);
-      } else {
-        pred[static_cast<int>(tree_samples.PredictorFromIndex(0))] =
-            PredictLearn(&properties, channel.w, p + x, onerow, x, y,
-                         tree_samples.PredictorFromIndex(0), references,
-                         &wp_state)
-                .guess;
+    if (y > 1 && channel.w > 8 && references.w == 0) {
+      for (size_t x = 0; x < 2; x++) {
+        compute_sample(p, x, y);
       }
-      (*total_pixels)++;
-      if (use_sample()) {
-        tree_samples.AddSample(p[x], properties, pred);
+      for (size_t x = 2; x < channel.w - 2; x++) {
+        pixel_type_w pred[kNumModularPredictors];
+        if (multiple_predictors) {
+          PredictLearnAllNEC(&properties, channel.w, p + x, onerow, x, y,
+                             references, &wp_state, pred);
+        } else {
+          pred[static_cast<int>(tree_samples.PredictorFromIndex(0))] =
+              PredictLearnNEC(&properties, channel.w, p + x, onerow, x, y,
+                              tree_samples.PredictorFromIndex(0), references,
+                              &wp_state)
+                  .guess;
+        }
+        (*total_pixels)++;
+        if (use_sample()) {
+          tree_samples.AddSample(p[x], properties, pred);
+        }
+        wp_state.UpdateErrors(p[x], x, y, channel.w);
       }
-      wp_state.UpdateErrors(p[x], x, y, channel.w);
+      for (size_t x = channel.w - 2; x < channel.w; x++) {
+        compute_sample(p, x, y);
+      }
+    } else {
+      for (size_t x = 0; x < channel.w; x++) {
+        compute_sample(p, x, y);
+      }
     }
   }
 }
@@ -162,11 +198,11 @@ Tree LearnTree(TreeSamples &&tree_samples, size_t total_pixels,
 
 Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
                                  const weighted::Header &wp_header,
-                                 const Tree &global_tree,
-                                 std::vector<Token> *tokens, AuxOut *aux_out,
-                                 size_t group_id, bool skip_encoder_fast_path) {
+                                 const Tree &global_tree, Token **tokenpp,
+                                 AuxOut *aux_out, size_t group_id,
+                                 bool skip_encoder_fast_path) {
   const Channel &channel = image.channel[chan];
-
+  Token *tokenp = *tokenpp;
   JXL_ASSERT(channel.w != 0 && channel.h != 0);
 
   Image3F predictor_img;
@@ -192,16 +228,14 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
   // Check if this tree is a WP-only tree with a small enough property value
   // range.
   // Initialized to avoid clang-tidy complaining.
-  uint16_t context_lookup[2 * kPropRangeFast] = {};
-  int8_t offsets[2 * kPropRangeFast] = {};
+  auto tree_lut = jxl::make_unique<TreeLut<uint16_t, false>>();
   if (is_wp_only) {
-    is_wp_only = TreeToLookupTable(tree, context_lookup, offsets);
+    is_wp_only = TreeToLookupTable(tree, *tree_lut);
   }
   if (is_gradient_only) {
-    is_gradient_only = TreeToLookupTable(tree, context_lookup, offsets);
+    is_gradient_only = TreeToLookupTable(tree, *tree_lut);
   }
 
-  tokens->reserve(tokens->size() + channel.w * channel.h);
   if (is_wp_only && !skip_encoder_fast_path) {
     for (size_t c = 0; c < 3; c++) {
       FillImage(static_cast<float>(PredictorColor(Predictor::Weighted)[c]),
@@ -226,9 +260,9 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
         uint32_t pos =
             kPropRangeFast + std::min(std::max(-kPropRangeFast, properties[0]),
                                       kPropRangeFast - 1);
-        uint32_t ctx_id = context_lookup[pos];
-        int32_t residual = r[x] - guess - offsets[pos];
-        tokens->emplace_back(ctx_id, PackSigned(residual));
+        uint32_t ctx_id = tree_lut->context_lookup[pos];
+        int32_t residual = r[x] - guess - tree_lut->offsets[pos];
+        *tokenp++ = Token(ctx_id, PackSigned(residual));
         wp_state.UpdateErrors(r[x], x, y, channel.w);
       }
     }
@@ -248,7 +282,7 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
         pixel_type_w topleft = (x && y ? *(r + x - 1 - onerow) : left);
         int32_t guess = ClampedGradient(top, left, topleft);
         int32_t residual = r[x] - guess;
-        tokens->emplace_back(tree[0].childID, PackSigned(residual));
+        *tokenp++ = Token(tree[0].childID, PackSigned(residual));
       }
     }
   } else if (is_gradient_only && !skip_encoder_fast_path) {
@@ -269,9 +303,9 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
             std::min<pixel_type_w>(
                 std::max<pixel_type_w>(-kPropRangeFast, top + left - topleft),
                 kPropRangeFast - 1);
-        uint32_t ctx_id = context_lookup[pos];
-        int32_t residual = r[x] - guess - offsets[pos];
-        tokens->emplace_back(ctx_id, PackSigned(residual));
+        uint32_t ctx_id = tree_lut->context_lookup[pos];
+        int32_t residual = r[x] - guess - tree_lut->offsets[pos];
+        *tokenp++ = Token(ctx_id, PackSigned(residual));
       }
     }
   } else if (tree.size() == 1 && tree[0].predictor == Predictor::Zero &&
@@ -284,7 +318,7 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
     for (size_t y = 0; y < channel.h; y++) {
       const pixel_type *JXL_RESTRICT p = channel.Row(y);
       for (size_t x = 0; x < channel.w; x++) {
-        tokens->emplace_back(tree[0].childID, PackSigned(p[x]));
+        *tokenp++ = Token(tree[0].childID, PackSigned(p[x]));
       }
     }
   } else if (tree.size() == 1 && tree[0].predictor != Predictor::Weighted &&
@@ -304,8 +338,7 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
                                                   y, tree[0].predictor);
         pixel_type_w residual = r[x] - pred.guess;
         JXL_DASSERT((residual >> mul_shift) * tree[0].multiplier == residual);
-        tokens->emplace_back(tree[0].childID,
-                             PackSigned(residual >> mul_shift));
+        *tokenp++ = Token(tree[0].childID, PackSigned(residual >> mul_shift));
       }
     }
 
@@ -332,9 +365,8 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
           }
         }
         pixel_type_w residual = p[x] - res.guess;
-        JXL_ASSERT(residual % res.multiplier == 0);
-        tokens->emplace_back(res.context,
-                             PackSigned(residual / res.multiplier));
+        JXL_DASSERT(residual % res.multiplier == 0);
+        *tokenp++ = Token(res.context, PackSigned(residual / res.multiplier));
       }
     }
   } else {
@@ -361,18 +393,21 @@ Status EncodeModularChannelMAANS(const Image &image, pixel_type chan,
           }
         }
         pixel_type_w residual = p[x] - res.guess;
-        JXL_ASSERT(residual % res.multiplier == 0);
-        tokens->emplace_back(res.context,
-                             PackSigned(residual / res.multiplier));
+        JXL_DASSERT(residual % res.multiplier == 0);
+        *tokenp++ = Token(res.context, PackSigned(residual / res.multiplier));
         wp_state.UpdateErrors(p[x], x, y, channel.w);
       }
     }
   }
-  if (kWantDebug && WantDebugOutput(aux_out)) {
-    aux_out->DumpImage(
+  /* TODO(szabadka): Add cparams to the call stack here.
+  if (kWantDebug && WantDebugOutput(cparams)) {
+    DumpImage(
+        cparams,
         ("pred_" + ToString(group_id) + "_" + ToString(chan)).c_str(),
         predictor_img);
   }
+  */
+  *tokenpp = tokenp;
   return true;
 }
 
@@ -467,9 +502,11 @@ Status ModularEncode(const Image &image, const ModularOptions &options,
     JXL_ASSERT(tree->size() == decoded_tree.size());
     tree_storage = std::move(decoded_tree);
 
+    /* TODO(szabadka) Add text output callback
     if (kWantDebug && kPrintTree && WantDebugOutput(aux_out)) {
       PrintTree(*tree, aux_out->debug_prefix + "/tree_" + ToString(group_id));
-    }
+    } */
+
     // Write tree
     BuildAndEncodeHistograms(HistogramParams(), kNumTreeContexts, tree_tokens,
                              &code, &context_map, writer, kLayerModularTree,
@@ -479,24 +516,39 @@ Status ModularEncode(const Image &image, const ModularOptions &options,
   }
 
   size_t image_width = 0;
+  size_t total_tokens = 0;
   for (size_t i = 0; i < nb_channels; i++) {
-    if (!image.channel[i].w || !image.channel[i].h) {
-      continue;  // skip empty channels
-    }
     if (i >= image.nb_meta_channels &&
         (image.channel[i].w > options.max_chan_size ||
          image.channel[i].h > options.max_chan_size)) {
       break;
     }
     if (image.channel[i].w > image_width) image_width = image.channel[i].w;
-    if (options.zero_tokens) {
-      tokens->resize(tokens->size() + image.channel[i].w * image.channel[i].h,
-                     {0, 0});
-    } else {
+    total_tokens += image.channel[i].w * image.channel[i].h;
+  }
+  if (options.zero_tokens) {
+    tokens->resize(tokens->size() + total_tokens, {0, 0});
+  } else {
+    // Do one big allocation for all the tokens we'll need,
+    // to avoid reallocs that might require copying.
+    size_t pos = tokens->size();
+    tokens->resize(pos + total_tokens);
+    Token *tokenp = tokens->data() + pos;
+    for (size_t i = 0; i < nb_channels; i++) {
+      if (!image.channel[i].w || !image.channel[i].h) {
+        continue;  // skip empty channels
+      }
+      if (i >= image.nb_meta_channels &&
+          (image.channel[i].w > options.max_chan_size ||
+           image.channel[i].h > options.max_chan_size)) {
+        break;
+      }
       JXL_RETURN_IF_ERROR(EncodeModularChannelMAANS(
-          image, i, header->wp_header, *tree, tokens, aux_out, group_id,
+          image, i, header->wp_header, *tree, &tokenp, aux_out, group_id,
           options.skip_encoder_fast_path));
     }
+    // Make sure we actually wrote all tokens
+    JXL_CHECK(tokenp == tokens->data() + tokens->size());
   }
 
   // Write data if not using a global tree/ANS stream.

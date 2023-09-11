@@ -9,7 +9,7 @@
 use crate::connection::Http3State;
 use crate::settings::HSettingType;
 use crate::{
-    features::extended_connect::{ExtendedConnectEvents, ExtendedConnectType},
+    features::extended_connect::{ExtendedConnectEvents, ExtendedConnectType, SessionCloseReason},
     CloseType, Http3StreamInfo, HttpRecvStreamEvents, RecvStreamEvents, SendStreamEvents,
 };
 use neqo_common::{event::Provider as EventProvider, Header};
@@ -23,14 +23,23 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum WebTransportEvent {
     Negotiated(bool),
-    Session(StreamId),
+    Session {
+        stream_id: StreamId,
+        status: u16,
+        headers: Vec<Header>,
+    },
     SessionClosed {
         stream_id: StreamId,
-        error: Option<AppError>,
+        reason: SessionCloseReason,
+        headers: Option<Vec<Header>>,
     },
     NewStream {
         stream_id: StreamId,
         session_id: StreamId,
+    },
+    Datagram {
+        session_id: StreamId,
+        datagram: Vec<u8>,
     },
 }
 
@@ -174,11 +183,19 @@ impl SendStreamEvents for Http3ClientEvents {
 }
 
 impl ExtendedConnectEvents for Http3ClientEvents {
-    fn session_start(&self, connect_type: ExtendedConnectType, stream_id: StreamId) {
+    fn session_start(
+        &self,
+        connect_type: ExtendedConnectType,
+        stream_id: StreamId,
+        status: u16,
+        headers: Vec<Header>,
+    ) {
         if connect_type == ExtendedConnectType::WebTransport {
-            self.insert(Http3ClientEvent::WebTransport(WebTransportEvent::Session(
+            self.insert(Http3ClientEvent::WebTransport(WebTransportEvent::Session {
                 stream_id,
-            )));
+                status,
+                headers,
+            }));
         } else {
             unreachable!("There is only ExtendedConnectType::WebTransport.");
         }
@@ -188,11 +205,16 @@ impl ExtendedConnectEvents for Http3ClientEvents {
         &self,
         connect_type: ExtendedConnectType,
         stream_id: StreamId,
-        error: Option<AppError>,
+        reason: SessionCloseReason,
+        headers: Option<Vec<Header>>,
     ) {
         if connect_type == ExtendedConnectType::WebTransport {
             self.insert(Http3ClientEvent::WebTransport(
-                WebTransportEvent::SessionClosed { stream_id, error },
+                WebTransportEvent::SessionClosed {
+                    stream_id,
+                    reason,
+                    headers,
+                },
             ));
         } else {
             unreachable!("There are no other types.");
@@ -204,6 +226,15 @@ impl ExtendedConnectEvents for Http3ClientEvents {
             WebTransportEvent::NewStream {
                 stream_id: stream_info.stream_id(),
                 session_id: stream_info.session_id().unwrap(),
+            },
+        ));
+    }
+
+    fn new_datagram(&self, session_id: StreamId, datagram: Vec<u8>) {
+        self.insert(Http3ClientEvent::WebTransport(
+            WebTransportEvent::Datagram {
+                session_id,
+                datagram,
             },
         ));
     }
@@ -325,10 +356,10 @@ impl Http3ClientEvents {
         });
     }
 
-    pub fn negotiation_done(&self, feature_type: HSettingType, negotiated: bool) {
+    pub fn negotiation_done(&self, feature_type: HSettingType, succeeded: bool) {
         if feature_type == HSettingType::EnableWebTransport {
             self.insert(Http3ClientEvent::WebTransport(
-                WebTransportEvent::Negotiated(negotiated),
+                WebTransportEvent::Negotiated(succeeded),
             ));
         }
     }

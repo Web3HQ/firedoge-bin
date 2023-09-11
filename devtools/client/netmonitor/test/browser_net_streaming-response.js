@@ -8,12 +8,7 @@
  * displayed as XML or plain text
  */
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  // We cannot assert status text "OK" with HTTPS requests to httpd.js, instead
-  // we get "Connected"
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   const { tab, monitor } = await initNetMonitor(CUSTOM_GET_URL, {
     requestCount: 1,
   });
@@ -35,11 +30,13 @@ add_task(async function() {
   let wait = waitForNetworkEvents(monitor, REQUESTS.length);
   for (const [fmt] of REQUESTS) {
     const url = CONTENT_TYPE_SJS + "?fmt=" + fmt;
-    await SpecialPowers.spawn(tab.linkedBrowser, [{ url }], async function(
-      args
-    ) {
-      content.wrappedJSObject.performRequests(1, args.url);
-    });
+    await SpecialPowers.spawn(
+      tab.linkedBrowser,
+      [{ url }],
+      async function (args) {
+        content.wrappedJSObject.performRequests(1, args.url);
+      }
+    );
   }
   await wait;
 

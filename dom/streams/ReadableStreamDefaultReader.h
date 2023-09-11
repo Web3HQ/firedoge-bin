@@ -18,11 +18,32 @@
 #include "nsWrapperCache.h"
 #include "mozilla/LinkedList.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 class Promise;
 class ReadableStream;
+
+// https://streams.spec.whatwg.org/#default-reader-read
+struct Read_ReadRequest : public ReadRequest {
+ public:
+  NS_DECL_ISUPPORTS_INHERITED
+  NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(Read_ReadRequest, ReadRequest)
+
+  RefPtr<Promise> mPromise;
+
+  explicit Read_ReadRequest(Promise* aPromise) : mPromise(aPromise) {}
+
+  void ChunkSteps(JSContext* aCx, JS::Handle<JS::Value> aChunk,
+                  ErrorResult& aRv) override;
+
+  void CloseSteps(JSContext* aCx, ErrorResult& aRv) override;
+
+  void ErrorSteps(JSContext* aCx, JS::Handle<JS::Value> e,
+                  ErrorResult& aRv) override;
+
+ protected:
+  ~Read_ReadRequest() override = default;
+};
 
 class ReadableStreamDefaultReader final : public ReadableStreamGenericReader,
                                           public nsWrapperCache
@@ -30,31 +51,49 @@ class ReadableStreamDefaultReader final : public ReadableStreamGenericReader,
 {
  public:
   NS_DECL_ISUPPORTS_INHERITED
-  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS_INHERITED(
+  NS_DECL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS_INHERITED(
       ReadableStreamDefaultReader, ReadableStreamGenericReader)
 
  public:
   explicit ReadableStreamDefaultReader(nsISupports* aGlobal);
 
  protected:
-  ~ReadableStreamDefaultReader();
+  ~ReadableStreamDefaultReader() override;
 
  public:
+  bool IsDefault() override { return true; }
+  bool IsBYOB() override { return false; }
+  ReadableStreamDefaultReader* AsDefault() override { return this; }
+  ReadableStreamBYOBReader* AsBYOB() override {
+    MOZ_CRASH();
+    return nullptr;
+  }
+
+  // Public functions to implement other specs
+  // https://streams.spec.whatwg.org/#other-specs-rs-create
+
+  // The following algorithms can be used on arbitrary ReadableStream instances,
+  // including ones that are created by web developers. They can all fail in
+  // various operation-specific ways, and these failures should be handled by
+  // the calling specification.
+
+  // https://streams.spec.whatwg.org/#readablestreamdefaultreader-read-a-chunk
+  MOZ_CAN_RUN_SCRIPT void ReadChunk(JSContext* aCx, ReadRequest& aRequest,
+                                    ErrorResult& aRv);
+
+  // IDL layer functions
+
   JSObject* WrapObject(JSContext* aCx,
                        JS::Handle<JSObject*> aGivenProto) override;
+
+  // IDL methods
 
   static already_AddRefed<ReadableStreamDefaultReader> Constructor(
       const GlobalObject& aGlobal, ReadableStream& stream, ErrorResult& aRv);
 
-  already_AddRefed<Promise> Read(JSContext* aCx, ErrorResult& aRv);
+  MOZ_CAN_RUN_SCRIPT already_AddRefed<Promise> Read(ErrorResult& aRv);
 
   void ReleaseLock(ErrorResult& aRv);
-
-  already_AddRefed<Promise> Closed() const;
-
-  already_AddRefed<Promise> Cancel(JSContext* aCx,
-                                   JS::Handle<JS::Value> aReason,
-                                   ErrorResult& aRv);
 
   LinkedList<RefPtr<ReadRequest>>& ReadRequests() { return mReadRequests; }
 
@@ -62,11 +101,22 @@ class ReadableStreamDefaultReader final : public ReadableStreamGenericReader,
   LinkedList<RefPtr<ReadRequest>> mReadRequests = {};
 };
 
-extern void SetUpReadableStreamDefaultReader(
-    JSContext* aCx, ReadableStreamDefaultReader* aReader,
-    ReadableStream* aStream, ErrorResult& aRv);
+namespace streams_abstract {
 
-}  // namespace dom
-}  // namespace mozilla
+void SetUpReadableStreamDefaultReader(ReadableStreamDefaultReader* aReader,
+                                      ReadableStream* aStream,
+                                      ErrorResult& aRv);
+
+void ReadableStreamDefaultReaderErrorReadRequests(
+    JSContext* aCx, ReadableStreamDefaultReader* aReader,
+    JS::Handle<JS::Value> aError, ErrorResult& aRv);
+
+void ReadableStreamDefaultReaderRelease(JSContext* aCx,
+                                        ReadableStreamDefaultReader* aReader,
+                                        ErrorResult& aRv);
+
+}  // namespace streams_abstract
+
+}  // namespace mozilla::dom
 
 #endif  // mozilla_dom_ReadableStreamDefaultReader_h

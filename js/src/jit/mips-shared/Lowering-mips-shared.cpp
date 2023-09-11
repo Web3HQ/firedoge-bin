@@ -54,6 +54,13 @@ void LIRGeneratorMIPSShared::lowerForALU(LInstructionHelper<1, 2, 0>* ins,
 }
 
 void LIRGeneratorMIPSShared::lowerForALUInt64(
+    LInstructionHelper<INT64_PIECES, INT64_PIECES, 0>* ins, MDefinition* mir,
+    MDefinition* input) {
+  ins->setInt64Operand(0, useInt64RegisterAtStart(input));
+  defineInt64ReuseInput(ins, mir, 0);
+}
+
+void LIRGeneratorMIPSShared::lowerForALUInt64(
     LInstructionHelper<INT64_PIECES, 2 * INT64_PIECES, 0>* ins,
     MDefinition* mir, MDefinition* lhs, MDefinition* rhs) {
   ins->setInt64Operand(0, useInt64RegisterAtStart(lhs));
@@ -201,14 +208,14 @@ void LIRGeneratorMIPSShared::lowerWasmBuiltinTruncateToInt32(
 
   if (opd->type() == MIRType::Double) {
     define(new (alloc()) LWasmBuiltinTruncateDToInt32(
-               useRegister(opd), useFixed(ins->tls(), WasmTlsReg),
+               useRegister(opd), useFixed(ins->instance(), InstanceReg),
                LDefinition::BogusTemp()),
            ins);
     return;
   }
 
   define(new (alloc()) LWasmBuiltinTruncateFToInt32(
-             useRegister(opd), useFixed(ins->tls(), WasmTlsReg),
+             useRegister(opd), useFixed(ins->instance(), InstanceReg),
              LDefinition::BogusTemp()),
          ins);
 }
@@ -397,16 +404,12 @@ void LIRGenerator::visitWasmNeg(MWasmNeg* ins) {
   }
 }
 
-void LIRGenerator::visitWasmHeapBase(MWasmHeapBase* ins) {
-  auto* lir = new (alloc()) LWasmHeapBase(LAllocation());
-  define(lir, ins);
-}
-
 void LIRGenerator::visitWasmLoad(MWasmLoad* ins) {
   MDefinition* base = ins->base();
   // 'base' is a GPR but may be of either type. If it is 32-bit, it is
   // sign-extended on mips64 platform and we should explicitly promote it to
-  // 64-bit when use it as an index register in memory accesses.
+  // 64-bit by zero-extension when use it as an index register in memory
+  // accesses.
   MOZ_ASSERT(base->type() == MIRType::Int32 || base->type() == MIRType::Int64);
 
   LAllocation ptr;
@@ -935,6 +938,26 @@ void LIRGenerator::visitSignExtendInt64(MSignExtendInt64* ins) {
               ins);
 }
 
+// On mips we specialize the only cases where compare is {U,}Int32 and select
+// is {U,}Int32.
+bool LIRGeneratorShared::canSpecializeWasmCompareAndSelect(
+    MCompare::CompareType compTy, MIRType insTy) {
+  return insTy == MIRType::Int32 && (compTy == MCompare::Compare_Int32 ||
+                                     compTy == MCompare::Compare_UInt32);
+}
+
+void LIRGeneratorShared::lowerWasmCompareAndSelect(MWasmSelect* ins,
+                                                   MDefinition* lhs,
+                                                   MDefinition* rhs,
+                                                   MCompare::CompareType compTy,
+                                                   JSOp jsop) {
+  MOZ_ASSERT(canSpecializeWasmCompareAndSelect(compTy, ins->type()));
+  auto* lir = new (alloc()) LWasmCompareAndSelect(
+      useRegister(lhs), useRegister(rhs), compTy, jsop,
+      useRegisterAtStart(ins->trueExpr()), useRegister(ins->falseExpr()));
+  defineReuseInput(lir, ins, LWasmCompareAndSelect::IfTrueExprIndex);
+}
+
 void LIRGenerator::visitWasmTernarySimd128(MWasmTernarySimd128* ins) {
   MOZ_CRASH("ternary SIMD NYI");
 }
@@ -948,6 +971,9 @@ bool MWasmTernarySimd128::specializeBitselectConstantMaskAsShuffle(
     int8_t shuffle[16]) {
   return false;
 }
+bool MWasmTernarySimd128::canRelaxBitselect() { return false; }
+
+bool MWasmBinarySimd128::canPmaddubsw() { return false; }
 #endif
 
 bool MWasmBinarySimd128::specializeForConstantRhs() {

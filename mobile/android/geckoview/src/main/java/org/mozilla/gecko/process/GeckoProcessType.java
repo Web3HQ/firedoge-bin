@@ -19,7 +19,8 @@ public enum GeckoProcessType {
   RDD("rdd"),
   SOCKET("socket"),
   REMOTESANDBOXBROKER("sandboxbroker"),
-  FORKSERVER("forkserver");
+  FORKSERVER("forkserver"),
+  UTILITY("utility");
 
   private final String mGeckoName;
 
@@ -33,7 +34,7 @@ public enum GeckoProcessType {
   }
 
   @WrapForJNI
-  private static final GeckoProcessType fromInt(final int type) {
+  private static GeckoProcessType fromInt(final int type) {
     return values()[type];
   }
 }

@@ -5,10 +5,10 @@
 
 import copy
 
-from gecko_taskgraph.transforms.base import TransformSequence
-from gecko_taskgraph.util.declarative_artifacts import get_geckoview_upstream_artifacts
-from gecko_taskgraph.util.taskcluster import get_artifact_prefix
+from taskgraph.transforms.base import TransformSequence
+from taskgraph.util.taskcluster import get_artifact_prefix
 
+from gecko_taskgraph.util.declarative_artifacts import get_geckoview_upstream_artifacts
 
 transforms = TransformSequence()
 
@@ -62,9 +62,13 @@ def set_fetches_and_locations(config, jobs):
 
 
 def _get_aar_location(config, job, platform):
-    artifacts_locations = get_geckoview_upstream_artifacts(
-        config, job, platform=platform
-    )
+    artifacts_locations = []
+
+    for package in job["attributes"]["maven_packages"]:
+        artifacts_locations += get_geckoview_upstream_artifacts(
+            config, job, package, platform=platform
+        )
+
     aar_locations = [
         path for path in artifacts_locations[0]["paths"] if path.endswith(".aar")
     ]

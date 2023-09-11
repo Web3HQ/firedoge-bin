@@ -2,13 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-/* import-globals-from head.js */
-
 "use strict";
 
-add_task(async function() {
+// Bug 1746646: Make mochitests work with TCP enabled (cookieBehavior = 5)
+// All instances of addPermission and removePermission set up 3rd-party storage
+// access in a way that allows the test to proceed with TCP enabled.
+
+add_task(async function () {
   // open tab
   const URL = URL_ROOT_COM_SSL + "storage-cache-basic.html";
+  await SpecialPowers.addPermission(
+    "3rdPartyStorage^https://example.net",
+    true,
+    URL
+  );
   await openTabAndSetupStorage(URL);
   const doc = gPanelWindow.document;
 
@@ -21,6 +28,11 @@ add_task(async function() {
   // Check iframe
   await selectTreeItem(["Cache", "https://example.net", "foo"]);
   checkCacheData(URL_ROOT_NET_SSL + "storage-blank.html", "OK");
+
+  await SpecialPowers.removePermission(
+    "3rdPartyStorage^http://example.net",
+    URL
+  );
 });
 
 function checkCacheData(url, status) {

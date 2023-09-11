@@ -36,7 +36,10 @@ using mozilla::Telemetry::DiscardedData from "mozilla/TelemetryComms.h";
 using mozilla::gfx::Feature from "gfxFeature.h";
 using mozilla::gfx::Fallback from "gfxFallback.h";
 using mozilla::layers::LayersId from "mozilla/layers/LayersTypes.h";
-using mozilla::PDMFactory::MediaCodecsSupported from "PDMFactory.h";
+using mozilla::layers::OverlayInfo from "mozilla/layers/OverlayInfo.h";
+using mozilla::layers::SwapChainInfo from "mozilla/layers/OverlayInfo.h";
+using mozilla::media::MediaCodecsSupported from "MediaCodecsSupport.h";
+using mozilla::layers::VideoBridgeSource from "mozilla/layers/VideoBridgeUtils.h";
 
 namespace mozilla {
 namespace gfx {
@@ -57,12 +60,13 @@ parent:
   async Init(GfxVarUpdate[] vars,
              DevicePrefs devicePrefs,
              LayerTreeIdMapping[] mapping,
-             GfxInfoFeatureStatus[] features);
+             GfxInfoFeatureStatus[] features,
+             uint32_t wrNamespace);
 
   async InitCompositorManager(Endpoint<PCompositorManagerParent> endpoint);
   async InitVsyncBridge(Endpoint<PVsyncBridgeParent> endpoint);
   async InitImageBridge(Endpoint<PImageBridgeParent> endpoint);
-  async InitVideoBridge(Endpoint<PVideoBridgeParent> endpoint);
+  async InitVideoBridge(Endpoint<PVideoBridgeParent> endpoint, VideoBridgeSource aSource);
   async InitVRManager(Endpoint<PVRManagerParent> endpoint);
   async InitUiCompositorController(LayersId rootLayerTreeId, Endpoint<PUiCompositorControllerParent> endpoint);
   async InitAPZInputBridge(LayersId layersId,
@@ -91,7 +95,7 @@ parent:
 
   // Request to simulate device reset and to get the updated DeviceStatus from
   // the GPU process. This blocks until one is available (i.e., Init has completed).
-  sync SimulateDeviceReset() returns (GPUDeviceData status);
+  async SimulateDeviceReset();
 
   // Have a message be broadcasted to the GPU process by the GPU process
   // observer service.
@@ -120,7 +124,11 @@ parent:
 
   // Test-only method.
   // Asks the gpu process to trigger test-only instrumentation.
-  async TestTriggerMetrics();
+  // The unused returned value is to have a promise we can await.
+  async TestTriggerMetrics() returns (bool unused);
+
+  // Causes the GPU process to crash. Used for tests and diagnostics.
+  async CrashProcess();
 
 child:
   // Sent when the GPU process has initialized devices. This occurs once, after
@@ -152,6 +160,8 @@ child:
 
   async DeclareStable();
   async NotifyDeviceReset(GPUDeviceData status);
+  async NotifyOverlayInfo(OverlayInfo info);
+  async NotifySwapChainInfo(SwapChainInfo info);
   async FlushMemory(nsString reason);
 
   async AddMemoryReport(MemoryReport aReport);

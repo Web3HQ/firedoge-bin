@@ -12,7 +12,11 @@
 #include "nsWindowsHelpers.h"
 #include <windows.h>
 #include <psapi.h>
-#include <tlhelp32.h>
+#include <winternl.h>
+
+#ifndef STATUS_INFO_LENGTH_MISMATCH
+#  define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#endif
 
 #define PR_USEC_PER_NSEC 1000L
 
@@ -27,44 +31,37 @@ static uint64_t ToNanoSeconds(const FILETIME& aFileTime) {
   return usec.QuadPart * 100;
 }
 
-/* Get the CPU frequency to use to convert cycle time values to actual time.
- * @returns the TSC frequency in MHz, or 0 if converting cycle time values
- * should not be attempted. */
-static int GetCycleTimeFrequency() {
-  static int result = -1;
-  if (result != -1) {
-    return result;
-  }
-
-  result = 0;
-
-  // Having a constant TSC is required to convert cycle time to actual time.
-  if (!mozilla::has_constant_tsc()) {
-    return result;
-  }
-
-  // Now get the nominal CPU frequency.
-  HKEY key;
-  static const WCHAR keyName[] =
-      L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0";
-
-  if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyName, 0, KEY_QUERY_VALUE, &key) ==
-      ERROR_SUCCESS) {
-    DWORD data, len;
-    len = sizeof(data);
-
-    if (RegQueryValueEx(key, L"~Mhz", 0, 0, reinterpret_cast<LPBYTE>(&data),
-                        &len) == ERROR_SUCCESS) {
-      result = static_cast<int>(data);
+int GetCycleTimeFrequencyMHz() {
+  static const int frequency = []() {
+    // Having a constant TSC is required to convert cycle time to actual time.
+    if (!mozilla::has_constant_tsc()) {
+      return 0;
     }
-  }
 
-  return result;
+    // Now get the nominal CPU frequency.
+    HKEY key;
+    static const WCHAR keyName[] =
+        L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0";
+
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyName, 0, KEY_QUERY_VALUE, &key) ==
+        ERROR_SUCCESS) {
+      DWORD data, len;
+      len = sizeof(data);
+
+      if (RegQueryValueEx(key, L"~Mhz", 0, 0, reinterpret_cast<LPBYTE>(&data),
+                          &len) == ERROR_SUCCESS) {
+        return static_cast<int>(data);
+      }
+    }
+
+    return 0;
+  }();
+
+  return frequency;
 }
 
 nsresult GetCpuTimeSinceProcessStartInMs(uint64_t* aResult) {
-  FILETIME createTime, exitTime, kernelTime, userTime;
-  int frequencyInMHz = GetCycleTimeFrequency();
+  int frequencyInMHz = GetCycleTimeFrequencyMHz();
   if (frequencyInMHz) {
     uint64_t cpuCycleCount;
     if (!QueryProcessCycleTime(::GetCurrentProcess(), &cpuCycleCount)) {
@@ -76,6 +73,7 @@ nsresult GetCpuTimeSinceProcessStartInMs(uint64_t* aResult) {
     return NS_OK;
   }
 
+  FILETIME createTime, exitTime, kernelTime, userTime;
   if (!GetProcessTimes(::GetCurrentProcess(), &createTime, &exitTime,
                        &kernelTime, &userTime)) {
     return NS_ERROR_FAILURE;
@@ -99,7 +97,7 @@ ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(
     return result;
   }
 
-  int frequencyInMHz = GetCycleTimeFrequency();
+  int frequencyInMHz = GetCycleTimeFrequencyMHz();
 
   // ---- Copying data on processes (minus threads).
 
@@ -151,6 +149,7 @@ ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(
     info.type = request.processType;
     info.origin = request.origin;
     info.windows = std::move(request.windowInfo);
+    info.utilityActors = std::move(request.utilityInfo);
     info.cpuTime = cpuTime;
     info.cpuCycleCount = cpuCycleTime;
     info.memory = memoryCounters.PrivateUsage;
@@ -163,11 +162,36 @@ ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(
 
   // ---- Add thread data to already-copied processes.
 
-  // First, we need to capture a snapshot of all the threads on this
-  // system.
-  nsAutoHandle hThreadSnap(CreateToolhelp32Snapshot(
-      /* dwFlags */ TH32CS_SNAPTHREAD, /* ignored */ 0));
-  if (!hThreadSnap) {
+  NTSTATUS ntStatus;
+
+  UniquePtr<char[]> buf;
+  ULONG bufLen = 512u * 1024u;
+
+  // We must query for information in a loop, since we are effectively asking
+  // the kernel to take a snapshot of all the processes on the system;
+  // the size of the required buffer may fluctuate between successive calls.
+  do {
+    // These allocations can be hundreds of megabytes on some computers, so
+    // we should use fallible new here.
+    buf = MakeUniqueFallible<char[]>(bufLen);
+    if (!buf) {
+      result.SetReject(NS_ERROR_OUT_OF_MEMORY);
+      return result;
+    }
+
+    ntStatus = ::NtQuerySystemInformation(SystemProcessInformation, buf.get(),
+                                          bufLen, &bufLen);
+    if (ntStatus != STATUS_INFO_LENGTH_MISMATCH) {
+      break;
+    }
+
+    // If we need another NtQuerySystemInformation call, allocate a
+    // slightly larger buffer than what would have been needed this time,
+    // to account for possible process or thread creations that might
+    // happen between our calls.
+    bufLen += 8u * 1024u;
+  } while (true);
+  if (!NT_SUCCESS(ntStatus)) {
     result.SetReject(NS_ERROR_UNEXPECTED);
     return result;
   }
@@ -179,62 +203,75 @@ ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(
       reinterpret_cast<GETTHREADDESCRIPTION>(::GetProcAddress(
           ::GetModuleHandleW(L"Kernel32.dll"), "GetThreadDescription"));
 
-  THREADENTRY32 te32;
-  te32.dwSize = sizeof(THREADENTRY32);
+  PSYSTEM_PROCESS_INFORMATION processInfo;
+  for (ULONG offset = 0;; offset += processInfo->NextEntryOffset) {
+    MOZ_RELEASE_ASSERT(offset < bufLen);
+    processInfo =
+        reinterpret_cast<PSYSTEM_PROCESS_INFORMATION>(buf.get() + offset);
+    ULONG pid = HandleToUlong(processInfo->UniqueProcessId);
+    // Check if we are interested in this process.
+    auto processLookup = gathered.lookup(pid);
+    if (processLookup) {
+      for (ULONG i = 0; i < processInfo->NumberOfThreads; ++i) {
+        // The thread information structs are stored in the buffer right
+        // after the SYSTEM_PROCESS_INFORMATION struct.
+        PSYSTEM_THREAD_INFORMATION thread =
+            reinterpret_cast<PSYSTEM_THREAD_INFORMATION>(
+                buf.get() + offset + sizeof(SYSTEM_PROCESS_INFORMATION) +
+                sizeof(SYSTEM_THREAD_INFORMATION) * i);
+        ULONG tid = HandleToUlong(thread->ClientId.UniqueThread);
 
-  // Now, walk through the threads.
-  for (auto success = Thread32First(hThreadSnap.get(), &te32); success;
-       success = Thread32Next(hThreadSnap.get(), &te32)) {
-    auto processLookup = gathered.lookup(te32.th32OwnerProcessID);
-    if (!processLookup) {
-      // Not one of the processes we're interested in.
-      continue;
-    }
-    ThreadInfo* threadInfo =
-        processLookup->value().threads.AppendElement(fallible);
-    if (!threadInfo) {
-      result.SetReject(NS_ERROR_OUT_OF_MEMORY);
-      return result;
-    }
+        ThreadInfo* threadInfo =
+            processLookup->value().threads.AppendElement(fallible);
+        if (!threadInfo) {
+          result.SetReject(NS_ERROR_OUT_OF_MEMORY);
+          return result;
+        }
 
-    nsAutoHandle hThread(
-        OpenThread(/* dwDesiredAccess = */ THREAD_QUERY_INFORMATION,
-                   /* bInheritHandle = */ FALSE,
-                   /* dwThreadId = */ te32.th32ThreadID));
-    if (!hThread) {
-      // Cannot open thread. Not sure why, but let's erase this thread
-      // and attempt to find data on other threads.
-      processLookup->value().threads.RemoveLastElement();
-      continue;
-    }
+        nsAutoHandle hThread(
+            OpenThread(/* dwDesiredAccess = */ THREAD_QUERY_INFORMATION,
+                       /* bInheritHandle = */ FALSE,
+                       /* dwThreadId = */ tid));
+        if (!hThread) {
+          // Cannot open thread. Not sure why, but let's erase this thread
+          // and attempt to find data on other threads.
+          processLookup->value().threads.RemoveLastElement();
+          continue;
+        }
 
-    threadInfo->tid = te32.th32ThreadID;
+        threadInfo->tid = tid;
 
-    // Attempt to get thread times.
-    // If we fail, continue without this piece of information.
-    if (QueryThreadCycleTime(hThread.get(), &threadInfo->cpuCycleCount) &&
-        frequencyInMHz) {
-      threadInfo->cpuTime =
-          threadInfo->cpuCycleCount * PR_USEC_PER_NSEC / frequencyInMHz;
-    } else {
-      FILETIME createTime, exitTime, kernelTime, userTime;
-      if (GetThreadTimes(hThread.get(), &createTime, &exitTime, &kernelTime,
-                         &userTime)) {
-        threadInfo->cpuTime =
-            ToNanoSeconds(kernelTime) + ToNanoSeconds(userTime);
+        // Attempt to get thread times.
+        // If we fail, continue without this piece of information.
+        if (QueryThreadCycleTime(hThread.get(), &threadInfo->cpuCycleCount) &&
+            frequencyInMHz) {
+          threadInfo->cpuTime =
+              threadInfo->cpuCycleCount * PR_USEC_PER_NSEC / frequencyInMHz;
+        } else {
+          FILETIME createTime, exitTime, kernelTime, userTime;
+          if (GetThreadTimes(hThread.get(), &createTime, &exitTime, &kernelTime,
+                             &userTime)) {
+            threadInfo->cpuTime =
+                ToNanoSeconds(kernelTime) + ToNanoSeconds(userTime);
+          }
+        }
+
+        // Attempt to get thread name.
+        // If we fail, continue without this piece of information.
+        if (getThreadDescription) {
+          PWSTR threadName = nullptr;
+          if (getThreadDescription(hThread.get(), &threadName) && threadName) {
+            threadInfo->name = threadName;
+          }
+          if (threadName) {
+            LocalFree(threadName);
+          }
+        }
       }
     }
 
-    // Attempt to get thread name.
-    // If we fail, continue without this piece of information.
-    if (getThreadDescription) {
-      PWSTR threadName = nullptr;
-      if (getThreadDescription(hThread.get(), &threadName) && threadName) {
-        threadInfo->name = threadName;
-      }
-      if (threadName) {
-        LocalFree(threadName);
-      }
+    if (processInfo->NextEntryOffset == 0) {
+      break;
     }
   }
 

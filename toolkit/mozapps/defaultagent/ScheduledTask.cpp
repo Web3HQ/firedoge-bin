@@ -13,6 +13,8 @@
 #include <taskschd.h>
 
 #include "readstrings.h"
+#include "updatererrors.h"
+#include "EventLog.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/UniquePtr.h"
@@ -20,6 +22,8 @@
 #include "WindowsDefaultBrowser.h"
 
 #include "DefaultBrowser.h"
+
+namespace mozilla::default_agent {
 
 const wchar_t* kTaskVendor = L"" MOZ_APP_VENDOR;
 // kTaskName should have the unique token appended before being used.
@@ -143,9 +147,12 @@ HRESULT RegisterTask(const wchar_t* uniqueToken,
   ENSURE(taskSettings->put_MultipleInstances(TASK_INSTANCES_IGNORE_NEW));
   ENSURE(taskSettings->put_StartWhenAvailable(VARIANT_TRUE));
   ENSURE(taskSettings->put_StopIfGoingOnBatteries(VARIANT_FALSE));
-  // This cryptic string means "35 minutes". So, if the task runs for longer
-  // than that, the process will be killed, because that should never happen.
-  BStrPtr execTimeLimitBStr = BStrPtr(SysAllocString(L"PT35M"));
+  // This cryptic string means "12 hours 5 minutes". So, if the task runs for
+  // longer than that, the process will be killed, because that should never
+  // happen. See
+  // https://docs.microsoft.com/en-us/windows/win32/taskschd/tasksettings-executiontimelimit
+  // for a detailed explanation of these strings.
+  BStrPtr execTimeLimitBStr = BStrPtr(SysAllocString(L"PT12H5M"));
   ENSURE(taskSettings->put_ExecutionTimeLimit(execTimeLimitBStr.get()));
 
   RefPtr<IRegistrationInfo> regInfo;
@@ -220,8 +227,15 @@ HRESULT RegisterTask(const wchar_t* uniqueToken,
   RefPtr<IExecAction> execAction;
   ENSURE(action->QueryInterface(IID_IExecAction, getter_AddRefs(execAction)));
 
-  BStrPtr binaryPathBStr =
-      BStrPtr(SysAllocString(mozilla::GetFullBinaryPath().get()));
+  // Register proxy instead of Firefox background task.
+  mozilla::UniquePtr<wchar_t[]> installPath = mozilla::GetFullBinaryPath();
+  if (!PathRemoveFileSpecW(installPath.get())) {
+    return E_FAIL;
+  }
+  std::wstring proxyPath(installPath.get());
+  proxyPath += L"\\default-browser-agent.exe";
+
+  BStrPtr binaryPathBStr = BStrPtr(SysAllocString(proxyPath.c_str()));
   ENSURE(execAction->put_Path(binaryPathBStr.get()));
 
   std::wstring taskArgs = L"do-task \"";
@@ -402,3 +416,5 @@ HRESULT RemoveTasks(const wchar_t* uniqueToken, WhichTasks tasksToRemove) {
 
   return deleteResult;
 }
+
+}  // namespace mozilla::default_agent

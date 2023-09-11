@@ -9,17 +9,17 @@ from datetime import datetime
 import mozpack.path as mozpath
 from mozbuild.base import MozbuildObject
 from mozbuild.util import memoize
+from taskgraph.optimize.base import OptimizationStrategy, register_strategy
+from taskgraph.util.taskcluster import find_task_id
 
 from gecko_taskgraph import files_changed
-from gecko_taskgraph.optimize import register_strategy, OptimizationStrategy
-from gecko_taskgraph.util.taskcluster import find_task_id, status_task
+from gecko_taskgraph.util.taskcluster import status_task
 
 logger = logging.getLogger(__name__)
 
 
 @register_strategy("index-search")
 class IndexSearch(OptimizationStrategy):
-
     # A task with no dependencies remaining after optimization will be replaced
     # if artifacts exist for the corresponding index_paths.
     # Otherwise, we're in one of the following cases:

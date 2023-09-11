@@ -1,12 +1,12 @@
 import { GlobalOverrider } from "test/unit/utils";
-import { PersonalityProviderWorker } from "lib/PersonalityProvider/PersonalityProviderWorkerClass.jsm";
+import { PersonalityProviderWorker } from "lib/PersonalityProvider/PersonalityProviderWorkerClass.mjs";
 import {
   tokenize,
   toksToTfIdfVector,
-} from "lib/PersonalityProvider/Tokenize.jsm";
-import { RecipeExecutor } from "lib/PersonalityProvider/RecipeExecutor.jsm";
-import { NmfTextTagger } from "lib/PersonalityProvider/NmfTextTagger.jsm";
-import { NaiveBayesTextTagger } from "lib/PersonalityProvider/NaiveBayesTextTagger.jsm";
+} from "lib/PersonalityProvider/Tokenize.mjs";
+import { RecipeExecutor } from "lib/PersonalityProvider/RecipeExecutor.mjs";
+import { NmfTextTagger } from "lib/PersonalityProvider/NmfTextTagger.mjs";
+import { NaiveBayesTextTagger } from "lib/PersonalityProvider/NaiveBayesTextTagger.mjs";
 
 describe("Personality Provider Worker Class", () => {
   let instance;
@@ -167,6 +167,8 @@ describe("Personality Provider Worker Class", () => {
         attachment: {
           filename: "file",
           size: "1",
+          // This hash matches the hash generated from the empty Uint8Array returned by the IOUtils.read stub.
+          hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
       };
 
@@ -178,11 +180,30 @@ describe("Personality Provider Worker Class", () => {
 
       existsStub.resetHistory();
       statStub.resetHistory();
+      instance._downloadAttachment.resetHistory();
 
       attachmentStub = {
         attachment: {
           filename: "file",
           size: "2",
+        },
+      };
+
+      await instance.maybeDownloadAttachment(attachmentStub);
+      assert.calledThrice(existsStub);
+      assert.calledThrice(statStub);
+      assert.calledThrice(instance._downloadAttachment);
+
+      existsStub.resetHistory();
+      statStub.resetHistory();
+      instance._downloadAttachment.resetHistory();
+
+      attachmentStub = {
+        attachment: {
+          filename: "file",
+          size: "1",
+          // Bogus hash to trigger an update.
+          hash: "1234",
         },
       };
 

@@ -9,6 +9,7 @@
 
 #include "gmock/gmock.h"
 #include "MediaConduitInterface.h"
+#include "libwebrtcglue/FrameTransformer.h"
 
 namespace webrtc {
 std::ostream& operator<<(std::ostream& aStream,
@@ -24,12 +25,15 @@ class MockConduit : public MediaSessionConduit {
   MockConduit() = default;
 
   MOCK_CONST_METHOD0(type, Type());
+  MOCK_CONST_METHOD0(ActiveSendPayloadType, Maybe<int>());
+  MOCK_CONST_METHOD0(ActiveRecvPayloadType, Maybe<int>());
   MOCK_METHOD1(SetTransportActive, void(bool));
   MOCK_METHOD0(SenderRtpSendEvent, MediaEventSourceExc<MediaPacket>&());
   MOCK_METHOD0(SenderRtcpSendEvent, MediaEventSourceExc<MediaPacket>&());
   MOCK_METHOD0(ReceiverRtcpSendEvent, MediaEventSourceExc<MediaPacket>&());
-  MOCK_METHOD1(ConnectReceiverRtpEvent,
-               void(MediaEventSourceExc<MediaPacket, webrtc::RTPHeader>&));
+  MOCK_METHOD1(
+      ConnectReceiverRtpEvent,
+      void(MediaEventSourceExc<webrtc::RtpPacketReceived, webrtc::RTPHeader>&));
   MOCK_METHOD1(ConnectReceiverRtcpEvent,
                void(MediaEventSourceExc<MediaPacket>&));
   MOCK_METHOD1(ConnectSenderRtcpEvent, void(MediaEventSourceExc<MediaPacket>&));
@@ -40,19 +44,21 @@ class MockConduit : public MediaSessionConduit {
   MOCK_CONST_METHOD0(GetLocalSSRCs, Ssrcs());
   MOCK_CONST_METHOD0(GetRemoteSSRC, Maybe<Ssrc>());
   MOCK_METHOD1(UnsetRemoteSSRC, void(Ssrc));
+  MOCK_METHOD0(DisableSsrcChanges, void());
   MOCK_CONST_METHOD1(HasCodecPluginID, bool(uint64_t));
   MOCK_METHOD0(RtcpByeEvent, MediaEventSource<void>&());
   MOCK_METHOD0(RtcpTimeoutEvent, MediaEventSource<void>&());
+  MOCK_METHOD0(RtpPacketEvent, MediaEventSource<void>&());
   MOCK_METHOD3(SendRtp,
                bool(const uint8_t*, size_t, const webrtc::PacketOptions&));
   MOCK_METHOD2(SendSenderRtcp, bool(const uint8_t*, size_t));
   MOCK_METHOD2(SendReceiverRtcp, bool(const uint8_t*, size_t));
   MOCK_METHOD2(DeliverPacket, void(rtc::CopyOnWriteBuffer, PacketType));
-  MOCK_METHOD0(Shutdown, void());
+  MOCK_METHOD0(Shutdown, RefPtr<GenericPromise>());
   MOCK_METHOD0(AsAudioSessionConduit, Maybe<RefPtr<AudioSessionConduit>>());
   MOCK_METHOD0(AsVideoSessionConduit, Maybe<RefPtr<VideoSessionConduit>>());
   MOCK_CONST_METHOD0(GetCallStats, Maybe<webrtc::Call::Stats>());
-
+  MOCK_METHOD1(SetJitterBufferTarget, void(DOMHighResTimeStamp));
   MOCK_CONST_METHOD0(GetUpstreamRtpSources, std::vector<webrtc::RtpSource>());
 };
 }  // namespace mozilla

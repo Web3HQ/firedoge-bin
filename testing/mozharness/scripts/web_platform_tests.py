@@ -4,34 +4,30 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at http://mozilla.org/MPL/2.0/.
 # ***** END LICENSE BLOCK *****
-from __future__ import absolute_import
 import copy
 import gzip
 import json
 import os
 import sys
-
 from datetime import datetime, timedelta
 
 # load modules from parent dir
 sys.path.insert(1, os.path.dirname(sys.path[0]))
 
 import mozinfo
-
 from mozharness.base.errors import BaseErrorList
+from mozharness.base.log import INFO
 from mozharness.base.script import PreScriptAction
 from mozharness.base.vcs.vcsbase import MercurialScript
 from mozharness.mozilla.automation import TBPL_RETRY
+from mozharness.mozilla.structuredlog import StructuredOutputParser
 from mozharness.mozilla.testing.android import AndroidMixin
-from mozharness.mozilla.testing.testbase import TestingMixin, testing_config_options
 from mozharness.mozilla.testing.codecoverage import (
     CodeCoverageMixin,
     code_coverage_config_options,
 )
 from mozharness.mozilla.testing.errors import WptHarnessErrorList
-
-from mozharness.mozilla.structuredlog import StructuredOutputParser
-from mozharness.base.log import INFO
+from mozharness.mozilla.testing.testbase import TestingMixin, testing_config_options
 
 
 class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
@@ -52,6 +48,15 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
                     "dest": "e10s",
                     "default": True,
                     "help": "Run without e10s enabled",
+                },
+            ],
+            [
+                ["--disable-fission"],
+                {
+                    "action": "store_true",
+                    "dest": "disable_fission",
+                    "default": False,
+                    "help": "Run without fission enabled",
                 },
             ],
             [
@@ -78,15 +83,6 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
                     "default": False,
                     "help": "Permits a software GL implementation (such as LLVMPipe) "
                     "to use the GL compositor.",
-                },
-            ],
-            [
-                ["--enable-webrender"],
-                {
-                    "action": "store_true",
-                    "dest": "enable_webrender",
-                    "default": False,
-                    "help": "Enable the WebRender compositor in Gecko.",
                 },
             ],
             [
@@ -155,12 +151,67 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
                 },
             ],
             [
+                ["--skip-crash"],
+                {
+                    "action": "store_true",
+                    "dest": "skip_crash",
+                    "default": False,
+                    "help": "Ignore tests that are expected status of CRASH",
+                },
+            ],
+            [
+                ["--default-exclude"],
+                {
+                    "action": "store_true",
+                    "dest": "default_exclude",
+                    "default": False,
+                    "help": "Only run the tests explicitly given in arguments",
+                },
+            ],
+            [
                 ["--include"],
                 {
-                    "action": "store",
+                    "action": "append",
                     "dest": "include",
-                    "default": None,
-                    "help": "URL prefix to include.",
+                    "default": [],
+                    "help": "Add URL prefix to include.",
+                },
+            ],
+            [
+                ["--exclude"],
+                {
+                    "action": "append",
+                    "dest": "exclude",
+                    "default": [],
+                    "help": "Add URL prefix to exclude.",
+                },
+            ],
+            [
+                ["--tag"],
+                {
+                    "action": "append",
+                    "dest": "tag",
+                    "default": [],
+                    "help": "Add test tag (which includes URL prefix) to include.",
+                },
+            ],
+            [
+                ["--exclude-tag"],
+                {
+                    "action": "append",
+                    "dest": "exclude_tag",
+                    "default": [],
+                    "help": "Add test tag (which includes URL prefix) to exclude.",
+                },
+            ],
+            [
+                ["--repeat"],
+                {
+                    "action": "store",
+                    "dest": "repeat",
+                    "default": 0,
+                    "type": int,
+                    "help": "Repeat tests (used for confirm-failures) X times.",
                 },
             ],
         ]
@@ -193,6 +244,7 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
         self.test_packages_url = c.get("test_packages_url")
         self.installer_path = c.get("installer_path")
         self.binary_path = c.get("binary_path")
+        self.repeat = c.get("repeat")
         self.abs_app_dir = None
         self.xre_path = None
         if self.is_emulator:
@@ -236,10 +288,9 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
             dirs["abs_sdk_dir"] = os.path.join(work_dir, "android-sdk-linux")
             dirs["abs_avds_dir"] = os.path.join(work_dir, "android-device")
             dirs["abs_bundletool_path"] = os.path.join(work_dir, "bundletool.jar")
-            if self.config["enable_webrender"]:
-                # AndroidMixin uses this when launching the emulator. We only want
-                # GLES3 if we're running WebRender
-                self.use_gles3 = True
+            # AndroidMixin uses this when launching the emulator. We only want
+            # GLES3 if we're running WebRender (default)
+            self.use_gles3 = True
 
         abs_dirs.update(dirs)
         self.abs_dirs = abs_dirs
@@ -255,6 +306,19 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
         )
 
         self.register_virtualenv_module(requirements=[requirements], two_pass=True)
+
+        webtransport_requirements = os.path.join(
+            dirs["abs_test_install_dir"],
+            "web-platform",
+            "tests",
+            "tools",
+            "webtransport",
+            "requirements.txt",
+        )
+
+        self.register_virtualenv_module(
+            requirements=[webtransport_requirements], two_pass=True
+        )
 
     def _query_geckodriver(self):
         path = None
@@ -291,20 +355,15 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
 
         mozinfo.find_and_update_from_json(dirs["abs_test_install_dir"])
 
-        # Default to fission disabled
-        fission_enabled = "fission.autostart=true" in c["extra_prefs"]
-
         raw_log_file, error_summary_file = self.get_indexed_logs(
             dirs["abs_blob_upload_dir"], "wpt"
         )
 
         cmd += [
             "--log-raw=-",
-            "--log-raw=%s" % raw_log_file,
             "--log-wptreport=%s"
             % os.path.join(dirs["abs_blob_upload_dir"], "wptreport.json"),
             "--log-errorsummary=%s" % error_summary_file,
-            "--binary=%s" % self.binary_path,
             "--symbols-path=%s" % self.symbols_path,
             "--stackwalk-binary=%s" % self.query_minidump_stackwalk(),
             "--stackfix-dir=%s" % os.path.join(dirs["abs_test_install_dir"], "bin"),
@@ -315,17 +374,24 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
             % os.path.join(
                 dirs["abs_test_extensions_dir"], "specialpowers@mozilla.org.xpi"
             ),
+            # Ensure that we don't get a Python traceback from handlers that will be
+            # added to the log summary
+            "--suppress-handler-traceback",
         ]
 
         is_windows_7 = (
             mozinfo.info["os"] == "win" and mozinfo.info["os_version"] == "6.1"
         )
 
+        if self.repeat > 0:
+            # repeat should repeat the original test, so +1 for first run
+            cmd.append("--repeat=%s" % (self.repeat + 1))
+
         if (
             self.is_android
             or mozinfo.info["tsan"]
             or "wdspec" in test_types
-            or fission_enabled
+            or not c["disable_fission"]
             # Bug 1392106 - skia error 0x80070005: Access is denied.
             or is_windows_7
             and mozinfo.info["debug"]
@@ -340,6 +406,8 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
                 "--device-serial=%s" % self.device_serial,
                 "--package-name=%s" % self.query_package_name(),
             ]
+        else:
+            cmd.append("--binary=%s" % self.binary_path)
 
         if is_windows_7:
             # On Windows 7 --install-fonts fails, so fall back to a Firefox-specific codepath
@@ -353,17 +421,20 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
         if c["extra_prefs"]:
             cmd.extend(["--setpref={}".format(p) for p in c["extra_prefs"]])
 
-        if not fission_enabled and "fission.autostart=false" not in c["extra_prefs"]:
-            cmd.append("--setpref=fission.autostart=false")
+        if c["disable_fission"]:
+            cmd.append("--disable-fission")
 
         if not c["e10s"]:
             cmd.append("--disable-e10s")
 
-        if c["enable_webrender"]:
-            cmd.append("--enable-webrender")
-
         if c["skip_timeout"]:
             cmd.append("--skip-timeout")
+
+        if c["skip_crash"]:
+            cmd.append("--skip-crash")
+
+        if c["default_exclude"]:
+            cmd.append("--default-exclude")
 
         for implementation_status in c["skip_implementation_status"]:
             cmd.append("--skip-implementation-status=%s" % implementation_status)
@@ -434,8 +505,15 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
             cmd.extend(
                 self.query_tests_args(try_tests, str_format_values=str_format_values)
             )
-        if "include" in c and c["include"]:
-            cmd.append("--include=%s" % c["include"])
+
+        for url_prefix in c["include"]:
+            cmd.append(f"--include={url_prefix}")
+        for url_prefix in c["exclude"]:
+            cmd.append(f"--exclude={url_prefix}")
+        for tag in c["tag"]:
+            cmd.append(f"--tag={tag}")
+        for tag in c["exclude_tag"]:
+            cmd.append(f"--exclude-tag={tag}")
 
         cmd.extend(test_paths)
 
@@ -557,8 +635,6 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
             env["MOZ_HEADLESS"] = "1"
             env["MOZ_HEADLESS_WIDTH"] = self.config["headless_width"]
             env["MOZ_HEADLESS_HEIGHT"] = self.config["headless_height"]
-
-        env["STYLO_THREADS"] = "4"
 
         if self.is_android:
             env["ADB_PATH"] = self.adb_path
