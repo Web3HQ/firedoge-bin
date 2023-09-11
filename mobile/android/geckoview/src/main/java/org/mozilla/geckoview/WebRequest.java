@@ -40,6 +40,12 @@ public class WebRequest extends WebMessage {
    */
   public final @CacheMode int cacheMode;
 
+  /**
+   * If true, do not use newer protocol features that might have interop problems on the Internet.
+   * Intended only for use with critical infrastructure.
+   */
+  public final boolean beConservative;
+
   /** The value of the Referer header for this request. */
   public final @Nullable String referrer;
 
@@ -52,7 +58,7 @@ public class WebRequest extends WebMessage {
     CACHE_MODE_FORCE_CACHE,
     CACHE_MODE_ONLY_IF_CACHED
   })
-  /* package */ @interface CacheMode {};
+  public @interface CacheMode {};
 
   /** Default cache mode. Normal caching rules apply. */
   public static final int CACHE_MODE_DEFAULT = 1;
@@ -103,6 +109,7 @@ public class WebRequest extends WebMessage {
     method = builder.mMethod;
     cacheMode = builder.mCacheMode;
     referrer = builder.mReferrer;
+    beConservative = builder.mBeConservative;
 
     if (builder.mBody != null) {
       body = builder.mBody.asReadOnlyBuffer();
@@ -117,6 +124,7 @@ public class WebRequest extends WebMessage {
     /* package */ String mMethod = "GET";
     /* package */ int mCacheMode = CACHE_MODE_DEFAULT;
     /* package */ String mReferrer;
+    /* package */ boolean mBeConservative;
 
     /**
      * Construct a Builder instance with the specified URI.
@@ -215,7 +223,21 @@ public class WebRequest extends WebMessage {
       return this;
     }
 
-    /** @return A {@link WebRequest} constructed with the values from this Builder instance. */
+    /**
+     * Set the beConservative property.
+     *
+     * @param beConservative If true, do not use newer protocol features that might have interop
+     *     problems on the Internet. Intended only for use with critical infrastructure.
+     * @return This Builder instance.
+     */
+    public @NonNull Builder beConservative(final boolean beConservative) {
+      mBeConservative = beConservative;
+      return this;
+    }
+
+    /**
+     * @return A {@link WebRequest} constructed with the values from this Builder instance.
+     */
     public @NonNull WebRequest build() {
       if (mUri == null) {
         throw new IllegalStateException("Must set URI");

@@ -20,23 +20,33 @@
 namespace mozilla {
 namespace layers {
 
+/* static */ bool CanvasChild::mInForeground = true;
+
 class RingBufferWriterServices final
     : public CanvasEventRingBuffer::WriterServices {
  public:
   explicit RingBufferWriterServices(RefPtr<CanvasChild> aCanvasChild)
-      : mCanvasChild(std::move(aCanvasChild)) {}
+      : mCanvasChild(aCanvasChild) {}
 
-  ~RingBufferWriterServices() final = default;
+  ~RingBufferWriterServices() override = default;
 
-  bool ReaderClosed() final {
+  bool ReaderClosed() override {
+    if (!mCanvasChild) {
+      return false;
+    }
     return !mCanvasChild->GetIPCChannel()->CanSend() ||
            ipc::ProcessChild::ExpectingShutdown();
   }
 
-  void ResumeReader() final { mCanvasChild->ResumeTranslation(); }
+  void ResumeReader() override {
+    if (!mCanvasChild) {
+      return;
+    }
+    mCanvasChild->ResumeTranslation();
+  }
 
  private:
-  RefPtr<CanvasChild> mCanvasChild;
+  const WeakPtr<CanvasChild> mCanvasChild;
 };
 
 class SourceSurfaceCanvasRecording final : public gfx::SourceSurface {
@@ -50,13 +60,29 @@ class SourceSurfaceCanvasRecording final : public gfx::SourceSurface {
       : mRecordedSurface(aRecordedSuface),
         mCanvasChild(aCanvasChild),
         mRecorder(aRecorder) {
-    mRecorder->RecordEvent(RecordedAddSurfaceAlias(this, aRecordedSuface));
+    // It's important that AddStoredObject is called first because that will
+    // run any pending processing required by recorded objects that have been
+    // deleted off the main thread.
     mRecorder->AddStoredObject(this);
+    mRecorder->RecordEvent(RecordedAddSurfaceAlias(this, aRecordedSuface));
   }
 
   ~SourceSurfaceCanvasRecording() {
-    ReleaseOnMainThread(std::move(mRecorder), this, std::move(mRecordedSurface),
-                        std::move(mCanvasChild));
+    ReferencePtr surfaceAlias = this;
+    if (NS_IsMainThread()) {
+      ReleaseOnMainThread(std::move(mRecorder), surfaceAlias,
+                          std::move(mRecordedSurface), std::move(mCanvasChild));
+      return;
+    }
+
+    mRecorder->AddPendingDeletion(
+        [recorder = std::move(mRecorder), surfaceAlias,
+         aliasedSurface = std::move(mRecordedSurface),
+         canvasChild = std::move(mCanvasChild)]() mutable -> void {
+          ReleaseOnMainThread(std::move(recorder), surfaceAlias,
+                              std::move(aliasedSurface),
+                              std::move(canvasChild));
+        });
   }
 
   gfx::SurfaceType GetType() const final { return mRecordedSurface->GetType(); }
@@ -85,14 +111,7 @@ class SourceSurfaceCanvasRecording final : public gfx::SourceSurface {
                                   ReferencePtr aSurfaceAlias,
                                   RefPtr<gfx::SourceSurface> aAliasedSurface,
                                   RefPtr<CanvasChild> aCanvasChild) {
-    if (!NS_IsMainThread()) {
-      NS_DispatchToMainThread(NewRunnableFunction(
-          "SourceSurfaceCanvasRecording::ReleaseOnMainThread",
-          SourceSurfaceCanvasRecording::ReleaseOnMainThread,
-          std::move(aRecorder), aSurfaceAlias, std::move(aAliasedSurface),
-          std::move(aCanvasChild)));
-      return;
-    }
+    MOZ_ASSERT(NS_IsMainThread());
 
     aRecorder->RemoveStoredObject(aSurfaceAlias);
     aRecorder->RecordEvent(RecordedRemoveSurfaceAlias(aSurfaceAlias));
@@ -192,6 +211,9 @@ void CanvasChild::OnTextureForwarded() {
     return;
   }
 
+  // We're forwarding textures, so we must be in the foreground.
+  mInForeground = true;
+
   if (mHasOutstandingWriteLock) {
     mRecorder->RecordEvent(RecordedCanvasFlush());
     if (!mRecorder->WaitForCheckpoint(mLastWriteLockCheckpoint)) {
@@ -200,18 +222,38 @@ void CanvasChild::OnTextureForwarded() {
 
     mHasOutstandingWriteLock = false;
   }
+
+  // We hold onto the last transaction's external surfaces until we have waited
+  // for the write locks in this transaction. This means we know that the
+  // surfaces have been picked up in the canvas threads and there is no race
+  // with them being removed from SharedSurfacesParent. Note this releases the
+  // current contents of mLastTransactionExternalSurfaces.
+  mRecorder->TakeExternalSurfaces(mLastTransactionExternalSurfaces);
 }
 
-void CanvasChild::EnsureBeginTransaction() {
+bool CanvasChild::EnsureBeginTransaction() {
   // We drop mRecorder in ActorDestroy to break the reference cycle.
   if (!mRecorder) {
-    return;
+    return false;
   }
 
   if (!mIsInTransaction) {
+    // Ensure we are using a large buffer when in the foreground and small one
+    // in the background.
+    if (mInForeground != mRecorder->UsingLargeStream()) {
+      SharedMemoryBasic::Handle handle;
+      if (!mRecorder->SwitchBuffer(OtherPid(), &handle) ||
+          !SendNewBuffer(std::move(handle))) {
+        mRecorder = nullptr;
+        return false;
+      }
+    }
+
     mRecorder->RecordEvent(RecordedCanvasBeginTransaction());
     mIsInTransaction = true;
   }
+
+  return true;
 }
 
 void CanvasChild::EndTransaction() {
@@ -223,10 +265,15 @@ void CanvasChild::EndTransaction() {
   if (mIsInTransaction) {
     mRecorder->RecordEvent(RecordedCanvasEndTransaction());
     mIsInTransaction = false;
-    mLastNonEmptyTransaction = TimeStamp::NowLoRes();
   }
 
   ++mTransactionsSinceGetDataSurface;
+}
+
+/* static */
+void CanvasChild::ClearCachedResources() {
+  // We use this as a proxy for the tab being in the backgound.
+  mInForeground = false;
 }
 
 bool CanvasChild::ShouldBeCleanedUp() const {
@@ -236,14 +283,7 @@ bool CanvasChild::ShouldBeCleanedUp() const {
   }
 
   // We can only be cleaned up if nothing else references our recorder.
-  if (mRecorder && !mRecorder->hasOneRef()) {
-    return false;
-  }
-
-  static const TimeDuration kCleanUpCanvasThreshold =
-      TimeDuration::FromSeconds(10);
-  return TimeStamp::NowLoRes() - mLastNonEmptyTransaction >
-         kCleanUpCanvasThreshold;
+  return !mRecorder || mRecorder->hasOneRef();
 }
 
 already_AddRefed<gfx::DrawTarget> CanvasChild::CreateDrawTarget(
@@ -279,8 +319,18 @@ already_AddRefed<gfx::DataSourceSurface> CanvasChild::GetDataSurface(
     return nullptr;
   }
 
-  mTransactionsSinceGetDataSurface = 0;
-  EnsureBeginTransaction();
+  // mTransactionsSinceGetDataSurface is used to determine if we want to prepare
+  // a DataSourceSurface in the GPU process up front at the end of the
+  // transaction, but that only makes sense if the canvas JS is requesting data
+  // in between transactions.
+  if (!mIsInTransaction) {
+    mTransactionsSinceGetDataSurface = 0;
+  }
+
+  if (!EnsureBeginTransaction()) {
+    return nullptr;
+  }
+
   mRecorder->RecordEvent(RecordedPrepareDataForSurface(aSurface));
   uint32_t checkpoint = mRecorder->CreateCheckpoint();
 

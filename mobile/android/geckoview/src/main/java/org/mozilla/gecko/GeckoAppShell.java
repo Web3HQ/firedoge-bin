@@ -6,6 +6,7 @@
 package org.mozilla.gecko;
 
 import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
 import android.app.ActivityManager;
 import android.app.Service;
 import android.content.Context;
@@ -27,6 +28,7 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.display.DisplayManager;
 import android.location.Criteria;
 import android.location.Location;
 import android.location.LocationListener;
@@ -38,13 +40,13 @@ import android.net.Network;
 import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Debug;
 import android.os.LocaleList;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.text.TextUtils;
-import android.text.format.DateFormat;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
 import android.view.Display;
@@ -59,6 +61,7 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Locale;
 import java.util.StringTokenizer;
+import org.jetbrains.annotations.NotNull;
 import org.mozilla.gecko.annotation.RobocopTarget;
 import org.mozilla.gecko.annotation.WrapForJNI;
 import org.mozilla.gecko.util.HardwareCodecCapabilityUtils;
@@ -67,6 +70,8 @@ import org.mozilla.gecko.util.InputDeviceUtils;
 import org.mozilla.gecko.util.ProxySelector;
 import org.mozilla.gecko.util.ThreadUtils;
 import org.mozilla.geckoview.BuildConfig;
+import org.mozilla.geckoview.CrashHandler;
+import org.mozilla.geckoview.GeckoResult;
 import org.mozilla.geckoview.R;
 
 public class GeckoAppShell {
@@ -97,7 +102,7 @@ public class GeckoAppShell {
     }
 
     @Override
-    protected String getAppPackageName() {
+    public String getAppPackageName() {
       final Context appContext = getAppContext();
       if (appContext == null) {
         return "<unknown>";
@@ -106,7 +111,7 @@ public class GeckoAppShell {
     }
 
     @Override
-    protected Context getAppContext() {
+    public Context getAppContext() {
       return getApplicationContext();
     }
 
@@ -137,7 +142,7 @@ public class GeckoAppShell {
       }
       return false;
     }
-  };
+  }
 
   private static String sAppNotes;
   private static CrashHandler sCrashHandler;
@@ -163,7 +168,7 @@ public class GeckoAppShell {
   }
 
   @WrapForJNI(exceptionMode = "ignore")
-  /* package */ static synchronized String getAppNotes() {
+  public static synchronized String getAppNotes() {
     return sAppNotes;
   }
 
@@ -176,6 +181,8 @@ public class GeckoAppShell {
   }
 
   private static volatile boolean locationHighAccuracyEnabled;
+  private static volatile boolean locationListeningRequested = false;
+  private static volatile boolean locationPaused = false;
 
   // See also HardwareUtils.LOW_MEMORY_THRESHOLD_MB.
   private static final int HIGH_MEMORY_DEVICE_THRESHOLD_MB = 768;
@@ -184,6 +191,7 @@ public class GeckoAppShell {
   private static Float sDensity;
   private static int sScreenDepth;
   private static boolean sUseMaxScreenDepth;
+  private static Float sScreenRefreshRate;
 
   /* Is the value in sVibrationEndTime valid? */
   private static boolean sVibrationMaybePlaying;
@@ -278,9 +286,23 @@ public class GeckoAppShell {
     return (location.hasAccuracy() && radius > 0) ? radius : 1001;
   }
 
+  private static Location determineReliableLocation(
+      @NotNull final Location locA, @NotNull final Location locB) {
+    // The 6 seconds were chosen arbitrarily
+    final long closeTime = 6000000000L;
+    final boolean isNearSameTime =
+        Math.abs((locA.getElapsedRealtimeNanos() - locB.getElapsedRealtimeNanos())) <= closeTime;
+    final boolean isAMoreAccurate = getLocationAccuracy(locA) < getLocationAccuracy(locB);
+    final boolean isAMoreRecent = locA.getElapsedRealtimeNanos() > locB.getElapsedRealtimeNanos();
+    if (isNearSameTime) {
+      return isAMoreAccurate ? locA : locB;
+    }
+    return isAMoreRecent ? locA : locB;
+  }
+
   // Permissions are explicitly checked when requesting content permission.
   @SuppressLint("MissingPermission")
-  private static Location getLastKnownLocation(final LocationManager lm) {
+  private static @Nullable Location getLastKnownLocation(final LocationManager lm) {
     Location lastKnownLocation = null;
     final List<String> providers = lm.getAllProviders();
 
@@ -294,28 +316,37 @@ public class GeckoAppShell {
         lastKnownLocation = location;
         continue;
       }
-
-      final long timeDiff = location.getTime() - lastKnownLocation.getTime();
-      if (timeDiff > 0
-          || (timeDiff == 0
-              && getLocationAccuracy(location) < getLocationAccuracy(lastKnownLocation))) {
-        lastKnownLocation = location;
-      }
+      lastKnownLocation = determineReliableLocation(lastKnownLocation, location);
     }
-
     return lastKnownLocation;
   }
 
+  // Toggles the location listeners on/off, which will then provide/stop location information
   @WrapForJNI(calledFrom = "gecko")
+  private static synchronized boolean enableLocationUpdates(final boolean enable) {
+    locationListeningRequested = enable;
+    final boolean canListen = updateLocationListeners();
+    if (!canListen && locationListeningRequested) {
+      // Didn't successfully start listener when requested
+      locationListeningRequested = false;
+    }
+    return canListen;
+  }
+
   // Permissions are explicitly checked when requesting content permission.
   @SuppressLint("MissingPermission")
-  private static synchronized boolean enableLocation(final boolean enable) {
+  private static synchronized boolean updateLocationListeners() {
+    final boolean shouldListen = locationListeningRequested && !locationPaused;
     final LocationManager lm = getLocationManager(getApplicationContext());
     if (lm == null) {
       return false;
     }
 
-    if (!enable) {
+    if (!shouldListen) {
+      // Could not complete request, because paused
+      if (locationListeningRequested) {
+        return false;
+      }
       lm.removeUpdates(sAndroidListeners);
       return true;
     }
@@ -336,12 +367,8 @@ public class GeckoAppShell {
     criteria.setAltitudeRequired(false);
     if (locationHighAccuracyEnabled) {
       criteria.setAccuracy(Criteria.ACCURACY_FINE);
-      criteria.setCostAllowed(true);
-      criteria.setPowerRequirement(Criteria.POWER_HIGH);
     } else {
       criteria.setAccuracy(Criteria.ACCURACY_COARSE);
-      criteria.setCostAllowed(false);
-      criteria.setPowerRequirement(Criteria.POWER_LOW);
     }
 
     final String provider = lm.getBestProvider(criteria, true);
@@ -352,6 +379,16 @@ public class GeckoAppShell {
     final Looper l = Looper.getMainLooper();
     lm.requestLocationUpdates(provider, 100, 0.5f, sAndroidListeners, l);
     return true;
+  }
+
+  public static void pauseLocation() {
+    locationPaused = true;
+    updateLocationListeners();
+  }
+
+  public static void resumeLocation() {
+    locationPaused = false;
+    updateLocationListeners();
   }
 
   private static LocationManager getLocationManager(final Context context) {
@@ -384,8 +421,7 @@ public class GeckoAppShell {
       float accuracy,
       float altitudeAccuracy,
       float heading,
-      float speed,
-      long time);
+      float speed);
 
   private static class AndroidListeners implements SensorEventListener, LocationListener {
     @Override
@@ -482,8 +518,7 @@ public class GeckoAppShell {
           accuracy,
           altitudeAccuracy,
           heading,
-          speed,
-          location.getTime());
+          speed);
     }
 
     @Override
@@ -502,10 +537,13 @@ public class GeckoAppShell {
 
   /** Wake-lock for the CPU. */
   static final String WAKE_LOCK_CPU = "cpu";
+
   /** Wake-lock for the screen. */
   static final String WAKE_LOCK_SCREEN = "screen";
+
   /** Wake-lock for the audio-playing, eqaul to LOCK_CPU. */
   static final String WAKE_LOCK_AUDIO_PLAYING = "audio-playing";
+
   /** Wake-lock for the video-playing, eqaul to LOCK_SCREEN.. */
   static final String WAKE_LOCK_VIDEO_PLAYING = "video-playing";
 
@@ -513,8 +551,10 @@ public class GeckoAppShell {
 
   /** No one holds the wake-lock. */
   static final int WAKE_LOCK_STATE_UNLOCKED = 0;
+
   /** The wake-lock is held by a foreground window. */
   static final int WAKE_LOCK_STATE_LOCKED_FOREGROUND = 1;
+
   /** The wake-lock is held by a background window. */
   static final int WAKE_LOCK_STATE_LOCKED_BACKGROUND = 2;
 
@@ -759,6 +799,14 @@ public class GeckoAppShell {
   public static void onNotificationClick(final String name, final String cookie) {
     if (GeckoThread.isRunning()) {
       notifyAlertListener(name, "alertclickcallback", cookie);
+    } else {
+      GeckoThread.queueNativeCallUntil(
+          GeckoThread.State.PROFILE_READY,
+          GeckoAppShell.class,
+          "notifyAlertListener",
+          name,
+          "alertclickcallback",
+          cookie);
     }
   }
 
@@ -840,6 +888,24 @@ public class GeckoAppShell {
     }
 
     return sScreenDepth;
+  }
+
+  @WrapForJNI(calledFrom = "gecko")
+  public static synchronized float getScreenRefreshRate() {
+    if (sScreenRefreshRate != null) {
+      return sScreenRefreshRate;
+    }
+
+    final WindowManager wm =
+        (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
+    final float refreshRate = wm.getDefaultDisplay().getRefreshRate();
+    // Android 11+ supports multiple refresh rate. So we have to get refresh rate per call.
+    // https://source.android.com/docs/core/graphics/multiple-refresh-rate
+    if (Build.VERSION.SDK_INT < 30) {
+      // Until Android 10, refresh rate is fixed, so we can cache it.
+      sScreenRefreshRate = Float.valueOf(refreshRate);
+    }
+    return refreshRate;
   }
 
   @WrapForJNI(calledFrom = "gecko")
@@ -987,7 +1053,7 @@ public class GeckoAppShell {
     }
   }
 
-  @WrapForJNI(calledFrom = "gecko")
+  @WrapForJNI(calledFrom = "gecko", exceptionMode = "nsresult")
   private static String getDNSDomains() {
     if (Build.VERSION.SDK_INT < 23) {
       return "";
@@ -1007,9 +1073,10 @@ public class GeckoAppShell {
     return lp.getDomains();
   }
 
+  @SuppressLint("ResourceType")
   @WrapForJNI(calledFrom = "gecko")
   private static int[] getSystemColors() {
-    // attrsAppearance[] must correspond to AndroidSystemColors structure in android/AndroidBridge.h
+    // attrsAppearance[] must correspond to AndroidSystemColors structure in android/nsLookAndFeel.h
     final int[] attrsAppearance = {
       android.R.attr.textColorPrimary,
       android.R.attr.textColorPrimaryInverse,
@@ -1030,8 +1097,7 @@ public class GeckoAppShell {
     final ContextThemeWrapper contextThemeWrapper =
         new ContextThemeWrapper(getApplicationContext(), android.R.style.TextAppearance);
 
-    final TypedArray appearance =
-        contextThemeWrapper.getTheme().obtainStyledAttributes(attrsAppearance);
+    final TypedArray appearance = contextThemeWrapper.obtainStyledAttributes(attrsAppearance);
 
     if (appearance != null) {
       for (int i = 0; i < appearance.getIndexCount(); i++) {
@@ -1138,6 +1204,7 @@ public class GeckoAppShell {
   }
 
   private static Context sApplicationContext;
+  private static Boolean sIs24HourFormat = true;
 
   @WrapForJNI
   public static Context getApplicationContext() {
@@ -1170,7 +1237,7 @@ public class GeckoAppShell {
   @WrapForJNI(calledFrom = "gecko")
   @RobocopTarget
   public static boolean isTablet() {
-    return HardwareUtils.isTablet();
+    return HardwareUtils.isTablet(getApplicationContext());
   }
 
   @WrapForJNI(calledFrom = "gecko")
@@ -1180,13 +1247,7 @@ public class GeckoAppShell {
 
   @WrapForJNI(calledFrom = "gecko")
   private static void enableNetworkNotifications() {
-    ThreadUtils.runOnUiThread(
-        new Runnable() {
-          @Override
-          public void run() {
-            GeckoNetworkManager.getInstance().enableNotifications();
-          }
-        });
+    ThreadUtils.runOnUiThread(() -> GeckoNetworkManager.getInstance().enableNotifications());
   }
 
   @WrapForJNI(calledFrom = "gecko")
@@ -1205,19 +1266,13 @@ public class GeckoAppShell {
     return GeckoScreenOrientation.getInstance().getScreenOrientation().value;
   }
 
+  /* package */ static int getRotation() {
+    return sScreenCompat.getRotation();
+  }
+
   @WrapForJNI(calledFrom = "gecko")
   private static int getScreenAngle() {
     return GeckoScreenOrientation.getInstance().getAngle();
-  }
-
-  @WrapForJNI(calledFrom = "gecko")
-  private static void enableScreenOrientationNotifications() {
-    GeckoScreenOrientation.getInstance().enableNotifications();
-  }
-
-  @WrapForJNI(calledFrom = "gecko")
-  private static void disableScreenOrientationNotifications() {
-    GeckoScreenOrientation.getInstance().disableNotifications();
   }
 
   @WrapForJNI(calledFrom = "gecko")
@@ -1336,20 +1391,97 @@ public class GeckoAppShell {
     sScreenSizeOverride = size;
   }
 
+  static final ScreenCompat sScreenCompat;
+
+  private interface ScreenCompat {
+    Rect getScreenSize();
+
+    int getRotation();
+  }
+
+  @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
+  private static class JellyBeanScreenCompat implements ScreenCompat {
+    public Rect getScreenSize() {
+      final WindowManager wm =
+          (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
+      final Display disp = wm.getDefaultDisplay();
+      return new Rect(0, 0, disp.getWidth(), disp.getHeight());
+    }
+
+    public int getRotation() {
+      final WindowManager wm =
+          (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
+      return wm.getDefaultDisplay().getRotation();
+    }
+  }
+
+  @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
+  private static class JellyBeanMR1ScreenCompat implements ScreenCompat {
+    public Rect getScreenSize() {
+      final WindowManager wm =
+          (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
+      final Display disp = wm.getDefaultDisplay();
+      final Point size = new Point();
+      disp.getRealSize(size);
+      return new Rect(0, 0, size.x, size.y);
+    }
+
+    public int getRotation() {
+      final WindowManager wm =
+          (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
+      return wm.getDefaultDisplay().getRotation();
+    }
+  }
+
+  @TargetApi(Build.VERSION_CODES.S)
+  private static class AndroidSScreenCompat implements ScreenCompat {
+    @SuppressLint("StaticFieldLeak")
+    private static Context sWindowContext;
+
+    private static Context getWindowContext() {
+      if (sWindowContext == null) {
+        final DisplayManager displayManager =
+            (DisplayManager) getApplicationContext().getSystemService(Context.DISPLAY_SERVICE);
+        final Display display = displayManager.getDisplay(Display.DEFAULT_DISPLAY);
+        sWindowContext =
+            getApplicationContext()
+                .createWindowContext(display, WindowManager.LayoutParams.TYPE_APPLICATION, null);
+      }
+      return sWindowContext;
+    }
+
+    public Rect getScreenSize() {
+      final WindowManager windowManager = getWindowContext().getSystemService(WindowManager.class);
+      return windowManager.getCurrentWindowMetrics().getBounds();
+    }
+
+    public int getRotation() {
+      final WindowManager windowManager = getWindowContext().getSystemService(WindowManager.class);
+      return windowManager.getDefaultDisplay().getRotation();
+    }
+  }
+
+  static {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      sScreenCompat = new AndroidSScreenCompat();
+    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+      sScreenCompat = new JellyBeanMR1ScreenCompat();
+    } else {
+      sScreenCompat = new JellyBeanScreenCompat();
+    }
+  }
+
+  /* package */ static Rect getScreenSizeIgnoreOverride() {
+    return sScreenCompat.getScreenSize();
+  }
+
   @WrapForJNI(calledFrom = "gecko")
   private static synchronized Rect getScreenSize() {
     if (sScreenSizeOverride != null) {
       return sScreenSizeOverride;
     }
-    final WindowManager wm =
-        (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
-    final Display disp = wm.getDefaultDisplay();
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1) {
-      return new Rect(0, 0, disp.getWidth(), disp.getHeight());
-    }
-    final Point size = new Point();
-    disp.getRealSize(size);
-    return new Rect(0, 0, size.x, size.y);
+
+    return getScreenSizeIgnoreOverride();
   }
 
   @WrapForJNI(calledFrom = "any")
@@ -1401,6 +1533,8 @@ public class GeckoAppShell {
     try {
       if (on) {
         Log.e(LOGTAG, "Setting communication mode ON");
+        // This shouldn't throw, but does throw NullPointerException on a very
+        // small number of devices.
         am.startBluetoothSco();
         am.setBluetoothScoOn(true);
       } else {
@@ -1408,7 +1542,7 @@ public class GeckoAppShell {
         am.stopBluetoothSco();
         am.setBluetoothScoOn(false);
       }
-    } catch (final SecurityException e) {
+    } catch (final SecurityException | NullPointerException e) {
       Log.e(LOGTAG, "could not set communication mode", e);
     }
   }
@@ -1449,10 +1583,13 @@ public class GeckoAppShell {
     return locales;
   }
 
+  public static void setIs24HourFormat(final Boolean is24HourFormat) {
+    sIs24HourFormat = is24HourFormat;
+  }
+
   @WrapForJNI
   public static boolean getIs24HourFormat() {
-    final Context context = getApplicationContext();
-    return DateFormat.is24HourFormat(context);
+    return sIs24HourFormat;
   }
 
   @WrapForJNI
@@ -1461,5 +1598,45 @@ public class GeckoAppShell {
     final ApplicationInfo info = context.getApplicationInfo();
     final int id = info.labelRes;
     return id == 0 ? info.nonLocalizedLabel.toString() : context.getString(id);
+  }
+
+  @WrapForJNI(calledFrom = "gecko")
+  private static int getMemoryUsage(final String stateName) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+      // No API to get Java heap usages.
+      return -1;
+    }
+
+    final Debug.MemoryInfo memInfo = new Debug.MemoryInfo();
+    Debug.getMemoryInfo(memInfo);
+    final String usage = memInfo.getMemoryStat(stateName);
+    if (usage == null) {
+      return -1;
+    }
+    try {
+      return Integer.parseInt(usage);
+    } catch (final NumberFormatException e) {
+      return -1;
+    }
+  }
+
+  @WrapForJNI
+  public static native boolean isParentProcess();
+
+  /**
+   * Returns a GeckoResult that will be completed to true if the GPU process is enabled and false if
+   * it is disabled.
+   */
+  @WrapForJNI
+  public static native GeckoResult<Boolean> isGpuProcessEnabled();
+
+  @SuppressLint("NewApi")
+  public static boolean isIsolatedProcess() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) {
+      return false;
+    }
+    // This method was added in SDK 16 but remained hidden until SDK 28, meaning we are okay to call
+    // this on any SDK level but must suppress the new API lint.
+    return android.os.Process.isIsolated();
   }
 }

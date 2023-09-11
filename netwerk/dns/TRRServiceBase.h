@@ -8,6 +8,7 @@
 
 #include "mozilla/Atomics.h"
 #include "mozilla/DataMutex.h"
+#include "mozilla/net/rust_helper.h"
 #include "nsString.h"
 #include "nsIDNSService.h"
 #include "nsIProtocolProxyService2.h"
@@ -53,7 +54,8 @@ class TRRServiceBase : public nsIProxyConfigChangedCallback {
   void OnTRRModeChange();
   void OnTRRURIChange();
 
-  virtual void ReadEtcHostsFile() {}
+  void DoReadEtcHostsFile(ParsingCallback aCallback);
+  virtual void ReadEtcHostsFile() = 0;
   // Called to create a connection info that will be used by TRRServiceChannel.
   // Note that when this function is called, mDefaultTRRConnectionInfo will be
   // set to null to invalidate the connection info.
@@ -68,11 +70,12 @@ class TRRServiceBase : public nsIProxyConfigChangedCallback {
   void RegisterProxyChangeListener();
   void UnregisterProxyChangeListener();
 
-  nsCString mPrivateURI;
+  nsCString mPrivateURI;  // protected by mMutex
   // Pref caches should only be used on the main thread.
   nsCString mURIPref;
   nsCString mRolloutURIPref;
   nsCString mDefaultURIPref;
+  nsCString mOHTTPURIPref;
 
   Atomic<nsIDNSService::ResolverMode, Relaxed> mMode{
       nsIDNSService::MODE_NATIVEONLY};

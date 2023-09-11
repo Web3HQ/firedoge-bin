@@ -12,8 +12,9 @@
 #include "nsString.h"
 #include "nsError.h"
 #include "nsTArray.h"
+#include "mozilla/OriginAttributes.h"
 #include "mozilla/TimeStamp.h"
-#include "mozilla/Tuple.h"
+
 #include "mozilla/UniquePtr.h"
 #include "NSSErrorsService.h"
 
@@ -37,12 +38,21 @@ enum class HttpVersion {
 
 enum class SpdyVersion { NONE = 0, HTTP_2 = 5 };
 
-enum class SupportedAlpnType : uint8_t {
-  HTTP_3 = 0,
-  HTTP_2,
-  HTTP_1_1,
-  NOT_SUPPORTED
+enum class SupportedAlpnRank : uint8_t {
+  NOT_SUPPORTED = 0,
+  HTTP_1_1 = 1,
+  HTTP_2 = 2,
+  // Note that the order here MUST be the same as the order in kHttp3Versions.
+  HTTP_3_DRAFT_29 = 3,
+  HTTP_3_DRAFT_30 = 4,
+  HTTP_3_DRAFT_31 = 5,
+  HTTP_3_DRAFT_32 = 6,
+  HTTP_3_VER_1 = 7,
 };
+
+inline bool IsHttp3(SupportedAlpnRank aRank) {
+  return aRank >= SupportedAlpnRank::HTTP_3_DRAFT_29;
+}
 
 extern const uint32_t kHttp3VersionCount;
 extern const nsCString kHttp3Versions[];
@@ -120,23 +130,32 @@ extern const nsCString kHttp3Versions[];
 // Encodes the TRR mode.
 #define NS_HTTP_TRR_MODE_MASK ((1 << 19) | (1 << 20))
 
-// The connection could bring the peeked data for sniffing
-#define NS_HTTP_CALL_CONTENT_SNIFFER (1 << 21)
-
 // Disallow the use of the HTTP3 protocol. This is meant for the contexts
 // such as HTTP upgrade which are not supported by HTTP3.
-#define NS_HTTP_DISALLOW_HTTP3 (1 << 22)
+#define NS_HTTP_DISALLOW_HTTP3 (1 << 21)
 
 // Force a transaction to stay in pending queue until the HTTPS RR is
 // available.
-#define NS_HTTP_FORCE_WAIT_HTTP_RR (1 << 23)
+#define NS_HTTP_FORCE_WAIT_HTTP_RR (1 << 22)
 
 // This is used for a temporary workaround for a web-compat issue. The flag is
 // only set on CORS preflight request to allowed sending client certificates
 // on a connection for an anonymous request.
-#define NS_HTTP_LOAD_ANONYMOUS_CONNECT_ALLOW_CLIENT_CERT (1 << 24)
+#define NS_HTTP_LOAD_ANONYMOUS_CONNECT_ALLOW_CLIENT_CERT (1 << 23)
 
-#define NS_HTTP_DISALLOW_HTTPS_RR (1 << 25)
+#define NS_HTTP_DISALLOW_HTTPS_RR (1 << 24)
+
+#define NS_HTTP_DISALLOW_ECH (1 << 25)
+
+// Used to indicate that an HTTP Connection should obey Resist Fingerprinting
+// and set the User-Agent accordingly.
+#define NS_HTTP_USE_RFP (1 << 26)
+
+// If set, then the initial TLS handshake failed.
+#define NS_HTTP_IS_RETRY (1 << 27)
+
+// When set, disallow to connect to a HTTP/2 proxy.
+#define NS_HTTP_DISALLOW_HTTP2_PROXY (1 << 28)
 
 #define NS_HTTP_TRR_FLAGS_FROM_MODE(x) ((static_cast<uint32_t>(x) & 3) << 19)
 
@@ -157,6 +176,7 @@ extern const nsCString kHttp3Versions[];
 //-----------------------------------------------------------------------------
 
 struct nsHttpAtom;
+struct nsHttpAtomLiteral;
 
 namespace nsHttp {
 [[nodiscard]] nsresult CreateAtomTable();
@@ -242,16 +262,6 @@ TimeStamp GetLastActiveTabLoadOptimizationHit();
 void SetLastActiveTabLoadOptimizationHit(TimeStamp const& when);
 bool IsBeforeLastActiveTabLoadOptimization(TimeStamp const& when);
 
-// Declare all atoms
-//
-// The atom names and values are stored in nsHttpAtomList.h and are brought
-// to you by the magic of C preprocessing.  Add new atoms to nsHttpAtomList
-// and all support logic will be auto-generated.
-//
-#define HTTP_ATOM(_name, _value) extern nsHttpAtom _name;
-#include "nsHttpAtomList.h"
-#undef HTTP_ATOM
-
 nsCString ConvertRequestHeadToString(nsHttpRequestHead& aRequestHead,
                                      bool aHasRequestBody,
                                      bool aRequestBodyHasHeaders,
@@ -285,11 +295,13 @@ bool SendDataInChunks(const nsCString& aData, uint64_t aOffset, uint32_t aCount,
 
 }  // namespace nsHttp
 
+struct nsHttpAtomLiteral;
 struct nsHttpAtom {
   nsHttpAtom() = default;
   nsHttpAtom(const nsHttpAtom& other) = default;
 
-  operator const char*() const { return get(); }
+  explicit operator bool() const { return !_val.IsEmpty(); }
+
   const char* get() const {
     if (_val.IsEmpty()) {
       return nullptr;
@@ -309,6 +321,63 @@ struct nsHttpAtom {
   nsCString _val;
   friend nsHttpAtom nsHttp::ResolveAtom(const nsACString& s);
 };
+
+struct nsHttpAtomLiteral {
+  const char* get() const { return _data.get(); }
+  nsLiteralCString const& val() const { return _data; }
+
+  template <size_t N>
+  constexpr explicit nsHttpAtomLiteral(const char (&val)[N]) : _data(val) {}
+
+  operator nsHttpAtom() const { return nsHttpAtom(_data); }
+
+ private:
+  nsLiteralCString _data;
+};
+
+inline bool operator==(nsHttpAtomLiteral const& self,
+                       nsHttpAtomLiteral const& other) {
+  return self.get() == other.get();
+}
+inline bool operator!=(nsHttpAtomLiteral const& self,
+                       nsHttpAtomLiteral const& other) {
+  return self.get() != other.get();
+}
+
+inline bool operator==(nsHttpAtom const& self, nsHttpAtomLiteral const& other) {
+  return self.val() == other.val();
+}
+inline bool operator!=(nsHttpAtom const& self, nsHttpAtomLiteral const& other) {
+  return self.val() != other.val();
+}
+
+inline bool operator==(nsHttpAtomLiteral const& self, nsHttpAtom const& other) {
+  return self.val() == other.val();
+}
+inline bool operator!=(nsHttpAtomLiteral const& self, nsHttpAtom const& other) {
+  return self.val() != other.val();
+}
+
+inline bool operator==(nsHttpAtom const& self, nsHttpAtom const& other) {
+  return self.val() == other.val();
+}
+inline bool operator!=(nsHttpAtom const& self, nsHttpAtom const& other) {
+  return self.val() != other.val();
+}
+
+namespace nsHttp {
+
+// Declare all atoms
+//
+// The atom names and values are stored in nsHttpAtomList.h and are brought
+// to you by the magic of C preprocessing.  Add new atoms to nsHttpAtomList
+// and all support logic will be auto-generated.
+//
+#define HTTP_ATOM(_name, _value) \
+  inline constexpr nsHttpAtomLiteral _name(_value);
+#include "nsHttpAtomList.h"
+#undef HTTP_ATOM
+}  // namespace nsHttp
 
 //-----------------------------------------------------------------------------
 // utilities...
@@ -392,7 +461,7 @@ void LogHeaders(const char* lineStart);
 nsresult HttpProxyResponseToErrorCode(uint32_t aStatusCode);
 
 // Convert an alpn string to SupportedAlpnType.
-SupportedAlpnType IsAlpnSupported(const nsACString& aAlpn);
+SupportedAlpnRank IsAlpnSupported(const nsACString& aAlpn);
 
 static inline bool AllowedErrorForHTTPSRRFallback(nsresult aError) {
   return psm::IsNSSErrorCode(-1 * NS_ERROR_GET_CODE(aError)) ||
@@ -401,7 +470,27 @@ static inline bool AllowedErrorForHTTPSRRFallback(nsresult aError) {
          aError == NS_ERROR_UNKNOWN_HOST || aError == NS_ERROR_NET_TIMEOUT;
 }
 
-bool SecurityErrorToBeHandledByTransaction(nsresult aReason);
+bool SecurityErrorThatMayNeedRestart(nsresult aReason);
+
+[[nodiscard]] nsresult MakeOriginURL(const nsACString& origin,
+                                     nsCOMPtr<nsIURI>& url);
+
+[[nodiscard]] nsresult MakeOriginURL(const nsACString& scheme,
+                                     const nsACString& origin,
+                                     nsCOMPtr<nsIURI>& url);
+
+void CreatePushHashKey(const nsCString& scheme, const nsCString& hostHeader,
+                       const mozilla::OriginAttributes& originAttributes,
+                       uint64_t serial, const nsACString& pathInfo,
+                       nsCString& outOrigin, nsCString& outKey);
+
+nsresult GetNSResultFromWebTransportError(uint8_t aErrorCode);
+
+uint8_t GetWebTransportErrorFromNSResult(nsresult aResult);
+
+uint64_t WebTransportErrorToHttp3Error(uint8_t aErrorCode);
+
+uint8_t Http3ErrorToWebTransportError(uint64_t aErrorCode);
 
 }  // namespace net
 }  // namespace mozilla

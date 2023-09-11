@@ -36,21 +36,18 @@ class nsTableRowFrame : public nsContainerFrame {
 
   virtual ~nsTableRowFrame();
 
-  virtual void Init(nsIContent* aContent, nsContainerFrame* aParent,
-                    nsIFrame* aPrevInFlow) override;
+  void Init(nsIContent* aContent, nsContainerFrame* aParent,
+            nsIFrame* aPrevInFlow) override;
 
-  virtual void DestroyFrom(nsIFrame* aDestructRoot,
-                           PostDestroyData& aPostDestroyData) override;
+  void Destroy(DestroyContext&) override;
 
-  /** @see nsIFrame::DidSetComputedStyle */
-  virtual void DidSetComputedStyle(ComputedStyle* aOldComputedStyle) override;
+  void DidSetComputedStyle(ComputedStyle* aOldComputedStyle) override;
 
-  virtual void AppendFrames(ChildListID aListID,
-                            nsFrameList& aFrameList) override;
-  virtual void InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
-                            const nsLineList::iterator* aPrevFrameLine,
-                            nsFrameList& aFrameList) override;
-  virtual void RemoveFrame(ChildListID aListID, nsIFrame* aOldFrame) override;
+  void AppendFrames(ChildListID aListID, nsFrameList&& aFrameList) override;
+  void InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
+                    const nsLineList::iterator* aPrevFrameLine,
+                    nsFrameList&& aFrameList) override;
+  void RemoveFrame(DestroyContext&, ChildListID, nsIFrame*) override;
 
   /** instantiate a new instance of nsTableRowFrame.
    * @param aPresShell the pres shell for this frame
@@ -70,12 +67,12 @@ class nsTableRowFrame : public nsContainerFrame {
     return GetTableRowGroupFrame()->GetTableFrame();
   }
 
-  virtual nsMargin GetUsedMargin() const override;
-  virtual nsMargin GetUsedBorder() const override;
-  virtual nsMargin GetUsedPadding() const override;
+  nsMargin GetUsedMargin() const override;
+  nsMargin GetUsedBorder() const override;
+  nsMargin GetUsedPadding() const override;
 
-  virtual void BuildDisplayList(nsDisplayListBuilder* aBuilder,
-                                const nsDisplayListSet& aLists) override;
+  void BuildDisplayList(nsDisplayListBuilder* aBuilder,
+                        const nsDisplayListSet& aLists) override;
 
   void PaintCellBackgroundsForFrame(nsIFrame* aFrame,
                                     nsDisplayListBuilder* aBuilder,
@@ -103,14 +100,14 @@ class nsTableRowFrame : public nsContainerFrame {
    * @see nsTableFrame::BalanceColumnWidths
    * @see nsTableFrame::ShrinkWrapChildren
    */
-  virtual void Reflow(nsPresContext* aPresContext, ReflowOutput& aDesiredSize,
-                      const ReflowInput& aReflowInput,
-                      nsReflowStatus& aStatus) override;
+  void Reflow(nsPresContext* aPresContext, ReflowOutput& aDesiredSize,
+              const ReflowInput& aReflowInput,
+              nsReflowStatus& aStatus) override;
 
   void DidResize();
 
 #ifdef DEBUG_FRAME_DUMP
-  virtual nsresult GetFrameName(nsAString& aResult) const override;
+  nsresult GetFrameName(nsAString& aResult) const override;
 #endif
 
   void UpdateBSize(nscoord aBSize, nscoord aAscent, nscoord aDescent,
@@ -134,7 +131,7 @@ class nsTableRowFrame : public nsContainerFrame {
 
   /* return the row ascent
    */
-  nscoord GetRowBaseline(mozilla::WritingMode aWritingMode);
+  Maybe<nscoord> GetRowBaseline(mozilla::WritingMode aWM);
 
   /** returns the ordinal position of this row in its table */
   virtual int32_t GetRowIndex() const;
@@ -236,7 +233,7 @@ class nsTableRowFrame : public nsContainerFrame {
   void SetContinuousBCBorderWidth(mozilla::LogicalSide aForSide,
                                   BCPixelSize aPixelValue);
 
-  virtual bool IsFrameOfType(uint32_t aFlags) const override {
+  bool IsFrameOfType(uint32_t aFlags) const override {
     if (aFlags & (eSupportsContainLayoutAndPaint | eSupportsAspectRatio)) {
       return false;
     }
@@ -244,17 +241,15 @@ class nsTableRowFrame : public nsContainerFrame {
     return nsContainerFrame::IsFrameOfType(aFlags & ~(nsIFrame::eTablePart));
   }
 
-  virtual void InvalidateFrame(uint32_t aDisplayItemKey = 0,
+  void InvalidateFrame(uint32_t aDisplayItemKey = 0,
+                       bool aRebuildDisplayItems = true) override;
+  void InvalidateFrameWithRect(const nsRect& aRect,
+                               uint32_t aDisplayItemKey = 0,
                                bool aRebuildDisplayItems = true) override;
-  virtual void InvalidateFrameWithRect(
-      const nsRect& aRect, uint32_t aDisplayItemKey = 0,
-      bool aRebuildDisplayItems = true) override;
-  virtual void InvalidateFrameForRemoval() override {
-    InvalidateFrameSubtree();
-  }
+  void InvalidateFrameForRemoval() override { InvalidateFrameSubtree(); }
 
 #ifdef ACCESSIBILITY
-  virtual mozilla::a11y::AccType AccessibleType() override;
+  mozilla::a11y::AccType AccessibleType() override;
 #endif
 
  protected:
@@ -295,26 +290,26 @@ class nsTableRowFrame : public nsContainerFrame {
   } mBits;
 
   // the desired bsize based on the content of the tallest cell in the row
-  nscoord mContentBSize;
+  nscoord mContentBSize = 0;
   // the bsize based on a style percentage bsize on either the row or any cell
   // if mHasPctBSize is set
-  nscoord mStylePctBSize;
+  nscoord mStylePctBSize = 0;
   // the bsize based on a style pixel bsize on the row or any
   // cell if mHasFixedBSize is set
-  nscoord mStyleFixedBSize;
+  nscoord mStyleFixedBSize = 0;
 
   // max-ascent and max-descent amongst all cells that have
   // 'vertical-align: baseline'
-  nscoord mMaxCellAscent;   // does include cells with rowspan > 1
-  nscoord mMaxCellDescent;  // does *not* include cells with rowspan > 1
+  nscoord mMaxCellAscent = 0;   // does include cells with rowspan > 1
+  nscoord mMaxCellDescent = 0;  // does *not* include cells with rowspan > 1
 
   // border widths in pixels in the collapsing border model of the *inner*
   // half of the border only
-  BCPixelSize mBStartBorderWidth;
-  BCPixelSize mBEndBorderWidth;
-  BCPixelSize mIEndContBorderWidth;
-  BCPixelSize mBStartContBorderWidth;
-  BCPixelSize mIStartContBorderWidth;
+  BCPixelSize mBStartBorderWidth = 0;
+  BCPixelSize mBEndBorderWidth = 0;
+  BCPixelSize mIEndContBorderWidth = 0;
+  BCPixelSize mBStartContBorderWidth = 0;
+  BCPixelSize mIStartContBorderWidth = 0;
 
   /**
    * Sets the NS_ROW_HAS_CELL_WITH_STYLE_BSIZE bit to indicate whether

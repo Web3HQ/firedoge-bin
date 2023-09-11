@@ -4,7 +4,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::hframe::HFrame;
+use crate::frames::HFrame;
 use crate::{
     headers_checks::{headers_valid, is_interim, trailers_valid},
     qlog, BufferedStream, CloseType, Error, Http3StreamInfo, Http3StreamType, HttpSendStream, Res,
@@ -13,7 +13,8 @@ use crate::{
 
 use neqo_common::{qdebug, qinfo, qtrace, Encoder, Header, MessageType};
 use neqo_qpack::encoder::QPackEncoder;
-use neqo_transport::{Connection, StreamId};
+use neqo_transport::{streams::SendOrder, Connection, StreamId};
+use std::any::Any;
 use std::cell::RefCell;
 use std::cmp::min;
 use std::fmt::Debug;
@@ -208,7 +209,7 @@ impl SendStream for SendMessage {
         data_frame.encode(&mut enc);
         let sent_fh = self
             .stream
-            .send_atomic(conn, &enc)
+            .send_atomic(conn, enc.as_ref())
             .map_err(|e| Error::map_stream_send_errors(&e))?;
         debug_assert!(sent_fh);
 
@@ -217,7 +218,7 @@ impl SendStream for SendMessage {
             .send_atomic(conn, &buf[..to_send])
             .map_err(|e| Error::map_stream_send_errors(&e))?;
         debug_assert!(sent);
-        qlog::h3_data_moved_down(&mut conn.qlog_mut(), self.stream_id(), to_send);
+        qlog::h3_data_moved_down(conn.qlog_mut(), self.stream_id(), to_send);
         Ok(to_send)
     }
 
@@ -242,7 +243,7 @@ impl SendStream for SendMessage {
     /// has not been called when needed, and HTTP3 layer has not picked up the info that the stream has been closed.)
     fn send(&mut self, conn: &mut Connection) -> Res<()> {
         let sent = Error::map_error(self.stream.send_buffer(conn), Error::HttpInternal(5))?;
-        qlog::h3_data_moved_down(&mut conn.qlog_mut(), self.stream_id(), sent);
+        qlog::h3_data_moved_down(conn.qlog_mut(), self.stream_id(), sent);
 
         qtrace!([self], "{} bytes sent", sent);
         if !self.stream.has_buffered_data() {
@@ -269,6 +270,16 @@ impl SendStream for SendMessage {
         self.stream.has_buffered_data()
     }
 
+    fn set_sendorder(&mut self, _conn: &mut Connection, _sendorder: Option<SendOrder>) -> Res<()> {
+        // Not relevant for SendMessage
+        Ok(())
+    }
+
+    fn set_fairness(&mut self, _conn: &mut Connection, _fairness: bool) -> Res<()> {
+        // Not relevant for SendMessage
+        Ok(())
+    }
+
     fn close(&mut self, conn: &mut Connection) -> Res<()> {
         self.state.fin()?;
         if !self.stream.has_buffered_data() {
@@ -290,6 +301,18 @@ impl SendStream for SendMessage {
     fn http_stream(&mut self) -> Option<&mut dyn HttpSendStream> {
         Some(self)
     }
+
+    fn send_data_atomic(&mut self, conn: &mut Connection, buf: &[u8]) -> Res<()> {
+        let data_frame = HFrame::Data {
+            len: buf.len() as u64,
+        };
+        let mut enc = Encoder::default();
+        data_frame.encode(&mut enc);
+        self.stream.buffer(enc.as_ref());
+        self.stream.buffer(buf);
+        let _ = self.stream.send_buffer(conn)?;
+        Ok(())
+    }
 }
 
 impl HttpSendStream for SendMessage {
@@ -306,7 +329,12 @@ impl HttpSendStream for SendMessage {
     }
 
     fn set_new_listener(&mut self, conn_events: Box<dyn SendStreamEvents>) {
+        self.stream_type = Http3StreamType::ExtendedConnect;
         self.conn_events = conn_events;
+    }
+
+    fn any(&self) -> &dyn Any {
+        self
     }
 }
 

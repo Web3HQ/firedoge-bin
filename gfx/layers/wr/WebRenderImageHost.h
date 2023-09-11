@@ -7,6 +7,7 @@
 #ifndef MOZILLA_GFX_WEBRENDERIMAGEHOST_H
 #define MOZILLA_GFX_WEBRENDERIMAGEHOST_H
 
+#include <deque>
 #include <unordered_map>
 
 #include "CompositableHost.h"               // for CompositableHost
@@ -31,14 +32,32 @@ class WebRenderImageHost : public CompositableHost, public ImageComposite {
   void UseTextureHost(const nsTArray<TimedTexture>& aTextures) override;
   void RemoveTextureHost(TextureHost* aTexture) override;
 
+  void EnableRemoteTexturePushCallback(const RemoteTextureOwnerId aOwnerId,
+                                       const base::ProcessId aForPid,
+                                       const gfx::IntSize aSize,
+                                       const TextureFlags aFlags) override;
+
+  void NotifyPushTexture(const RemoteTextureId aTextureId,
+                         const RemoteTextureOwnerId aOwnerId,
+                         const base::ProcessId aForPid) override;
+
   void Dump(std::stringstream& aStream, const char* aPrefix = "",
             bool aDumpHtml = false) override;
 
   void CleanupResources() override;
 
+  void OnReleased() override;
+
   uint32_t GetDroppedFrames() override { return GetDroppedFramesAndReset(); }
 
   WebRenderImageHost* AsWebRenderImageHost() override { return this; }
+
+  void PushPendingRemoteTexture(const RemoteTextureId aTextureId,
+                                const RemoteTextureOwnerId aOwnerId,
+                                const base::ProcessId aForPid,
+                                const gfx::IntSize aSize,
+                                const TextureFlags aFlags);
+  void UseRemoteTexture();
 
   TextureHost* GetAsTextureHostForComposite(
       AsyncImagePipelineManager* aAsyncImageManager);
@@ -65,6 +84,14 @@ class WebRenderImageHost : public CompositableHost, public ImageComposite {
   AsyncImagePipelineManager* mCurrentAsyncImageManager;
 
   CompositableTextureHostRef mCurrentTextureHost;
+
+  std::deque<CompositableTextureHostRef> mPendingRemoteTextureWrappers;
+  bool mWaitingReadyCallback = false;
+
+  Maybe<RemoteTextureOwnerId> mRemoteTextureOwnerIdOfPushCallback;
+  base::ProcessId mForPidOfPushCallback;
+  gfx::IntSize mSizeOfPushCallback;
+  TextureFlags mFlagsOfPushCallback = TextureFlags::NO_FLAGS;
 };
 
 }  // namespace layers

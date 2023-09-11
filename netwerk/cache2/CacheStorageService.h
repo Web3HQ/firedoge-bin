@@ -118,7 +118,8 @@ class CacheStorageService final : public nsICacheStorageService,
    public:
     virtual void OnEntryInfo(const nsACString& aURISpec,
                              const nsACString& aIdEnhance, int64_t aDataSize,
-                             int32_t aFetchCount, uint32_t aLastModifiedTime,
+                             int64_t aAltDataSize, uint32_t aFetchCount,
+                             uint32_t aLastModifiedTime,
                              uint32_t aExpirationTime, bool aPinned,
                              nsILoadContextInfo* aInfo) = 0;
   };
@@ -216,7 +217,7 @@ class CacheStorageService final : public nsICacheStorageService,
   // These are helpers for telemetry monitoring of the memory pools.
   void TelemetryPrune(TimeStamp& now);
   void TelemetryRecordEntryCreation(CacheEntry const* entry);
-  void TelemetryRecordEntryRemoval(CacheEntry const* entry);
+  void TelemetryRecordEntryRemoval(CacheEntry* entry);
 
  private:
   // Following methods are thread safe to call.
@@ -324,7 +325,7 @@ class CacheStorageService final : public nsICacheStorageService,
 
   static CacheStorageService* sSelf;
 
-  mozilla::Mutex mLock{"CacheStorageService.mLock"};
+  mozilla::Mutex mLock MOZ_UNANNOTATED{"CacheStorageService.mLock"};
   mozilla::Mutex mForcedValidEntriesLock{
       "CacheStorageService.mForcedValidEntriesLock"};
 
@@ -413,7 +414,7 @@ class CacheStorageService final : public nsICacheStorageService,
     virtual ~IOThreadSuspender() = default;
     NS_IMETHOD Run() override;
 
-    Monitor mMon;
+    Monitor mMon MOZ_UNANNOTATED;
     bool mSignaled{false};
   };
 
@@ -428,7 +429,7 @@ void ProxyRelease(const char* aName, nsCOMPtr<T>& object,
 
 template <class T>
 void ProxyReleaseMainThread(const char* aName, nsCOMPtr<T>& object) {
-  ProxyRelease(aName, object, GetMainThreadEventTarget());
+  ProxyRelease(aName, object, GetMainThreadSerialEventTarget());
 }
 
 }  // namespace net

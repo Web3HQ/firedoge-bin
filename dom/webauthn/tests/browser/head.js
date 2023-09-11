@@ -22,6 +22,69 @@ for (let script of scripts) {
   );
 }
 
+function add_virtual_authenticator(autoremove = true) {
+  let webauthnTransport = Cc["@mozilla.org/webauthn/transport;1"].getService(
+    Ci.nsIWebAuthnTransport
+  );
+  let id = webauthnTransport.addVirtualAuthenticator(
+    "ctap2",
+    "internal",
+    true,
+    true,
+    true,
+    true
+  );
+  if (autoremove) {
+    registerCleanupFunction(() => {
+      webauthnTransport.removeVirtualAuthenticator(id);
+    });
+  }
+  return id;
+}
+
+async function addCredential(authenticatorId, rpId) {
+  let keyPair = await crypto.subtle.generateKey(
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    },
+    true,
+    ["sign"]
+  );
+
+  let credId = new Uint8Array(32);
+  crypto.getRandomValues(credId);
+  credId = bytesToBase64UrlSafe(credId);
+
+  let privateKey = await crypto.subtle
+    .exportKey("pkcs8", keyPair.privateKey)
+    .then(privateKey => bytesToBase64UrlSafe(privateKey));
+
+  let webauthnTransport = Cc["@mozilla.org/webauthn/transport;1"].getService(
+    Ci.nsIWebAuthnTransport
+  );
+
+  webauthnTransport.addCredential(
+    authenticatorId,
+    credId,
+    true, // resident key
+    rpId,
+    privateKey,
+    "VGVzdCBVc2Vy", // "Test User"
+    0 // sign count
+  );
+
+  return credId;
+}
+
+async function removeCredential(authenticatorId, credId) {
+  let webauthnTransport = Cc["@mozilla.org/webauthn/transport;1"].getService(
+    Ci.nsIWebAuthnTransport
+  );
+
+  webauthnTransport.removeCredential(authenticatorId, credId);
+}
+
 function memcmp(x, y) {
   let xb = new Uint8Array(x);
   let yb = new Uint8Array(y);
@@ -45,7 +108,7 @@ function arrivingHereIsBad(aResult) {
 
 function expectError(aType) {
   let expected = `${aType}Error`;
-  return function(aResult) {
+  return function (aResult) {
     is(
       aResult.slice(0, expected.length),
       expected,
@@ -76,11 +139,10 @@ function promiseWebAuthnMakeCredential(
       ];
 
       let publicKey = {
-        rp: { id: content.document.domain, name: "none", icon: "none" },
+        rp: { id: content.document.domain, name: "none" },
         user: {
           id: new Uint8Array(),
           name: "none",
-          icon: "none",
           displayName: "none",
         },
         pubKeyCredParams,
@@ -93,6 +155,7 @@ function promiseWebAuthnMakeCredential(
         .create({ publicKey })
         .then(credential => {
           return {
+            clientDataJSON: credential.response.clientDataJSON,
             attObj: credential.response.attestationObject,
             rawId: credential.rawId,
           };

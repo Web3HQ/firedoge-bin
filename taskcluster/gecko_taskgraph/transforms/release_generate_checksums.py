@@ -6,12 +6,13 @@ Transform the checksums task into an actual task description.
 """
 
 import copy
-
-from gecko_taskgraph.transforms.base import TransformSequence
-from gecko_taskgraph.util.scriptworker import get_release_config
-from gecko_taskgraph.util.schema import resolve_keyed_by
-
 import logging
+
+from taskgraph.transforms.base import TransformSequence
+from taskgraph.util.schema import resolve_keyed_by
+
+from gecko_taskgraph.util.attributes import release_level
+from gecko_taskgraph.util.scriptworker import get_release_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def handle_keyed_by(config, jobs):
                 item=job,
                 field=field,
                 item_name=job["name"],
-                **{"release-level": config.params.release_level()}
+                **{"release-level": release_level(config.params["project"])}
             )
         yield job
 

@@ -5,6 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 include "mozilla/layers/LayersMessageUtils.h";
+include "mozilla/layers/CanvasTranslator.h";
 
 [MoveOnly] using mozilla::CrossProcessSemaphoreHandle from "mozilla/ipc/CrossProcessSemaphore.h";
 using mozilla::layers::TextureType from "mozilla/layers/LayersTypes.h";
@@ -16,7 +17,7 @@ namespace layers {
 /**
  * PCanvas is the IPDL for recorded Canvas drawing.
  */
-[RefCounted, NeedsOtherPid]
+[NeedsOtherPid, ParentImpl="CanvasTranslator"]
 async protocol PCanvas {
 parent:
   /**
@@ -28,6 +29,11 @@ parent:
   async InitTranslator(TextureType aTextureType, Handle aReadHandle,
                        CrossProcessSemaphoreHandle aReaderSem,
                        CrossProcessSemaphoreHandle aWriterSem);
+
+  /**
+   * Send a new buffer to resume translation after it's been stopped by writer.
+   */
+  async NewBuffer(Handle aReadHandle);
 
   /**
    * Used to tell the CanvasTranslator to start translating again after it has

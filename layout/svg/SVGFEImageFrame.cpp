@@ -42,10 +42,9 @@ class SVGFEImageFrame final : public nsIFrame {
 
   virtual void Init(nsIContent* aContent, nsContainerFrame* aParent,
                     nsIFrame* aPrevInFlow) override;
-  virtual void DestroyFrom(nsIFrame* aDestructRoot,
-                           PostDestroyData& aPostDestroyData) override;
+  void Destroy(DestroyContext&) override;
 
-  virtual bool IsFrameOfType(uint32_t aFlags) const override {
+  bool IsFrameOfType(uint32_t aFlags) const override {
     if (aFlags & eSupportsContainLayoutAndPaint) {
       return false;
     }
@@ -54,7 +53,7 @@ class SVGFEImageFrame final : public nsIFrame {
   }
 
 #ifdef DEBUG_FRAME_DUMP
-  virtual nsresult GetFrameName(nsAString& aResult) const override {
+  nsresult GetFrameName(nsAString& aResult) const override {
     return MakeFrameName(u"SVGFEImage"_ns, aResult);
   }
 #endif
@@ -66,7 +65,7 @@ class SVGFEImageFrame final : public nsIFrame {
       Visibility aNewVisibility,
       const Maybe<OnNonvisible>& aNonvisibleAction = Nothing()) override;
 
-  virtual bool ComputeCustomOverflow(OverflowAreas& aOverflowAreas) override {
+  bool ComputeCustomOverflow(OverflowAreas& aOverflowAreas) override {
     // We don't maintain a ink overflow rect
     return false;
   }
@@ -85,8 +84,7 @@ namespace mozilla {
 NS_IMPL_FRAMEARENA_HELPERS(SVGFEImageFrame)
 
 /* virtual */
-void SVGFEImageFrame::DestroyFrom(nsIFrame* aDestructRoot,
-                                  PostDestroyData& aPostDestroyData) {
+void SVGFEImageFrame::Destroy(DestroyContext& aContext) {
   DecApproximateVisibleCount();
 
   nsCOMPtr<nsIImageLoadingContent> imageLoader =
@@ -95,7 +93,7 @@ void SVGFEImageFrame::DestroyFrom(nsIFrame* aDestructRoot,
     imageLoader->FrameDestroyed(this);
   }
 
-  nsIFrame::DestroyFrom(aDestructRoot, aPostDestroyData);
+  nsIFrame::Destroy(aContext);
 }
 
 void SVGFEImageFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
@@ -130,7 +128,7 @@ nsresult SVGFEImageFrame::AttributeChanged(int32_t aNameSpaceID,
     MOZ_ASSERT(
         GetParent()->IsSVGFilterFrame(),
         "Observers observe the filter, so that's what we must invalidate");
-    SVGObserverUtils::InvalidateDirectRenderingObservers(GetParent());
+    SVGObserverUtils::InvalidateRenderingObservers(GetParent());
   }
 
   // Currently our SMIL implementation does not modify the DOM attributes. Once

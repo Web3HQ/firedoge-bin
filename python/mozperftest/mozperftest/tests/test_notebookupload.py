@@ -1,12 +1,13 @@
 #!/usr/bin/env python
+from unittest import mock
+
+import mozunit
 import pytest
 
-from unittest import mock
-import mozunit
 from mozperftest.environment import METRICS
+from mozperftest.metrics.utils import metric_fields
 from mozperftest.tests.support import BT_DATA, EXAMPLE_TEST, get_running_env, temp_file
 from mozperftest.utils import silence
-from mozperftest.metrics.utils import metric_fields
 
 
 def setup_env(options):
@@ -26,7 +27,6 @@ def setup_env(options):
 @pytest.mark.parametrize("no_filter", [True, False])
 @mock.patch("mozperftest.metrics.notebookupload.PerftestNotebook")
 def test_notebookupload_with_filter(notebook, no_filter):
-
     options = {
         "notebook-metrics": [],
         "notebook-prefix": "",

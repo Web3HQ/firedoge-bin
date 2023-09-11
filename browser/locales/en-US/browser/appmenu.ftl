@@ -37,6 +37,8 @@ appmenuitem-print =
   .label = Print…
 appmenuitem-find-in-page =
     .label = Find in page…
+appmenuitem-translate =
+    .label = Translate page…
 appmenuitem-zoom =
     .value = Zoom
 appmenuitem-more-tools =
@@ -50,10 +52,10 @@ appmenuitem-exit2 =
            *[other] Exit
         }
 appmenu-menu-button-closed2 =
-    .tooltiptext = Open Application Menu
+    .tooltiptext = Open application menu
     .label = { -brand-short-name }
 appmenu-menu-button-opened2 =
-    .tooltiptext = Close Application Menu
+    .tooltiptext = Close application menu
     .label = { -brand-short-name }
 
 # Settings is now used to access the browser settings across all platforms,
@@ -143,8 +145,7 @@ profiler-popup-button-capturing =
   .label = Profiler
   .tooltiptext = The profiler is capturing a profile
 
-profiler-popup-title =
-  .value = { -profiler-brand-name }
+profiler-popup-header-text = { -profiler-brand-name }
 
 profiler-popup-reveal-description-button =
   .aria-label = Reveal more information
@@ -164,10 +165,6 @@ profiler-popup-settings =
 # This link takes the user to about:profiling, and is only visible with the Custom preset.
 profiler-popup-edit-settings-button =
   .label = Edit Settings…
-
-profiler-popup-disabled =
-  The profiler is currently disabled, most likely due to a Private Browsing window
-  being open.
 
 profiler-popup-recording-screen = Recording…
 
@@ -196,7 +193,7 @@ profiler-popup-capture-shortcut =
 ## They are shown in the popup's select box.
 
 # Presets and their l10n IDs are defined in the file
-# devtools/client/performance-new/popup/background.jsm.js
+# devtools/client/performance-new/shared/background.jsm.js
 # Please take care that the same values are also defined in devtools' perftools.ftl.
 
 profiler-popup-presets-web-developer-description = Recommended preset for most web app debugging, with low overhead.
@@ -219,6 +216,11 @@ profiler-popup-presets-networking-description = Preset for investigating network
 profiler-popup-presets-networking-label =
   .label = Networking
 
+profiler-popup-presets-power-description = Preset for investigating power use bugs in { -brand-shorter-name }, with low overhead.
+# "Power" is used in the sense of energy (electricity used by the computer).
+profiler-popup-presets-power-label =
+  .label = Power
+
 profiler-popup-presets-custom-label =
   .label = Custom
 
@@ -226,8 +228,6 @@ profiler-popup-presets-custom-label =
 
 appmenu-manage-history =
     .label = Manage history
-appmenu-reopen-all-tabs = Reopen all tabs
-appmenu-reopen-all-windows = Reopen all windows
 appmenu-restore-session =
     .label = Restore previous session
 appmenu-clear-history =
@@ -237,6 +237,9 @@ appmenu-recently-closed-tabs =
     .label = Recently closed tabs
 appmenu-recently-closed-windows =
     .label = Recently closed windows
+# This allows to search through the browser's history.
+appmenu-search-history =
+    .label = Search history
 
 ## Help panel
 
@@ -253,9 +256,11 @@ appmenu-help-more-troubleshooting-info =
     .accesskey = t
 appmenu-help-report-site-issue =
     .label = Report site issue…
-appmenu-help-feedback-page =
-    .label = Submit feedback…
+appmenu-help-share-ideas =
+    .label = Share ideas and feedback…
     .accesskey = S
+appmenu-help-switch-device =
+    .label = Switching to a new device
 
 ## appmenu-help-enter-troubleshoot-mode and appmenu-help-exit-troubleshoot-mode
 ## are mutually exclusive, so it's possible to use the same accesskey for both.

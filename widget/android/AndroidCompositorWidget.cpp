@@ -6,6 +6,7 @@
 
 #include "AndroidCompositorWidget.h"
 
+#include "mozilla/gfx/Logging.h"
 #include "mozilla/widget/PlatformWidgetTypes.h"
 #include "nsWindow.h"
 
@@ -18,7 +19,8 @@ AndroidCompositorWidget::AndroidCompositorWidget(
     : CompositorWidget(aOptions),
       mWidgetId(aInitData.widgetId()),
       mNativeWindow(nullptr),
-      mFormat(WINDOW_FORMAT_RGBA_8888) {}
+      mFormat(WINDOW_FORMAT_RGBA_8888),
+      mClientSize(aInitData.clientSize()) {}
 
 AndroidCompositorWidget::~AndroidCompositorWidget() {
   if (mNativeWindow) {
@@ -73,8 +75,15 @@ void AndroidCompositorWidget::EndRemoteDrawingInRegion(
   ANativeWindow_unlockAndPost(mNativeWindow);
 }
 
-void AndroidCompositorWidget::OnResumeComposition() {
+bool AndroidCompositorWidget::OnResumeComposition() {
   OnCompositorSurfaceChanged();
+
+  if (!mSurface) {
+    gfxCriticalError() << "OnResumeComposition called with null Surface";
+    return false;
+  }
+
+  return true;
 }
 
 EGLNativeWindowType AndroidCompositorWidget::GetEGLNativeWindow() {
@@ -82,15 +91,14 @@ EGLNativeWindowType AndroidCompositorWidget::GetEGLNativeWindow() {
 }
 
 LayoutDeviceIntSize AndroidCompositorWidget::GetClientSize() {
-  JNIEnv* const env = jni::GetEnvForThread();
-  ANativeWindow* const nativeWindow =
-      ANativeWindow_fromSurface(env, reinterpret_cast<jobject>(mSurface.Get()));
-  const int32_t width = ANativeWindow_getWidth(nativeWindow);
-  const int32_t height = ANativeWindow_getHeight(nativeWindow);
+  return mClientSize;
+}
 
-  ANativeWindow_release(nativeWindow);
-
-  return LayoutDeviceIntSize(width, height);
+void AndroidCompositorWidget::NotifyClientSizeChanged(
+    const LayoutDeviceIntSize& aClientSize) {
+  mClientSize =
+      LayoutDeviceIntSize(std::min(aClientSize.width, MOZ_WIDGET_MAX_SIZE),
+                          std::min(aClientSize.height, MOZ_WIDGET_MAX_SIZE));
 }
 
 }  // namespace widget

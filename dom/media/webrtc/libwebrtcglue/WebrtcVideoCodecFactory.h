@@ -9,9 +9,11 @@
 #include "api/video_codecs/video_decoder_factory.h"
 #include "api/video_codecs/video_encoder_factory.h"
 #include "MediaEventSource.h"
+#include "PerformanceRecorder.h"
 
 namespace mozilla {
 class GmpPluginNotifierInterface {
+  virtual void DisconnectAll() = 0;
   virtual MediaEventSource<uint64_t>& CreatedGmpPluginEvent() = 0;
   virtual MediaEventSource<uint64_t>& ReleasedGmpPluginEvent() = 0;
 };
@@ -23,18 +25,19 @@ class GmpPluginNotifier : public GmpPluginNotifierInterface {
         mCreatedGmpPluginEvent(mOwningThread),
         mReleasedGmpPluginEvent(mOwningThread) {}
 
-  ~GmpPluginNotifier() {
+  ~GmpPluginNotifier() = default;
+
+  void DisconnectAll() override {
+    MOZ_ASSERT(mOwningThread->IsOnCurrentThread());
     mCreatedGmpPluginEvent.DisconnectAll();
     mReleasedGmpPluginEvent.DisconnectAll();
   }
 
   MediaEventSource<uint64_t>& CreatedGmpPluginEvent() override {
-    MOZ_ASSERT(mOwningThread->IsOnCurrentThread());
     return mCreatedGmpPluginEvent;
   }
 
   MediaEventSource<uint64_t>& ReleasedGmpPluginEvent() override {
-    MOZ_ASSERT(mOwningThread->IsOnCurrentThread());
     return mReleasedGmpPluginEvent;
   }
 
@@ -48,9 +51,10 @@ class WebrtcVideoDecoderFactory : public GmpPluginNotifier,
                                   public webrtc::VideoDecoderFactory {
  public:
   WebrtcVideoDecoderFactory(nsCOMPtr<nsISerialEventTarget> aOwningThread,
-                            std::string aPCHandle)
+                            std::string aPCHandle, TrackingId aTrackingId)
       : GmpPluginNotifier(std::move(aOwningThread)),
-        mPCHandle(std::move(aPCHandle)) {}
+        mPCHandle(std::move(aPCHandle)),
+        mTrackingId(std::move(aTrackingId)) {}
 
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
     MOZ_CRASH("Unexpected call");
@@ -62,6 +66,7 @@ class WebrtcVideoDecoderFactory : public GmpPluginNotifier,
 
  private:
   const std::string mPCHandle;
+  const TrackingId mTrackingId;
 };
 
 class WebrtcVideoEncoderFactory : public GmpPluginNotifierInterface,
@@ -101,6 +106,8 @@ class WebrtcVideoEncoderFactory : public GmpPluginNotifierInterface,
 
   std::unique_ptr<webrtc::VideoEncoder> CreateVideoEncoder(
       const webrtc::SdpVideoFormat& aFormat) override;
+
+  void DisconnectAll() override { mInternalFactory->DisconnectAll(); }
 
   MediaEventSource<uint64_t>& CreatedGmpPluginEvent() override {
     return mInternalFactory->CreatedGmpPluginEvent();

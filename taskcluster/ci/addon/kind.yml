@@ -20,9 +20,9 @@ jobs:
             kind: build
             tier: 1
         run-on-projects: [mozilla-central]
-        worker-type: b-linux
+        worker-type: b-linux-gcp
         worker:
-            docker-image: {in-tree: debian11-amd64-build}
+            docker-image: {in-tree: debian12-base}
             max-run-time: 1800
             artifacts:
                 - type: file

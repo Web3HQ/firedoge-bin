@@ -12,6 +12,7 @@
 
 #include "HttpChannelChild.h"
 #include "mozilla/ipc/BackgroundChild.h"
+#include "mozilla/ipc/Endpoint.h"
 #include "mozilla/ipc/PBackgroundChild.h"
 #include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/net/BackgroundDataBridgeChild.h"
@@ -53,23 +54,17 @@ nsresult HttpBackgroundChannelChild::Init(HttpChannelChild* aChannelChild) {
   return NS_OK;
 }
 
-void HttpBackgroundChannelChild::CreateDataBridge() {
+void HttpBackgroundChannelChild::CreateDataBridge(
+    Endpoint<PBackgroundDataBridgeChild>&& aEndpoint) {
   MOZ_ASSERT(OnSocketThread());
 
   if (!mChannelChild) {
     return;
   }
 
-  PBackgroundChild* actorChild =
-      BackgroundChild::GetOrCreateSocketActorForCurrentThread();
-  if (NS_WARN_IF(!actorChild)) {
-    return;
-  }
-
   RefPtr<BackgroundDataBridgeChild> dataBridgeChild =
       new BackgroundDataBridgeChild(this);
-  Unused << actorChild->SendPBackgroundDataBridgeConstructor(
-      dataBridgeChild, mChannelChild->ChannelId());
+  aEndpoint.Bind(dataBridgeChild);
 }
 
 void HttpBackgroundChannelChild::OnChannelClosed() {
@@ -215,13 +210,12 @@ IPCResult HttpBackgroundChannelChild::RecvOnStartRequest(
 
 IPCResult HttpBackgroundChannelChild::RecvOnTransportAndData(
     const nsresult& aChannelStatus, const nsresult& aTransportStatus,
-    const uint64_t& aOffset, const uint32_t& aCount,
-    const nsDependentCSubstring& aData, const bool& aDataFromSocketProcess) {
+    const uint64_t& aOffset, const uint32_t& aCount, const nsACString& aData,
+    const bool& aDataFromSocketProcess) {
   RefPtr<HttpBackgroundChannelChild> self = this;
-  nsCString data(aData);
   std::function<void()> callProcessOnTransportAndData =
-      [self, aChannelStatus, aTransportStatus, aOffset, aCount, data,
-       aDataFromSocketProcess]() {
+      [self, aChannelStatus, aTransportStatus, aOffset, aCount,
+       data = nsCString(aData), aDataFromSocketProcess]() {
         LOG(
             ("HttpBackgroundChannelChild::RecvOnTransportAndData [this=%p, "
              "aDataFromSocketProcess=%d, mFirstODASource=%d]\n",
@@ -395,25 +389,6 @@ IPCResult HttpBackgroundChannelChild::RecvNotifyClassificationFlags(
   return IPC_OK();
 }
 
-IPCResult HttpBackgroundChannelChild::RecvNotifyFlashPluginStateChanged(
-    const nsIHttpChannel::FlashPluginState& aState) {
-  LOG(
-      ("HttpBackgroundChannelChild::RecvNotifyFlashPluginStateChanged "
-       "[this=%p]\n",
-       this));
-  MOZ_ASSERT(OnSocketThread());
-
-  if (NS_WARN_IF(!mChannelChild)) {
-    return IPC_OK();
-  }
-
-  // NotifyFlashPluginStateChanged has no order dependency to OnStartRequest.
-  // It this be handled as soon as possible
-  mChannelChild->ProcessNotifyFlashPluginStateChanged(aState);
-
-  return IPC_OK();
-}
-
 IPCResult HttpBackgroundChannelChild::RecvSetClassifierMatchedInfo(
     const ClassifierInfo& info) {
   LOG(("HttpBackgroundChannelChild::RecvSetClassifierMatchedInfo [this=%p]\n",
@@ -462,6 +437,19 @@ IPCResult HttpBackgroundChannelChild::RecvAttachStreamFilter(
   }
 
   mChannelChild->ProcessAttachStreamFilter(std::move(aEndpoint));
+  return IPC_OK();
+}
+
+IPCResult HttpBackgroundChannelChild::RecvDetachStreamFilters() {
+  LOG(("HttpBackgroundChannelChild::RecvDetachStreamFilters [this=%p]\n",
+       this));
+  MOZ_ASSERT(OnSocketThread());
+
+  if (NS_WARN_IF(!mChannelChild)) {
+    return IPC_OK();
+  }
+
+  mChannelChild->ProcessDetachStreamFilters();
   return IPC_OK();
 }
 

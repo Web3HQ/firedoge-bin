@@ -12,9 +12,13 @@
 
 namespace mozilla::widget {
 
-class ScrollbarDrawingWin final : public ScrollbarDrawing {
+class ScrollbarDrawingWin : public ScrollbarDrawing {
+ protected:
+  explicit ScrollbarDrawingWin(Kind aKind) : ScrollbarDrawing(aKind) {}
+
  public:
-  ScrollbarDrawingWin() = default;
+  ScrollbarDrawingWin() : ScrollbarDrawingWin(Kind::Win10) {}
+
   virtual ~ScrollbarDrawingWin() = default;
 
   LayoutDeviceIntSize GetMinimumWidgetSize(nsPresContext*,
@@ -24,28 +28,27 @@ class ScrollbarDrawingWin final : public ScrollbarDrawing {
   Maybe<nsITheme::Transparency> GetScrollbarPartTransparency(
       nsIFrame* aFrame, StyleAppearance aAppearance) override;
 
-  static ComputedStyle* GetCustomScrollbarStyle(nsIFrame* aFrame,
-                                                bool* aDarkScrollbar = nullptr);
-
   template <typename PaintBackendData>
   bool DoPaintScrollbarThumb(PaintBackendData&, const LayoutDeviceRect&,
-                             bool aHorizontal, nsIFrame*, const ComputedStyle&,
-                             const EventStates& aElementState,
-                             const EventStates& aDocumentState, const Colors&,
+                             ScrollbarKind, nsIFrame*, const ComputedStyle&,
+                             const ElementState& aElementState,
+                             const DocumentState& aDocumentState, const Colors&,
                              const DPIRatio&);
-  bool PaintScrollbarThumb(DrawTarget&, const LayoutDeviceRect&,
-                           bool aHorizontal, nsIFrame*, const ComputedStyle&,
-                           const EventStates& aElementState,
-                           const EventStates& aDocumentState, const Colors&,
+  bool PaintScrollbarThumb(DrawTarget&, const LayoutDeviceRect&, ScrollbarKind,
+                           nsIFrame*, const ComputedStyle&,
+                           const ElementState& aElementState,
+                           const DocumentState& aDocumentState, const Colors&,
                            const DPIRatio&) override;
   bool PaintScrollbarThumb(WebRenderBackendData&, const LayoutDeviceRect&,
-                           bool aHorizontal, nsIFrame*, const ComputedStyle&,
-                           const EventStates& aElementState,
-                           const EventStates& aDocumentState, const Colors&,
+                           ScrollbarKind, nsIFrame*, const ComputedStyle&,
+                           const ElementState& aElementState,
+                           const DocumentState& aDocumentState, const Colors&,
                            const DPIRatio&) override;
 
   void RecomputeScrollbarParams() override;
 };
+
+static constexpr uint32_t kDefaultWinScrollbarSize = 17;
 
 }  // namespace mozilla::widget
 

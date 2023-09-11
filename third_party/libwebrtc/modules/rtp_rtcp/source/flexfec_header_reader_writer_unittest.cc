@@ -30,6 +30,9 @@ namespace {
 
 using Packet = ForwardErrorCorrection::Packet;
 using ReceivedFecPacket = ForwardErrorCorrection::ReceivedFecPacket;
+using ::testing::ElementsAreArray;
+using ::testing::make_tuple;
+using ::testing::SizeIs;
 
 // General. Assume single-stream protection.
 constexpr uint32_t kMediaSsrc = 1254983;
@@ -78,8 +81,9 @@ rtc::scoped_refptr<Packet> WriteHeader(const uint8_t* packet_mask,
   FlexfecHeaderWriter writer;
   rtc::scoped_refptr<Packet> written_packet(new Packet());
   written_packet->data.SetSize(kMediaPacketLength);
+  uint8_t* data = written_packet->data.MutableData();
   for (size_t i = 0; i < written_packet->data.size(); ++i) {
-    written_packet->data[i] = i;  // Actual content doesn't matter.
+    data[i] = i;  // Actual content doesn't matter.
   }
   writer.FinalizeFecHeader(kMediaSsrc, kMediaStartSeqNum, packet_mask,
                            packet_mask_size, written_packet.get());
@@ -102,20 +106,20 @@ void VerifyReadHeaders(size_t expected_fec_header_size,
                        const ReceivedFecPacket& read_packet) {
   EXPECT_EQ(expected_fec_header_size, read_packet.fec_header_size);
   EXPECT_EQ(ByteReader<uint32_t>::ReadBigEndian(kProtSsrc),
-            read_packet.protected_ssrc);
+            read_packet.protected_streams[0].ssrc);
   EXPECT_EQ(ByteReader<uint16_t>::ReadBigEndian(kSnBase),
-            read_packet.seq_num_base);
-  const size_t packet_mask_offset = read_packet.packet_mask_offset;
+            read_packet.protected_streams[0].seq_num_base);
+  auto packet_mask_offset = read_packet.protected_streams[0].packet_mask_offset;
   EXPECT_EQ(kFlexfecPacketMaskOffset, packet_mask_offset);
-  EXPECT_EQ(expected_packet_mask_size, read_packet.packet_mask_size);
+  EXPECT_EQ(expected_packet_mask_size,
+            read_packet.protected_streams[0].packet_mask_size);
   EXPECT_EQ(read_packet.pkt->data.size() - expected_fec_header_size,
             read_packet.protection_length);
   // Ensure that the K-bits are removed and the packet mask has been packed.
   EXPECT_THAT(
-      ::testing::make_tuple(read_packet.pkt->data.cdata() + packet_mask_offset,
-                            read_packet.packet_mask_size),
-      ::testing::ElementsAreArray(expected_packet_mask,
-                                  expected_packet_mask_size));
+      make_tuple(read_packet.pkt->data.cdata() + packet_mask_offset,
+                 read_packet.protected_streams[0].packet_mask_size),
+      ElementsAreArray(expected_packet_mask, expected_packet_mask_size));
 }
 
 void VerifyFinalizedHeaders(const uint8_t* expected_packet_mask,
@@ -128,10 +132,9 @@ void VerifyFinalizedHeaders(const uint8_t* expected_packet_mask,
   EXPECT_EQ(kMediaSsrc, ByteReader<uint32_t>::ReadBigEndian(packet + 12));
   EXPECT_EQ(kMediaStartSeqNum,
             ByteReader<uint16_t>::ReadBigEndian(packet + 16));
-  EXPECT_THAT(::testing::make_tuple(packet + kFlexfecPacketMaskOffset,
-                                    expected_packet_mask_size),
-              ::testing::ElementsAreArray(expected_packet_mask,
-                                          expected_packet_mask_size));
+  EXPECT_THAT(
+      make_tuple(packet + kFlexfecPacketMaskOffset, expected_packet_mask_size),
+      ElementsAreArray(expected_packet_mask, expected_packet_mask_size));
 }
 
 void VerifyWrittenAndReadHeaders(size_t expected_fec_header_size,
@@ -141,25 +144,26 @@ void VerifyWrittenAndReadHeaders(size_t expected_fec_header_size,
                                  const ReceivedFecPacket& read_packet) {
   EXPECT_EQ(kFlexfecSsrc, read_packet.ssrc);
   EXPECT_EQ(expected_fec_header_size, read_packet.fec_header_size);
-  EXPECT_EQ(kMediaSsrc, read_packet.protected_ssrc);
-  EXPECT_EQ(kMediaStartSeqNum, read_packet.seq_num_base);
-  EXPECT_EQ(kFlexfecPacketMaskOffset, read_packet.packet_mask_offset);
-  ASSERT_EQ(expected_packet_mask_size, read_packet.packet_mask_size);
+  ASSERT_THAT(read_packet.protected_streams, SizeIs(1));
+  EXPECT_EQ(read_packet.protected_streams[0].ssrc, kMediaSsrc);
+  EXPECT_EQ(read_packet.protected_streams[0].seq_num_base, kMediaStartSeqNum);
+  EXPECT_EQ(read_packet.protected_streams[0].packet_mask_offset,
+            kFlexfecPacketMaskOffset);
+  ASSERT_EQ(read_packet.protected_streams[0].packet_mask_size,
+            expected_packet_mask_size);
   EXPECT_EQ(written_packet.data.size() - expected_fec_header_size,
             read_packet.protection_length);
   // Verify that the call to ReadFecHeader did normalize the packet masks.
-  EXPECT_THAT(::testing::make_tuple(
-                  read_packet.pkt->data.cdata() + kFlexfecPacketMaskOffset,
-                  read_packet.packet_mask_size),
-              ::testing::ElementsAreArray(expected_packet_mask,
-                                          expected_packet_mask_size));
+  EXPECT_THAT(
+      make_tuple(read_packet.pkt->data.cdata() + kFlexfecPacketMaskOffset,
+                 read_packet.protected_streams[0].packet_mask_size),
+      ElementsAreArray(expected_packet_mask, expected_packet_mask_size));
   // Verify that the call to ReadFecHeader did not tamper with the payload.
-  EXPECT_THAT(::testing::make_tuple(
-                  read_packet.pkt->data.cdata() + read_packet.fec_header_size,
-                  read_packet.pkt->data.size() - read_packet.fec_header_size),
-              ::testing::ElementsAreArray(
-                  written_packet.data.cdata() + expected_fec_header_size,
-                  written_packet.data.size() - expected_fec_header_size));
+  EXPECT_THAT(
+      make_tuple(read_packet.pkt->data.cdata() + read_packet.fec_header_size,
+                 read_packet.pkt->data.size() - read_packet.fec_header_size),
+      ElementsAreArray(written_packet.data.cdata() + expected_fec_header_size,
+                       written_packet.data.size() - expected_fec_header_size));
 }
 
 }  // namespace
@@ -328,8 +332,9 @@ TEST(FlexfecHeaderWriterTest, FinalizesHeaderWithKBit0Set) {
   constexpr uint8_t kUlpfecPacketMask[] = {0x11, 0x02};
   Packet written_packet;
   written_packet.data.SetSize(kMediaPacketLength);
+  uint8_t* data = written_packet.data.MutableData();
   for (size_t i = 0; i < written_packet.data.size(); ++i) {
-    written_packet.data[i] = i;
+    data[i] = i;
   }
 
   FlexfecHeaderWriter writer;
@@ -346,8 +351,9 @@ TEST(FlexfecHeaderWriterTest, FinalizesHeaderWithKBit1Set) {
   constexpr uint8_t kUlpfecPacketMask[] = {0x91, 0x02, 0x08, 0x44, 0x00, 0x84};
   Packet written_packet;
   written_packet.data.SetSize(kMediaPacketLength);
+  uint8_t* data = written_packet.data.MutableData();
   for (size_t i = 0; i < written_packet.data.size(); ++i) {
-    written_packet.data[i] = i;
+    data[i] = i;
   }
 
   FlexfecHeaderWriter writer;
@@ -368,8 +374,9 @@ TEST(FlexfecHeaderWriterTest, FinalizesHeaderWithKBit2Set) {
   constexpr uint8_t kUlpfecPacketMask[] = {0x22, 0x22, 0x44, 0x44, 0x44, 0x41};
   Packet written_packet;
   written_packet.data.SetSize(kMediaPacketLength);
+  uint8_t* data = written_packet.data.MutableData();
   for (size_t i = 0; i < written_packet.data.size(); ++i) {
-    written_packet.data[i] = i;
+    data[i] = i;
   }
 
   FlexfecHeaderWriter writer;

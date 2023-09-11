@@ -2721,22 +2721,13 @@ cglobal prep_8tap_8bpc, 3, 8, 0, tmp, src, stride, w, h, mx, my, stride3
 %macro MC_8TAP_SCALED 1
 %ifidn %1, put
  %assign isprep 0
- %if required_stack_alignment <= STACK_ALIGNMENT
-cglobal put_8tap_scaled_8bpc, 4, 15, 16, 112, dst, ds, src, ss, w, h, mx, my, dx, dy
- %else
 cglobal put_8tap_scaled_8bpc, 4, 14, 16, 128, dst, ds, src, ss, w, h, mx, my, dx, dy
- %endif
  %xdefine base_reg r12
  %define rndshift 10
 %else
  %assign isprep 1
- %if required_stack_alignment <= STACK_ALIGNMENT
-cglobal prep_8tap_scaled_8bpc, 4, 15, 16, 128, tmp, src, ss, w, h, mx, my, dx, dy
-  %xdefine tmp_stridem r14q
- %else
 cglobal prep_8tap_scaled_8bpc, 4, 14, 16, 128, tmp, src, ss, w, h, mx, my, dx, dy
-  %define tmp_stridem qword [rsp+120]
- %endif
+ %define tmp_stridem qword [rsp+120]
  %xdefine base_reg r11
  %define rndshift 6
 %endif
@@ -2763,15 +2754,9 @@ cglobal prep_8tap_scaled_8bpc, 4, 14, 16, 128, tmp, src, ss, w, h, mx, my, dx, d
   DEFINE_ARGS dst, ds, src, ss, w, h, _, my, dx, dy, ss3
   %define hm r6m
  %endif
- %if required_stack_alignment > STACK_ALIGNMENT
-  %define dsm [rsp+112]
-  %define rX r1
-  %define rXd r1d
- %else
-  %define dsm dsq
-  %define rX r14
-  %define rXd r14d
- %endif
+ %define dsm [rsp+112]
+ %define rX r1
+ %define rXd r1d
 %else ; prep
  %if WIN64
     mov                 r7d, hm
@@ -4504,11 +4489,12 @@ cglobal blend_8bpc, 3, 7, 7, dst, ds, tmp, w, h, mask
 %define base r6-blend_avx2_table
     lea                  r6, [blend_avx2_table]
     tzcnt                wd, wm
-    movifnidn            hd, hm
     movifnidn         maskq, maskmp
+    movifnidn            hd, hm
     movsxd               wq, dword [r6+wq*4]
     vpbroadcastd         m4, [base+pb_64]
     vpbroadcastd         m5, [base+pw_512]
+    sub                tmpq, maskq
     add                  wq, r6
     lea                  r6, [dsq*3]
     jmp                  wq
@@ -4521,9 +4507,8 @@ cglobal blend_8bpc, 3, 7, 7, dst, ds, tmp, w, h, mask
     psubb               xm3, xm4, xm6
     punpcklbw           xm2, xm3, xm6
     punpckhbw           xm3, xm6
-    mova                xm6, [tmpq]
+    mova                xm6, [maskq+tmpq]
     add               maskq, 4*4
-    add                tmpq, 4*4
     punpcklbw           xm0, xm6
     punpckhbw           xm1, xm6
     pmaddubsw           xm0, xm2
@@ -4546,9 +4531,8 @@ ALIGN function_align
     vpbroadcastq         m2, [dstq+dsq*2]
     vpbroadcastq         m3, [dstq+r6   ]
     mova                 m0, [maskq]
-    mova                 m6, [tmpq]
+    mova                 m6, [maskq+tmpq]
     add               maskq, 8*4
-    add                tmpq, 8*4
     vpblendd             m1, m2, 0x30
     vpblendd             m1, m3, 0xc0
     psubb                m3, m4, m0
@@ -4578,9 +4562,8 @@ ALIGN function_align
     psubb                m3, m4, m0
     punpcklbw            m2, m3, m0
     punpckhbw            m3, m0
-    mova                 m6, [tmpq]
+    mova                 m6, [maskq+tmpq]
     add               maskq, 16*2
-    add                tmpq, 16*2
     punpcklbw            m0, m1, m6
     punpckhbw            m1, m6
     pmaddubsw            m0, m2
@@ -4598,9 +4581,8 @@ ALIGN function_align
 .w32:
     mova                 m0, [maskq]
     mova                 m1, [dstq]
-    mova                 m6, [tmpq]
+    mova                 m6, [maskq+tmpq]
     add               maskq, 32
-    add                tmpq, 32
     psubb                m3, m4, m0
     punpcklbw            m2, m3, m0
     punpckhbw            m3, m0
@@ -4664,21 +4646,21 @@ ALIGN function_align
     RET
 ALIGN function_align
 .w8:
-    vbroadcasti128       m4, [maskq+8*2]
+    mova                xm3, [maskq+8*2]
 .w8_loop:
-    vpbroadcastq         m2, [dstq+dsq*0]
-    movq                xm0, [dstq+dsq*1]
-    vpblendd             m0, m2, 0x30
-    movq                xm1, [tmpq+8*1]
-    vinserti128          m1, [tmpq+8*0], 1
+    movq                xm0, [dstq+dsq*0]
+    vpbroadcastq        xm1, [dstq+dsq*1]
+    mova                xm2, [tmpq]
     add                tmpq, 8*2
-    punpcklbw            m0, m1
-    pmaddubsw            m0, m4
-    pmulhrsw             m0, m5
-    vextracti128        xm1, m0, 1
+    punpcklbw           xm0, xm2
+    punpckhbw           xm1, xm2
+    pmaddubsw           xm0, xm3
+    pmaddubsw           xm1, xm3
+    pmulhrsw            xm0, xm5
+    pmulhrsw            xm1, xm5
     packuswb            xm0, xm1
-    movhps     [dstq+dsq*0], xm0
-    movq       [dstq+dsq*1], xm0
+    movq       [dstq+dsq*0], xm0
+    movhps     [dstq+dsq*1], xm0
     lea                dstq, [dstq+dsq*2]
     sub                  hd, 2
     jg .w8_loop
@@ -5049,11 +5031,11 @@ cglobal resize_8bpc, 6, 12, 16, dst, dst_stride, src, src_stride, \
     vpbroadcastd         m8, mx0m
     vpbroadcastd         m6, src_wm
 
-    DEFINE_ARGS dst, dst_stride, src, src_stride, dst_w, h, x, picptr
+    DEFINE_ARGS dst, dst_stride, src, src_stride, dst_w, h, x
     LEA                  r7, $$
 %define base r7-$$
 
-    vpbroadcastd         m3, [base+pw_m256]
+    vpbroadcastd        xm3, [base+pw_m256]
     vpbroadcastd         m7, [base+pd_63]
     vbroadcasti128      m15, [base+pb_8x0_8x8]
     pmaddwd              m2, m5, [base+rescale_mul] ; dx*[0,1,2,3,4,5,6,7]

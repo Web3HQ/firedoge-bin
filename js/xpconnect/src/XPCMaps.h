@@ -31,7 +31,7 @@
 
 class JSObject2WrappedJSMap {
   using Map = js::HashMap<JS::Heap<JSObject*>, nsXPCWrappedJS*,
-                          js::MovableCellHasher<JS::Heap<JSObject*>>,
+                          js::StableCellHasher<JS::Heap<JSObject*>>,
                           InfallibleAllocPolicy>;
 
  public:
@@ -166,17 +166,10 @@ class IID2NativeInterfaceMap {
     return ptr ? ptr->value() : nullptr;
   }
 
-  XPCNativeInterface* Add(XPCNativeInterface* iface) {
+  bool AddNew(XPCNativeInterface* iface) {
     MOZ_ASSERT(iface, "bad param");
     const nsIID* iid = iface->GetIID();
-    Map::AddPtr ptr = mMap.lookupForAdd(iid);
-    if (ptr) {
-      return ptr->value();
-    }
-    if (!mMap.add(ptr, iid, iface)) {
-      return nullptr;
-    }
-    return iface;
+    return mMap.putNew(iid, iface);
   }
 
   void Remove(XPCNativeInterface* iface) {
@@ -187,6 +180,8 @@ class IID2NativeInterfaceMap {
   uint32_t Count() { return mMap.count(); }
 
   size_t SizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+
+  void Trace(JSTracer* trc);
 
  private:
   Map mMap;
@@ -345,7 +340,7 @@ class NativeSetMap {
 
 class JSObject2JSObjectMap {
   using Map = JS::GCHashMap<JS::Heap<JSObject*>, JS::Heap<JSObject*>,
-                            js::MovableCellHasher<JS::Heap<JSObject*>>,
+                            js::StableCellHasher<JS::Heap<JSObject*>>,
                             js::SystemAllocPolicy>;
 
  public:

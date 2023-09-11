@@ -5,13 +5,15 @@
 
 #include "TextServicesDocument.h"
 
+#include "EditorBase.h"               // for EditorBase
+#include "EditorUtils.h"              // for AutoTransactionBatchExternal
 #include "FilteredContentIterator.h"  // for FilteredContentIterator
-#include "mozilla/Assertions.h"       // for MOZ_ASSERT, etc
-#include "mozilla/EditorBase.h"       // for EditorBase
-#include "mozilla/EditorUtils.h"      // for AutoTransactionBatchExternal
-#include "mozilla/HTMLEditHelpers.h"  // for JoinNodesDirection
-#include "mozilla/HTMLEditUtils.h"    // for HTMLEditUtils
-#include "mozilla/mozalloc.h"         // for operator new, etc
+#include "HTMLEditUtils.h"            // for HTMLEditUtils
+#include "JoinSplitNodeDirection.h"   // for JoinNodesDirection
+
+#include "mozilla/Assertions.h"    // for MOZ_ASSERT, etc
+#include "mozilla/IntegerRange.h"  // for IntegerRange
+#include "mozilla/mozalloc.h"      // for operator new, etc
 #include "mozilla/OwningNonNull.h"
 #include "mozilla/UniquePtr.h"          // for UniquePtr
 #include "mozilla/dom/AbstractRange.h"  // for AbstractRange
@@ -20,8 +22,9 @@
 #include "mozilla/dom/StaticRange.h"  // for StaticRange
 #include "mozilla/dom/Text.h"
 #include "mozilla/intl/WordBreaker.h"  // for WordRange, WordBreaker
-#include "nsAString.h"                 // for nsAString::Length, etc
-#include "nsContentUtils.h"            // for nsContentUtils
+
+#include "nsAString.h"       // for nsAString::Length, etc
+#include "nsContentUtils.h"  // for nsContentUtils
 #include "nsComposeTxtSrvFilter.h"
 #include "nsDebug.h"                 // for NS_ENSURE_TRUE, etc
 #include "nsDependentSubstring.h"    // for Substring
@@ -33,7 +36,7 @@
 #include "nsIEditorSpellCheck.h"     // for nsIEditorSpellCheck, etc
 #include "nsINode.h"                 // for nsINode
 #include "nsISelectionController.h"  // for nsISelectionController, etc
-#include "nsISupportsBase.h"         // for nsISupports
+#include "nsISupports.h"             // for nsISupports
 #include "nsISupportsUtils.h"        // for NS_IF_ADDREF, NS_ADDREF, etc
 #include "nsRange.h"                 // for nsRange
 #include "nsString.h"                // for nsString, nsAutoString
@@ -343,7 +346,7 @@ nsresult TextServicesDocument::ExpandRangeToWordBoundaries(
         "TextServicesDocument::OffsetEntryArray::FindWordRange() failed");
     return maybeWordRange.unwrapErr();
   }
-  rngStartNode = maybeWordRange.inspect().StartRef().GetContainerAsText();
+  rngStartNode = maybeWordRange.inspect().StartRef().GetContainerAs<Text>();
   rngStartOffset = maybeWordRange.inspect().StartRef().Offset();
 
   // Grab all the text in the block containing our
@@ -373,10 +376,11 @@ nsresult TextServicesDocument::ExpandRangeToWordBoundaries(
   // rngEndNode and rngEndOffset if it isn't already at the start of the
   // word and isn't equivalent to rngStartNode and rngStartOffset.
 
-  if (rngEndNode != maybeWordRange.inspect().StartRef().GetContainerAsText() ||
+  if (rngEndNode !=
+          maybeWordRange.inspect().StartRef().GetContainerAs<Text>() ||
       rngEndOffset != maybeWordRange.inspect().StartRef().Offset() ||
       (rngEndNode == rngStartNode && rngEndOffset == rngStartOffset)) {
-    rngEndNode = maybeWordRange.inspect().EndRef().GetContainerAsText();
+    rngEndNode = maybeWordRange.inspect().EndRef().GetContainerAs<Text>();
     rngEndOffset = maybeWordRange.inspect().EndRef().Offset();
   }
 
@@ -588,9 +592,10 @@ nsresult TextServicesDocument::LastSelectedBlock(
   // XXX: We may need to add some code here to make sure
   //      the ranges are sorted in document appearance order!
 
-  for (uint32_t i = rangeCount; i > 0; i--) {
-    range = selection->GetRangeAt(i - 1, IgnoreErrors());
-    if (!range) {
+  for (const uint32_t i : Reversed(IntegerRange(rangeCount))) {
+    MOZ_ASSERT(selection->RangeCount() == rangeCount);
+    range = selection->GetRangeAt(i);
+    if (MOZ_UNLIKELY(!range)) {
       return NS_OK;  // XXX Really?
     }
 
@@ -643,9 +648,7 @@ nsresult TextServicesDocument::LastSelectedBlock(
   // Create a range that extends from the end of the selection,
   // to the end of the document, then iterate forwards through
   // it till you find a text node!
-
-  range = selection->GetRangeAt(rangeCount - 1, IgnoreErrors());
-
+  range = rangeCount > 0 ? selection->GetRangeAt(rangeCount - 1) : nullptr;
   if (!range) {
     return NS_ERROR_FAILURE;
   }
@@ -1353,7 +1356,7 @@ void TextServicesDocument::DidJoinContents(
   }
 
   Maybe<size_t> maybeJoinedIndex =
-      mOffsetTable.FirstIndexOf(*aJoinedPoint.ContainerAsText());
+      mOffsetTable.FirstIndexOf(*aJoinedPoint.ContainerAs<Text>());
   if (maybeJoinedIndex.isNothing()) {
     // It's okay if the node isn't in the offset table, the
     // editor could be cleaning house.
@@ -1385,7 +1388,7 @@ void TextServicesDocument::DidJoinContents(
   const uint32_t movedTextDataLength =
       aJoinNodesDirection == JoinNodesDirection::LeftNodeIntoRightNode
           ? aJoinedPoint.Offset()
-          : aJoinedPoint.ContainerAsText()->TextDataLength() -
+          : aJoinedPoint.ContainerAs<Text>()->TextDataLength() -
                 aJoinedPoint.Offset();
   for (uint32_t i = removedIndex; i < mOffsetTable.Length(); i++) {
     const UniquePtr<OffsetEntry>& entry = mOffsetTable[i];
@@ -1394,7 +1397,7 @@ void TextServicesDocument::DidJoinContents(
       break;
     }
     if (entry->mIsValid) {
-      entry->mTextNode = aJoinedPoint.ContainerAsText();
+      entry->mTextNode = aJoinedPoint.ContainerAs<Text>();
       if (aJoinNodesDirection == JoinNodesDirection::RightNodeIntoLeftNode) {
         // The text was moved from aRemovedContent to end of the container of
         // aJoinedPoint.
@@ -1409,7 +1412,7 @@ void TextServicesDocument::DidJoinContents(
     for (uint32_t i = joinedIndex; i < mOffsetTable.Length(); i++) {
       const UniquePtr<OffsetEntry>& entry = mOffsetTable[i];
       LockOffsetEntryArrayLengthInDebugBuild(observer, mOffsetTable);
-      if (entry->mTextNode != aJoinedPoint.ContainerAsText()) {
+      if (entry->mTextNode != aJoinedPoint.ContainerAs<Text>()) {
         break;
       }
       if (entry->mIsValid) {
@@ -1421,7 +1424,7 @@ void TextServicesDocument::DidJoinContents(
   // Now check to see if the iterator is pointing to the
   // left node. If it is, make it point to the joined node!
   if (mFilteredIter->GetCurrentNode() == aRemovedContent.AsText()) {
-    mFilteredIter->PositionAt(aJoinedPoint.ContainerAsText());
+    mFilteredIter->PositionAt(aJoinedPoint.ContainerAs<Text>());
   }
 }
 
@@ -1858,13 +1861,11 @@ nsresult TextServicesDocument::GetCollapsedSelection(
   uint32_t offset = range->StartOffset();
 
   const Maybe<int32_t> e1s1 = nsContentUtils::ComparePoints(
-      eStart->mTextNode, AssertedCast<int32_t>(eStartOffset), parent,
-      AssertedCast<int32_t>(offset));
+      eStart->mTextNode, eStartOffset, parent, offset);
   const Maybe<int32_t> e2s1 = nsContentUtils::ComparePoints(
-      eEnd->mTextNode, AssertedCast<int32_t>(eEndOffset), parent,
-      AssertedCast<int32_t>(offset));
+      eEnd->mTextNode, eEndOffset, parent, offset);
 
-  if (NS_WARN_IF(!e1s1) || NS_WARN_IF(!e2s1)) {
+  if (MOZ_UNLIKELY(NS_WARN_IF(!e1s1) || NS_WARN_IF(!e2s1))) {
     return NS_ERROR_FAILURE;
   }
 
@@ -2043,9 +2044,12 @@ nsresult TextServicesDocument::GetUncollapsedSelection(
   Maybe<int32_t> e1s2;
   Maybe<int32_t> e2s1;
   uint32_t startOffset, endOffset;
-  for (uint32_t i = 0; i < rangeCount; i++) {
-    range = selection->GetRangeAt(i, IgnoreErrors());
-    NS_ENSURE_STATE(range);
+  for (const uint32_t i : IntegerRange(rangeCount)) {
+    MOZ_ASSERT(selection->RangeCount() == rangeCount);
+    range = selection->GetRangeAt(i);
+    if (MOZ_UNLIKELY(NS_WARN_IF(!range))) {
+      return NS_ERROR_FAILURE;
+    }
 
     nsresult rv =
         GetRangeEndPoints(range, getter_AddRefs(startContainer), &startOffset,
@@ -2053,16 +2057,14 @@ nsresult TextServicesDocument::GetUncollapsedSelection(
 
     NS_ENSURE_SUCCESS(rv, rv);
 
-    e1s2 = nsContentUtils::ComparePoints(
-        eStart->mTextNode, AssertedCast<int32_t>(eStartOffset), endContainer,
-        AssertedCast<int32_t>(endOffset));
+    e1s2 = nsContentUtils::ComparePoints(eStart->mTextNode, eStartOffset,
+                                         endContainer, endOffset);
     if (NS_WARN_IF(!e1s2)) {
       return NS_ERROR_FAILURE;
     }
 
-    e2s1 = nsContentUtils::ComparePoints(
-        eEnd->mTextNode, AssertedCast<int32_t>(eEndOffset), startContainer,
-        AssertedCast<int32_t>(startOffset));
+    e2s1 = nsContentUtils::ComparePoints(eEnd->mTextNode, eEndOffset,
+                                         startContainer, startOffset);
     if (NS_WARN_IF(!e2s1)) {
       return NS_ERROR_FAILURE;
     }
@@ -2084,15 +2086,13 @@ nsresult TextServicesDocument::GetUncollapsedSelection(
 
   // Now that we have an intersecting range, find out more info:
   const Maybe<int32_t> e1s1 = nsContentUtils::ComparePoints(
-      eStart->mTextNode, AssertedCast<int32_t>(eStartOffset), startContainer,
-      AssertedCast<int32_t>(startOffset));
+      eStart->mTextNode, eStartOffset, startContainer, startOffset);
   if (NS_WARN_IF(!e1s1)) {
     return NS_ERROR_FAILURE;
   }
 
   const Maybe<int32_t> e2s2 = nsContentUtils::ComparePoints(
-      eEnd->mTextNode, AssertedCast<int32_t>(eEndOffset), endContainer,
-      AssertedCast<int32_t>(endOffset));
+      eEnd->mTextNode, eEndOffset, endContainer, endOffset);
   if (NS_WARN_IF(!e2s2)) {
     return NS_ERROR_FAILURE;
   }
@@ -2674,7 +2674,7 @@ TextServicesDocument::OffsetEntryArray::FindWordRange(
   // we do is get its index in the offset table so we can
   // calculate the dom point's string offset.
   Maybe<size_t> maybeEntryIndex =
-      FirstIndexOf(*aStartPointToScan.ContainerAsText());
+      FirstIndexOf(*aStartPointToScan.ContainerAs<Text>());
   if (NS_WARN_IF(maybeEntryIndex.isNothing())) {
     NS_WARNING(
         "TextServicesDocument::OffsetEntryArray::FirstIndexOf() didn't find "
@@ -2693,12 +2693,10 @@ TextServicesDocument::OffsetEntryArray::FindWordRange(
   // of the word from our calculated string offset.
 
   const char16_t* str = aAllTextInBlock.BeginReading();
-  uint32_t strLen = aAllTextInBlock.Length();
+  MOZ_ASSERT(strOffset <= aAllTextInBlock.Length(),
+             "The string offset shouldn't be greater than the string length!");
 
-  intl::WordRange res = intl::WordBreaker::FindWord(str, strLen, strOffset);
-  if (res.mBegin == res.mEnd) {
-    return Err(str ? NS_ERROR_ILLEGAL_VALUE : NS_ERROR_NULL_POINTER);
-  }
+  intl::WordRange res = intl::WordBreaker::FindWord(aAllTextInBlock, strOffset);
 
   // Strip out the NBSPs at the ends
   while (res.mBegin <= res.mEnd && IS_NBSP_CHAR(str[res.mBegin])) {

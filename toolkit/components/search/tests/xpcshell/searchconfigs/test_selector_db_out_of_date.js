@@ -3,9 +3,10 @@
 
 "use strict";
 
-XPCOMUtils.defineLazyModuleGetters(this, {
-  RemoteSettingsWorker: "resource://services-settings/RemoteSettingsWorker.jsm",
-  SearchEngineSelector: "resource://gre/modules/SearchEngineSelector.jsm",
+ChromeUtils.defineESModuleGetters(this, {
+  RemoteSettingsWorker:
+    "resource://services-settings/RemoteSettingsWorker.sys.mjs",
+  SearchEngineSelector: "resource://gre/modules/SearchEngineSelector.sys.mjs",
 });
 
 do_get_profile();
@@ -35,6 +36,7 @@ add_task(async function test_selector_db_out_of_date() {
         last_modified: 1606227264000,
       },
     ],
+    1606227264000,
   ]);
 
   // Now load the configuration and check we get what we expect.

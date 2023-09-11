@@ -197,10 +197,11 @@ async function makeSureProfilerPopupIsEnabled() {
  * any type of popup in the browser. This function waits for one of those events, and
  * checks that the viewId of the popup is PanelUI-profiler
  *
+ * @param {Window} window
  * @param {"popupshown" | "popuphidden"} eventName
  * @returns {Promise<void>}
  */
-function waitForProfilerPopupEvent(eventName) {
+function waitForProfilerPopupEvent(window, eventName) {
   return new Promise(resolve => {
     function handleEvent(event) {
       if (event.target.getAttribute("viewId") === "PanelUI-profiler") {
@@ -218,13 +219,14 @@ function waitForProfilerPopupEvent(eventName) {
  *
  * This function toggles the profiler menu button, and then uses user gestures
  * to click it open. It waits a tick to make sure it has a chance to initialize.
+ * @param {Window} window
  * @return {Promise<void>}
  */
 async function _toggleOpenProfilerPopup(window) {
   info("Toggle open the profiler popup.");
 
   info("> Find the profiler menu button.");
-  const profilerDropmarker = document.getElementById(
+  const profilerDropmarker = window.document.getElementById(
     "profiler-button-dropmarker"
   );
   if (!profilerDropmarker) {
@@ -233,10 +235,10 @@ async function _toggleOpenProfilerPopup(window) {
     );
   }
 
-  const popupShown = waitForProfilerPopupEvent("popupshown");
+  const popupShown = waitForProfilerPopupEvent(window, "popupshown");
 
   info("> Trigger a click on the profiler button dropmarker.");
-  await EventUtils.synthesizeMouseAtCenter(profilerDropmarker, {});
+  await EventUtils.synthesizeMouseAtCenter(profilerDropmarker, {}, window);
 
   if (profilerDropmarker.getAttribute("open") !== "true") {
     throw new Error(
@@ -255,10 +257,11 @@ async function _toggleOpenProfilerPopup(window) {
  * Do not use this directly in a test. Prefer withPopupOpen.
  *
  * This function uses a keyboard shortcut to close the profiler popup.
+ * @param {Window} window
  * @return {Promise<void>}
  */
 async function _closePopup(window) {
-  const popupHiddenPromise = waitForProfilerPopupEvent("popuphidden");
+  const popupHiddenPromise = waitForProfilerPopupEvent(window, "popuphidden");
   info("> Trigger an escape key to hide the popup");
   EventUtils.synthesizeKey("KEY_Escape");
 
@@ -292,7 +295,7 @@ async function withPopupOpen(window, callback) {
 async function openPopupAndEnsureCloses(window, callback) {
   await _toggleOpenProfilerPopup(window);
   // We want to ensure the popup gets closed by the test, during the callback.
-  const popupHiddenPromise = waitForProfilerPopupEvent("popuphidden");
+  const popupHiddenPromise = waitForProfilerPopupEvent(window, "popuphidden");
   await callback();
   info("> Verifying that the popup was closed by the test.");
   await popupHiddenPromise;
@@ -465,19 +468,21 @@ function withAboutProfiling(callback) {
  *                                          devtools panel's document, the
  *                                          second parameter is the opened tab's
  *                                          document.
+ * @param {Window} [aWindow] The browser's window object we target
  * @returns {Promise<void>}
  */
-async function withDevToolsPanel(url, callback) {
-  if (typeof url !== "string" && !callback) {
+async function withDevToolsPanel(url, callback, aWindow = window) {
+  if (typeof url === "function") {
+    aWindow = callback ?? window;
     callback = url;
     url = "about:blank";
   }
 
-  SpecialPowers.pushPrefEnv({
-    set: [["devtools.performance.new-panel-enabled", "true"]],
-  });
+  const { gBrowser } = aWindow;
 
-  const { gDevTools } = require("devtools/client/framework/devtools");
+  const {
+    gDevTools,
+  } = require("resource://devtools/client/framework/devtools.js");
 
   info(`Create a new tab with url "${url}".`);
   const tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, url);
@@ -494,9 +499,19 @@ async function withDevToolsPanel(url, callback) {
 
   info("About to remove the about:blank tab");
   await toolbox.destroy();
+
+  // The previous asynchronous functions may resolve within a tick after opening a new tab.
+  // We shouldn't remove the newly opened tab in the same tick.
+  // Wait for the next tick here.
+  await TestUtils.waitForTick();
+
+  // Take care to register the TabClose event before we call removeTab, to avoid
+  // race issues.
+  const waitForClosingPromise = BrowserTestUtils.waitForTabClosing(tab);
   BrowserTestUtils.removeTab(tab);
+  info("Requested closing the about:blank tab, waiting...");
+  await waitForClosingPromise;
   info("The about:blank tab is now removed.");
-  await new Promise(resolve => setTimeout(resolve, 500));
 }
 /* exported withDevToolsPanel */
 
@@ -510,7 +525,7 @@ async function withDevToolsPanel(url, callback) {
  */
 function getActiveConfiguration() {
   const BackgroundJSM = ChromeUtils.import(
-    "resource://devtools/client/performance-new/popup/background.jsm.js"
+    "resource://devtools/client/performance-new/shared/background.jsm.js"
   );
 
   const { startProfiler, stopProfiler } = BackgroundJSM;
@@ -753,8 +768,7 @@ function withWebChannelTestDocument(callback) {
   return BrowserTestUtils.withNewTab(
     {
       gBrowser,
-      url:
-        "http://example.com/browser/devtools/client/performance-new/test/browser/webchannel.html",
+      url: "http://example.com/browser/devtools/client/performance-new/test/browser/webchannel.html",
     },
     callback
   );
@@ -812,7 +826,7 @@ function setReactFriendlyInputValue(input, value) {
  * @param {Document} document
  */
 function setupGetRecordingState(document) {
-  const selectors = require("devtools/client/performance-new/store/selectors");
+  const selectors = require("resource://devtools/client/performance-new/store/selectors.js");
   const store = document.defaultView.gStore;
   if (!store) {
     throw new Error("Could not find the redux store on the window object.");

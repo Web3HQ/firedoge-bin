@@ -7,8 +7,8 @@
 #ifndef mozilla_dom_AndroidWebAuthnTokenManager_h
 #define mozilla_dom_AndroidWebAuthnTokenManager_h
 
-#include "mozilla/dom/CryptoBuffer.h"
 #include "mozilla/dom/U2FTokenTransport.h"
+#include "mozilla/java/WebAuthnTokenManagerNatives.h"
 
 namespace mozilla {
 namespace dom {
@@ -32,7 +32,15 @@ class AndroidWebAuthnResult {
   explicit AndroidWebAuthnResult(const nsAString& aErrorCode)
       : mErrorCode(aErrorCode) {}
 
-  explicit AndroidWebAuthnResult() {}
+  explicit AndroidWebAuthnResult(
+      const java::WebAuthnTokenManager::MakeCredentialResponse::LocalRef&
+          aResponse);
+
+  explicit AndroidWebAuthnResult(
+      const java::WebAuthnTokenManager::GetAssertionResponse::LocalRef&
+          aResponse);
+
+  AndroidWebAuthnResult() = delete;
 
   bool IsError() const { return NS_FAILED(GetError()); }
 
@@ -71,26 +79,21 @@ class AndroidWebAuthnResult {
     }
   }
 
-  AndroidWebAuthnResult(const AndroidWebAuthnResult& aOther)
-      : mAttObj(aOther.mAttObj.InfallibleClone()),
-        mKeyHandle(aOther.mKeyHandle.InfallibleClone()),
-        mClientDataJSON(aOther.mClientDataJSON),
-        mAuthData(aOther.mAuthData.InfallibleClone()),
-        mSignature(aOther.mSignature.InfallibleClone()),
-        mUserHandle(aOther.mUserHandle.InfallibleClone()),
-        mErrorCode(aOther.mErrorCode) {}
+  AndroidWebAuthnResult(const AndroidWebAuthnResult&) = delete;
+  AndroidWebAuthnResult(AndroidWebAuthnResult&&) = default;
 
   // Attestation-only
-  CryptoBuffer mAttObj;
+  nsTArray<uint8_t> mAttObj;
+  nsTArray<nsString> mTransports;
 
   // Attestations and assertions
-  CryptoBuffer mKeyHandle;
+  nsTArray<uint8_t> mKeyHandle;
   nsCString mClientDataJSON;
 
   // Assertions-only
-  CryptoBuffer mAuthData;
-  CryptoBuffer mSignature;
-  CryptoBuffer mUserHandle;
+  nsTArray<uint8_t> mAuthData;
+  nsTArray<uint8_t> mSignature;
+  nsTArray<uint8_t> mUserHandle;
 
  private:
   const nsString mErrorCode;
@@ -105,22 +108,24 @@ class AndroidWebAuthnTokenManager final : public U2FTokenTransport {
   explicit AndroidWebAuthnTokenManager();
   ~AndroidWebAuthnTokenManager() {}
 
-  RefPtr<U2FRegisterPromise> Register(const WebAuthnMakeCredentialInfo& aInfo,
-                                      bool aForceNoneAttestation) override;
+  virtual RefPtr<U2FRegisterPromise> Register(
+      const WebAuthnMakeCredentialInfo& aInfo,
+      bool aForceNoneAttestation) override;
 
-  RefPtr<U2FSignPromise> Sign(const WebAuthnGetAssertionInfo& aInfo) override;
+  virtual RefPtr<U2FSignPromise> Sign(
+      const WebAuthnGetAssertionInfo& aInfo) override;
 
   void Cancel() override;
 
   void Drop() override;
 
-  void HandleRegisterResult(const AndroidWebAuthnResult& aResult);
-
-  void HandleSignResult(const AndroidWebAuthnResult& aResult);
-
   static AndroidWebAuthnTokenManager* GetInstance();
 
  private:
+  void HandleRegisterResult(AndroidWebAuthnResult&& aResult);
+
+  void HandleSignResult(AndroidWebAuthnResult&& aResult);
+
   void ClearPromises() {
     mRegisterPromise.RejectIfExists(NS_ERROR_DOM_UNKNOWN_ERR, __func__);
     mSignPromise.RejectIfExists(NS_ERROR_DOM_UNKNOWN_ERR, __func__);

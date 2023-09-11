@@ -11,6 +11,7 @@
 #include "ProfileBuffer.h"
 #include "ProfileBufferEntry.h"
 
+#include "mozilla/FailureLatch.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/NotNull.h"
 #include "mozilla/ProfileJSONWriter.h"
@@ -51,9 +52,10 @@ struct ThreadStreamingContext;
 // when the profiler is stopped.
 class ProfiledThreadData final {
  public:
-  ProfiledThreadData(
-      const mozilla::profiler::ThreadRegistrationInfo& aThreadInfo,
-      nsIEventTarget* aEventTarget);
+  explicit ProfiledThreadData(
+      const mozilla::profiler::ThreadRegistrationInfo& aThreadInfo);
+  explicit ProfiledThreadData(
+      mozilla::profiler::ThreadRegistrationInfo&& aThreadInfo);
   ~ProfiledThreadData();
 
   void NotifyUnregistered(uint64_t aBufferPosition) {
@@ -73,19 +75,22 @@ class ProfiledThreadData final {
 
   mozilla::NotNull<mozilla::UniquePtr<UniqueStacks>> PrepareUniqueStacks(
       const ProfileBuffer& aBuffer, JSContext* aCx,
-      ProfilerCodeAddressService* aService);
+      mozilla::FailureLatch& aFailureLatch,
+      ProfilerCodeAddressService* aService,
+      mozilla::ProgressLogger aProgressLogger);
 
   void StreamJSON(const ProfileBuffer& aBuffer, JSContext* aCx,
                   SpliceableJSONWriter& aWriter, const nsACString& aProcessName,
                   const nsACString& aETLDplus1,
                   const mozilla::TimeStamp& aProcessStartTime,
-                  double aSinceTime, bool aJSTracerEnabled,
-                  ProfilerCodeAddressService* aService);
+                  double aSinceTime, ProfilerCodeAddressService* aService,
+                  mozilla::ProgressLogger aProgressLogger);
   void StreamJSON(ThreadStreamingContext&& aThreadStreamingContext,
                   SpliceableJSONWriter& aWriter, const nsACString& aProcessName,
                   const nsACString& aETLDplus1,
                   const mozilla::TimeStamp& aProcessStartTime,
-                  bool aJSTracerEnabled, ProfilerCodeAddressService* aService);
+                  ProfilerCodeAddressService* aService,
+                  mozilla::ProgressLogger aProgressLogger);
 
   const mozilla::profiler::ThreadRegistrationInfo& Info() const {
     return mThreadInfo;
@@ -158,16 +163,19 @@ struct ThreadStreamingContext {
 
   ThreadStreamingContext(ProfiledThreadData& aProfiledThreadData,
                          const ProfileBuffer& aBuffer, JSContext* aCx,
-                         ProfilerCodeAddressService* aService);
+                         mozilla::FailureLatch& aFailureLatch,
+                         ProfilerCodeAddressService* aService,
+                         mozilla::ProgressLogger aProgressLogger);
 
   void FinalizeWriter();
 };
 
 // This class will be used when outputting the profile data for all threads.
-class ProcessStreamingContext {
+class ProcessStreamingContext final : public mozilla::FailureLatch {
  public:
   // Pre-allocate space for `aThreadCount` threads.
   ProcessStreamingContext(size_t aThreadCount,
+                          mozilla::FailureLatch& aFailureLatch,
                           const mozilla::TimeStamp& aProcessStartTime,
                           double aSinceTime);
 
@@ -177,7 +185,8 @@ class ProcessStreamingContext {
   // should be called exactly the number of times specified in the constructor.
   void AddThreadStreamingContext(ProfiledThreadData& aProfiledThreadData,
                                  const ProfileBuffer& aBuffer, JSContext* aCx,
-                                 ProfilerCodeAddressService* aService);
+                                 ProfilerCodeAddressService* aService,
+                                 mozilla::ProgressLogger aProgressLogger);
 
   // Retrieve the ThreadStreamingContext for a given thread id.
   // Returns null if that thread id doesn't correspond to any profiled thread.
@@ -202,12 +211,16 @@ class ProcessStreamingContext {
   };
   ThreadStreamingContext* end() { return mThreadStreamingContextList.end(); };
 
+  FAILURELATCH_IMPL_PROXY(mFailureLatch)
+
  private:
   // Separate list of thread ids, it's much faster to do a linear search
   // here than a vector of bigger items like mThreadStreamingContextList.
   mozilla::Vector<ProfilerThreadId> mTIDList;
   // Contexts corresponding to the thread id at the same indexes.
   mozilla::Vector<ThreadStreamingContext> mThreadStreamingContextList;
+
+  mozilla::FailureLatch& mFailureLatch;
 
   const mozilla::TimeStamp mProcessStartTime;
 
@@ -223,7 +236,7 @@ ProfilerThreadId StreamSamplesAndMarkers(
     const nsACString& aETLDplus1, const mozilla::TimeStamp& aProcessStartTime,
     const mozilla::TimeStamp& aRegisterTime,
     const mozilla::TimeStamp& aUnregisterTime, double aSinceTime,
-    UniqueStacks& aUniqueStacks);
+    UniqueStacks& aUniqueStacks, mozilla::ProgressLogger aProgressLogger);
 void StreamSamplesAndMarkers(const char* aName,
                              ThreadStreamingContext& aThreadData,
                              SpliceableJSONWriter& aWriter,
@@ -231,6 +244,7 @@ void StreamSamplesAndMarkers(const char* aName,
                              const nsACString& aETLDplus1,
                              const mozilla::TimeStamp& aProcessStartTime,
                              const mozilla::TimeStamp& aRegisterTime,
-                             const mozilla::TimeStamp& aUnregisterTime);
+                             const mozilla::TimeStamp& aUnregisterTime,
+                             mozilla::ProgressLogger aProgressLogger);
 
 #endif  // ProfiledThreadData_h

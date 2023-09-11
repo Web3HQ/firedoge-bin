@@ -1,16 +1,17 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
-const { XPCOMUtils } = ChromeUtils.import(
-  "resource://gre/modules/XPCOMUtils.jsm"
+const { XPCOMUtils } = ChromeUtils.importESModule(
+  "resource://gre/modules/XPCOMUtils.sys.mjs"
 );
 
-XPCOMUtils.defineLazyModuleGetters(this, {
-  PageDataSchema: "resource:///modules/pagedata/PageDataSchema.jsm",
-  Services: "resource://gre/modules/Services.jsm",
+ChromeUtils.defineESModuleGetters(this, {
+  PageDataSchema: "resource:///modules/pagedata/PageDataSchema.sys.mjs",
 });
 
-const { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+const { HttpServer } = ChromeUtils.importESModule(
+  "resource://testing-common/httpd.sys.mjs"
+);
 
 const server = new HttpServer();
 server.start(-1);
@@ -38,8 +39,13 @@ Services.prefs.setBoolPref("browser.pagedata.log", true);
  */
 function parseDocument(str, path = DEFAULT_PATH) {
   server.registerPathHandler(path, (request, response) => {
-    response.setHeader("Content-Type", "text/html");
-    response.write(str);
+    response.setHeader("Content-Type", "text/html;charset=utf-8");
+
+    let converter = Cc[
+      "@mozilla.org/intl/converter-output-stream;1"
+    ].createInstance(Ci.nsIConverterOutputStream);
+    converter.init(response.bodyOutputStream, "utf-8");
+    converter.writeString(str);
   });
 
   return new Promise((resolve, reject) => {
@@ -50,7 +56,7 @@ function parseDocument(str, path = DEFAULT_PATH) {
     request.addEventListener("error", reject);
     request.addEventListener("abort", reject);
 
-    request.addEventListener("load", function() {
+    request.addEventListener("load", function () {
       resolve(request.responseXML);
     });
 

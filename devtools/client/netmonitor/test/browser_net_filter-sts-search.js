@@ -12,11 +12,7 @@ const REQUESTS = [
   { url: "sjs_status-codes-test-server.sjs?sts=304" },
 ];
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  // We cannot assert status code 304 with HTTPS requests to httpd.js
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   const { monitor } = await initNetMonitor(FILTERING_URL, { requestCount: 1 });
   const { document, store, windowRequire } = monitor.panelWin;
   const Actions = windowRequire("devtools/client/netmonitor/src/actions/index");

@@ -1,13 +1,15 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+/* global RPMGetStringPref:false */
 
 import HomeOverlay from "./home/overlay.js";
 import SignupOverlay from "./signup/overlay.js";
 import SavedOverlay from "./saved/overlay.js";
+import StyleGuideOverlay from "./style-guide/overlay.js";
 import pktPanelMessaging from "./messages.js";
 
-var PKT_PANEL = function() {};
+var PKT_PANEL = function () {};
 
 PKT_PANEL.prototype = {
   initHome() {
@@ -22,6 +24,11 @@ PKT_PANEL.prototype = {
 
   initSaved() {
     this.overlay = new SavedOverlay();
+    this.init();
+  },
+
+  initStyleGuide() {
+    this.overlay = new StyleGuideOverlay();
     this.init();
   },
 
@@ -101,7 +108,9 @@ PKT_PANEL.prototype = {
   },
 
   create() {
-    this.overlay.create();
+    const pockethost =
+      RPMGetStringPref("extensions.pocket.site") || "getpocket.com";
+    this.overlay.create({ pockethost });
   },
 };
 

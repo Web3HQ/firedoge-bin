@@ -22,7 +22,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
-import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import org.mozilla.gecko.EventDispatcher;
 import org.mozilla.gecko.GeckoSystemStateListener;
@@ -86,6 +86,18 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
     }
 
     /**
+     * Set whether Extensions Process support should be enabled.
+     *
+     * @param flag A flag determining whether Extensions Process support should be enabled. Default
+     *     is false.
+     * @return This Builder instance.
+     */
+    public @NonNull Builder extensionsProcessEnabled(final boolean flag) {
+      getSettings().mExtensionsProcess.set(flag);
+      return this;
+    }
+
+    /**
      * Set whether JavaScript support should be enabled.
      *
      * @param flag A flag determining whether JavaScript should be enabled. Default is true.
@@ -130,6 +142,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
       getSettings().mDebugPause = enabled;
       return this;
     }
+
     /**
      * Set whether the to report the full bit depth of the device.
      *
@@ -202,23 +215,6 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
      */
     public @NonNull Builder fontSizeFactor(final float fontSizeFactor) {
       getSettings().setFontSizeFactor(fontSizeFactor);
-      return this;
-    }
-
-    /**
-     * Enable the Enteprise Roots feature.
-     *
-     * <p>When Enabled, GeckoView will fetch the third-party root certificates added to the Android
-     * OS CA store and will use them internally.
-     *
-     * @param enabled whether to enable this feature or not
-     * @return The builder instance
-     * @deprecated use {@link #setEnterpriseRootsEnabled} instead.
-     */
-    @Deprecated
-    @DeprecationSchedule(version = 98, id = "runtime-settings-typo")
-    public @NonNull Builder enterpiseRootsEnabled(final boolean enabled) {
-      getSettings().setEnterpriseRootsEnabled(enabled);
       return this;
     }
 
@@ -422,6 +418,19 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
     }
 
     /**
+     * Set the {@link ExperimentDelegate} instance on this runtime, if any. This delegate is used to
+     * send and receive experiment information from Nimbus.
+     *
+     * @param delegate The {@link ExperimentDelegate} sending and retrieving experiment information.
+     * @return The builder instance.
+     */
+    @AnyThread
+    public @NonNull Builder experimentDelegate(final @Nullable ExperimentDelegate delegate) {
+      getSettings().mExperimentDelegate = delegate;
+      return this;
+    }
+
+    /**
      * Enables GeckoView and Gecko Logging. Logging is on by default. Does not control all logging
      * in Gecko. Logging done in Java code must be stripped out at build time.
      *
@@ -470,6 +479,17 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
       getSettings().setAllowInsecureConnections(level);
       return this;
     }
+
+    /**
+     * Sets whether the Add-on Manager web API (`mozAddonManager`) is enabled.
+     *
+     * @param flag True if the web API should be enabled, false otherwise.
+     * @return This Builder instance.
+     */
+    public @NonNull Builder extensionsWebAPIEnabled(final boolean flag) {
+      getSettings().mExtensionsWebAPIEnabled.set(flag);
+      return this;
+    }
   }
 
   private GeckoRuntime mRuntime;
@@ -492,7 +512,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
       new Pref<Integer>("browser.display.use_document_fonts", 1);
   /* package */ final Pref<Boolean> mConsoleOutput =
       new Pref<Boolean>("geckoview.console.enabled", false);
-  /* package */ final Pref<Integer> mFontSizeFactor = new Pref<>("font.size.systemFontScale", 100);
+  /* package */ float mFontSizeFactor = 1f;
   /* package */ final Pref<Boolean> mEnterpriseRootsEnabled =
       new Pref<>("security.enterprise_roots.enabled", false);
   /* package */ final Pref<Integer> mFontInflationMinTwips =
@@ -500,7 +520,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
   /* package */ final Pref<Boolean> mInputAutoZoom = new Pref<>("formhelper.autozoom", true);
   /* package */ final Pref<Boolean> mDoubleTapZooming =
       new Pref<>("apz.allow_double_tap_zooming", true);
-  /* package */ final Pref<Integer> mGlMsaaLevel = new Pref<>("gl.msaa-level", 0);
+  /* package */ final Pref<Integer> mGlMsaaLevel = new Pref<>("webgl.msaa-samples", 4);
   /* package */ final Pref<Boolean> mTelemetryEnabled =
       new Pref<>("toolkit.telemetry.geckoview.streaming", false);
   /* package */ final Pref<String> mGeckoViewLogLevel = new Pref<>("geckoview.logging", "Debug");
@@ -518,6 +538,10 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
   /* package */ final Pref<Boolean> mHttpsOnlyPrivateMode =
       new Pref<Boolean>("dom.security.https_only_mode_pbm", false);
   /* package */ final Pref<Integer> mProcessCount = new Pref<>("dom.ipc.processCount", 2);
+  /* package */ final Pref<Boolean> mExtensionsWebAPIEnabled =
+      new Pref<>("extensions.webapi.enabled", false);
+  /* package */ final PrefWithoutDefault<Boolean> mExtensionsProcess =
+      new PrefWithoutDefault<Boolean>("extensions.webextensions.remote");
 
   /* package */ int mPreferredColorScheme = COLOR_SCHEME_SYSTEM;
 
@@ -531,6 +555,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
   /* package */ Class<? extends Service> mCrashHandler;
   /* package */ String[] mRequestedLocales;
   /* package */ RuntimeTelemetry.Proxy mTelemetryProxy;
+  /* package */ ExperimentDelegate mExperimentDelegate;
 
   /**
    * Attach and commit the settings to the given runtime.
@@ -586,6 +611,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
     mRequestedLocales = settings.mRequestedLocales;
     mConfigFilePath = settings.mConfigFilePath;
     mTelemetryProxy = settings.mTelemetryProxy;
+    mExperimentDelegate = settings.mExperimentDelegate;
   }
 
   /* package */ void commit() {
@@ -642,6 +668,26 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
    */
   public @NonNull GeckoRuntimeSettings setJavaScriptEnabled(final boolean flag) {
     mJavaScript.commit(flag);
+    return this;
+  }
+
+  /**
+   * Get whether Extensions Process support is enabled.
+   *
+   * @return Whether Extensions Process support is enabled.
+   */
+  public @Nullable Boolean getExtensionsProcessEnabled() {
+    return mExtensionsProcess.get();
+  }
+
+  /**
+   * Set whether Extensions Process support should be enabled.
+   *
+   * @param flag A flag determining whether Extensions Process support should be enabled.
+   * @return This GeckoRuntimeSettings instance.
+   */
+  public @NonNull GeckoRuntimeSettings setExtensionsProcessEnabled(final boolean flag) {
+    mExtensionsProcess.commit(flag);
     return this;
   }
 
@@ -787,6 +833,26 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
     commitLocales();
   }
 
+  /**
+   * Gets whether the Add-on Manager web API (`mozAddonManager`) is enabled.
+   *
+   * @return True when the web API is enabled, false otherwise.
+   */
+  public boolean getExtensionsWebAPIEnabled() {
+    return mExtensionsWebAPIEnabled.get();
+  }
+
+  /**
+   * Sets whether the Add-on Manager web API (`mozAddonManager`) is enabled.
+   *
+   * @param flag True if the web API should be enabled, false otherwise.
+   * @return This GeckoRuntimeSettings instance.
+   */
+  public @NonNull GeckoRuntimeSettings setExtensionsWebAPIEnabled(final boolean flag) {
+    mExtensionsWebAPIEnabled.commit(flag);
+    return this;
+  }
+
   private void commitLocales() {
     final GeckoBundle data = new GeckoBundle(1);
     data.putStringArray("requestedLocales", mRequestedLocales);
@@ -795,23 +861,23 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
   }
 
   private String computeAcceptLanguages() {
-    final ArrayList<String> locales = new ArrayList<String>();
+    final LinkedHashMap<String, String> locales = new LinkedHashMap<>();
 
     // Explicitly-set app prefs come first:
     if (mRequestedLocales != null) {
       for (final String locale : mRequestedLocales) {
-        locales.add(locale.toLowerCase(Locale.ROOT));
+        locales.put(locale.toLowerCase(Locale.ROOT), locale);
       }
     }
     // OS prefs come second:
     for (final String locale : getDefaultLocales()) {
       final String localeLowerCase = locale.toLowerCase(Locale.ROOT);
-      if (!locales.contains(localeLowerCase)) {
-        locales.add(localeLowerCase);
+      if (!locales.containsKey(localeLowerCase)) {
+        locales.put(localeLowerCase, locale);
       }
     }
 
-    return TextUtils.join(",", locales);
+    return TextUtils.join(",", locales.values());
   }
 
   private static String[] getDefaultLocales() {
@@ -969,7 +1035,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
 
   private float sanitizeFontSizeFactor(final float fontSizeFactor) {
     if (fontSizeFactor < 0) {
-      if (BuildConfig.DEBUG) {
+      if (BuildConfig.DEBUG_BUILD) {
         throw new IllegalArgumentException("fontSizeFactor cannot be < 0");
       } else {
         Log.e(LOGTAG, "fontSizeFactor cannot be < 0");
@@ -982,12 +1048,16 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
 
   /* package */ @NonNull
   GeckoRuntimeSettings setFontSizeFactorInternal(final float fontSizeFactor) {
-    final int fontSizePercentage = Math.round(sanitizeFontSizeFactor(fontSizeFactor) * 100);
-    mFontSizeFactor.commit(fontSizePercentage);
+    final float newFactor = sanitizeFontSizeFactor(fontSizeFactor);
+    if (mFontSizeFactor == newFactor) {
+      return this;
+    }
+    mFontSizeFactor = newFactor;
     if (getFontInflationEnabled()) {
-      final int scaledFontInflation = Math.round(FONT_INFLATION_BASE_VALUE * fontSizeFactor);
+      final int scaledFontInflation = Math.round(FONT_INFLATION_BASE_VALUE * newFactor);
       mFontInflationMinTwips.commit(scaledFontInflation);
     }
+    GeckoSystemStateListener.onDeviceChanged();
     return this;
   }
 
@@ -997,7 +1067,7 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
    * @return The currently applied font size factor.
    */
   public float getFontSizeFactor() {
-    return mFontSizeFactor.get() / 100f;
+    return mFontSizeFactor;
   }
 
   /**
@@ -1034,12 +1104,14 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
 
   @Retention(RetentionPolicy.SOURCE)
   @IntDef({COLOR_SCHEME_LIGHT, COLOR_SCHEME_DARK, COLOR_SCHEME_SYSTEM})
-  /* package */ @interface ColorScheme {}
+  public @interface ColorScheme {}
 
   /** A light theme for web content is preferred. */
   public static final int COLOR_SCHEME_LIGHT = 0;
+
   /** A dark theme for web content is preferred. */
   public static final int COLOR_SCHEME_DARK = 1;
+
   /** The preferred color scheme will be based on system settings. */
   public static final int COLOR_SCHEME_SYSTEM = -1;
 
@@ -1133,6 +1205,16 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
   }
 
   /**
+   * Get the {@link ExperimentDelegate} instance set on this runtime, if any,
+   *
+   * @return The {@link ExperimentDelegate} set on this runtime.
+   */
+  @AnyThread
+  public @Nullable ExperimentDelegate getExperimentDelegate() {
+    return mExperimentDelegate;
+  }
+
+  /**
    * Gets whether about:config is enabled or not.
    *
    * @return True if about:config is enabled, false otherwise.
@@ -1198,12 +1280,14 @@ public final class GeckoRuntimeSettings extends RuntimeSettings {
 
   @Retention(RetentionPolicy.SOURCE)
   @IntDef({ALLOW_ALL, HTTPS_ONLY_PRIVATE, HTTPS_ONLY})
-  /* package */ @interface HttpsOnlyMode {}
+  public @interface HttpsOnlyMode {}
 
   /** Allow all insecure connections */
   public static final int ALLOW_ALL = 0;
+
   /** Allow insecure connections in normal browsing, but only HTTPS in private browsing. */
   public static final int HTTPS_ONLY_PRIVATE = 1;
+
   /** Only allow HTTPS connections. */
   public static final int HTTPS_ONLY = 2;
 

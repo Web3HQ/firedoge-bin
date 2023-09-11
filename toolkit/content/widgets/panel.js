@@ -9,13 +9,15 @@
 {
   class MozPanel extends MozElements.MozElementMixin(XULPopupElement) {
     static get markup() {
-      return `<html:slot part="content" style="display: none"/>`;
+      return `<html:slot part="content" style="display: none !important"/>`;
     }
     constructor() {
       super();
 
       this._prevFocus = 0;
       this._fadeTimer = null;
+
+      this.attachShadow({ mode: "open" });
 
       this.addEventListener("popupshowing", this);
       this.addEventListener("popupshown", this);
@@ -28,7 +30,7 @@
       // Create shadow DOM lazily if a panel is hidden. It helps to reduce
       // cycles on startup.
       if (!this.hidden) {
-        this.initialize();
+        this.ensureInitialized();
       }
 
       if (this.isArrowPanel) {
@@ -39,7 +41,7 @@
           this.setAttribute("side", "top");
         }
         if (!this.hasAttribute("position")) {
-          this.setAttribute("position", "bottomcenter topleft");
+          this.setAttribute("position", "bottomleft topleft");
         }
         if (!this.hasAttribute("consumeoutsideclicks")) {
           this.setAttribute("consumeoutsideclicks", "false");
@@ -47,30 +49,24 @@
       }
     }
 
-    initialize() {
+    ensureInitialized() {
       // As an optimization, we don't slot contents if the panel is [hidden] in
       // connectedCallback this means we can avoid running this code at startup
       // and only need to do it when a panel is about to be shown.  We then
       // override the `hidden` setter and `removeAttribute` and call this
       // function if the node is about to be shown.
-      if (this.shadowRoot) {
+      if (this.shadowRoot.firstChild) {
         return;
       }
 
-      this.attachShadow({ mode: "open" });
-
-      if (!this.isArrowPanel) {
-        let slot = document.createElement("slot");
-        slot.part = "content";
-        slot.style.display = "none";
-        this.shadowRoot.appendChild(slot);
-      } else {
-        this.shadowRoot.appendChild(this.constructor.fragment);
+      this.shadowRoot.appendChild(this.constructor.fragment);
+      if (this.hasAttribute("neverhidden")) {
+        this.panelContent.style.display = "";
       }
     }
 
     get panelContent() {
-      return this.shadowRoot?.querySelector("[part=content]");
+      return this.shadowRoot.querySelector("[part=content]");
     }
 
     get hidden() {
@@ -79,14 +75,14 @@
 
     set hidden(v) {
       if (!v) {
-        this.initialize();
+        this.ensureInitialized();
       }
       super.hidden = v;
     }
 
     removeAttribute(name) {
       if (name == "hidden") {
-        this.initialize();
+        this.ensureInitialized();
       }
       super.removeAttribute(name);
     }
@@ -95,8 +91,12 @@
       return this.getAttribute("type") == "arrow";
     }
 
+    get noOpenOnAnchor() {
+      return this.hasAttribute("no-open-on-anchor");
+    }
+
     _setSideAttribute(event) {
-      if (!this.isArrowPanel || !this.isAnchored) {
+      if (!this.isArrowPanel || !event.isAnchored) {
         return;
       }
 
@@ -120,6 +120,10 @@
           this.setAttribute("side", "top");
         }
       }
+
+      // This method isn't implemented by panel.js, but it can be added to
+      // individual instances that need to show an arrow.
+      this.setArrowPosition?.(event);
     }
 
     on_popupshowing(event) {
@@ -127,7 +131,7 @@
         this.panelContent.style.display = "";
       }
       if (this.isArrowPanel && event.target == this) {
-        if (this.isAnchored && this.anchorNode) {
+        if (this.anchorNode && !this.noOpenOnAnchor) {
           let anchorRoot =
             this.anchorNode.closest("toolbarbutton, .anchor-root") ||
             this.anchorNode;
@@ -198,7 +202,7 @@
           this.setAttribute("animate", "cancel");
         }
 
-        if (this.isAnchored && this.anchorNode) {
+        if (this.anchorNode && !this.noOpenOnAnchor) {
           let anchorRoot =
             this.anchorNode.closest("toolbarbutton, .anchor-root") ||
             this.anchorNode;
@@ -214,8 +218,8 @@
     }
 
     on_popuphidden(event) {
-      if (event.target == this) {
-        this.panelContent.style.display = "none";
+      if (event.target == this && !this.hasAttribute("neverhidden")) {
+        this.panelContent.style.setProperty("display", "none", "important");
       }
       if (this.isArrowPanel && event.target == this) {
         this.removeAttribute("panelopen");

@@ -22,6 +22,8 @@ class TaskQueue;
 
 class WebrtcMediaDataEncoder : public RefCountedWebrtcVideoEncoder {
  public:
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(WebrtcMediaDataEncoder, final);
+
   static bool CanCreate(const webrtc::VideoCodecType aCodecType);
 
   explicit WebrtcMediaDataEncoder(const webrtc::SdpVideoFormat& aFormat);
@@ -41,28 +43,24 @@ class WebrtcMediaDataEncoder : public RefCountedWebrtcVideoEncoder {
   int32_t SetRates(
       const webrtc::VideoEncoder::RateControlParameters& aParameters) override;
 
+  WebrtcVideoEncoder::EncoderInfo GetEncoderInfo() const override;
   MediaEventSource<uint64_t>* InitPluginEvent() override { return nullptr; }
 
   MediaEventSource<uint64_t>* ReleasePluginEvent() override { return nullptr; }
 
  private:
-  virtual ~WebrtcMediaDataEncoder() = default;
+  virtual ~WebrtcMediaDataEncoder();
 
   bool SetupConfig(const webrtc::VideoCodec* aCodecSettings);
   already_AddRefed<MediaDataEncoder> CreateEncoder(
       const webrtc::VideoCodec* aCodecSettings);
   bool InitEncoder();
-  /*
-    webrtc::RTPFragmentationHeader GetFragHeader(
-        const webrtc::VideoCodecType aCodecType,
-        const RefPtr<MediaRawData>& aFrame);
-  */
 
   const RefPtr<TaskQueue> mTaskQueue;
   const RefPtr<PEMFactory> mFactory;
   RefPtr<MediaDataEncoder> mEncoder;
 
-  Mutex mCallbackMutex;  // Protects mCallback and mError.
+  Mutex mCallbackMutex MOZ_UNANNOTATED;  // Protects mCallback and mError.
   webrtc::EncodedImageCallback* mCallback = nullptr;
   MediaResult mError = NS_OK;
 

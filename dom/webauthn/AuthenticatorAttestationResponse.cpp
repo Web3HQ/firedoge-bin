@@ -4,13 +4,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "AuthrsBridge_ffi.h"
 #include "mozilla/dom/WebAuthenticationBinding.h"
 #include "mozilla/dom/AuthenticatorAttestationResponse.h"
 
 #include "mozilla/HoldDropJSObjects.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 NS_IMPL_CYCLE_COLLECTION_CLASS(AuthenticatorAttestationResponse)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(
@@ -52,20 +52,107 @@ JSObject* AuthenticatorAttestationResponse::WrapObject(
 }
 
 void AuthenticatorAttestationResponse::GetAttestationObject(
-    JSContext* aCx, JS::MutableHandle<JSObject*> aRetVal) {
+    JSContext* aCx, JS::MutableHandle<JSObject*> aValue, ErrorResult& aRv) {
   if (!mAttestationObjectCachedObj) {
-    mAttestationObjectCachedObj = mAttestationObject.ToArrayBuffer(aCx);
+    mAttestationObjectCachedObj = ArrayBuffer::Create(
+        aCx, mAttestationObject.Length(), mAttestationObject.Elements());
+    if (!mAttestationObjectCachedObj) {
+      aRv.NoteJSContextException(aCx);
+      return;
+    }
   }
-  aRetVal.set(mAttestationObjectCachedObj);
+  aValue.set(mAttestationObjectCachedObj);
 }
 
-nsresult AuthenticatorAttestationResponse::SetAttestationObject(
-    CryptoBuffer& aBuffer) {
-  if (NS_WARN_IF(!mAttestationObject.Assign(aBuffer))) {
-    return NS_ERROR_OUT_OF_MEMORY;
-  }
-  return NS_OK;
+void AuthenticatorAttestationResponse::SetAttestationObject(
+    const nsTArray<uint8_t>& aBuffer) {
+  mAttestationObject.Assign(aBuffer);
 }
 
-}  // namespace dom
-}  // namespace mozilla
+void AuthenticatorAttestationResponse::GetTransports(
+    nsTArray<nsString>& aTransports) {
+  aTransports.Assign(mTransports);
+}
+
+void AuthenticatorAttestationResponse::SetTransports(
+    const nsTArray<nsString>& aTransports) {
+  mTransports.Assign(aTransports);
+}
+
+void AuthenticatorAttestationResponse::GetAuthenticatorData(
+    JSContext* aCx, JS::MutableHandle<JSObject*> aValue, ErrorResult& aRv) {
+  if (!mAttestationObjectParsed) {
+    nsresult rv = authrs_webauthn_att_obj_constructor(
+        mAttestationObject, /* anonymize */ false,
+        getter_AddRefs(mAttestationObjectParsed));
+    if (NS_FAILED(rv)) {
+      aRv.Throw(rv);
+      return;
+    }
+  }
+
+  nsTArray<uint8_t> authenticatorData;
+  nsresult rv =
+      mAttestationObjectParsed->GetAuthenticatorData(authenticatorData);
+  if (NS_FAILED(rv)) {
+    aRv.Throw(rv);
+    return;
+  }
+
+  JS::Heap<JSObject*> buffer(ArrayBuffer::Create(
+      aCx, authenticatorData.Length(), authenticatorData.Elements()));
+  if (!buffer) {
+    aRv.NoteJSContextException(aCx);
+    return;
+  }
+  aValue.set(buffer);
+}
+
+void AuthenticatorAttestationResponse::GetPublicKey(
+    JSContext* aCx, JS::MutableHandle<JSObject*> aValue, ErrorResult& aRv) {
+  if (!mAttestationObjectParsed) {
+    nsresult rv = authrs_webauthn_att_obj_constructor(
+        mAttestationObject, false, getter_AddRefs(mAttestationObjectParsed));
+    if (NS_FAILED(rv)) {
+      aRv.Throw(rv);
+      return;
+    }
+  }
+
+  nsTArray<uint8_t> publicKey;
+  nsresult rv = mAttestationObjectParsed->GetPublicKey(publicKey);
+  if (NS_FAILED(rv)) {
+    if (rv == NS_ERROR_NOT_AVAILABLE) {
+      aValue.set(nullptr);
+    } else {
+      aRv.Throw(NS_ERROR_OUT_OF_MEMORY);
+    }
+    return;
+  }
+
+  JS::Heap<JSObject*> buffer(
+      ArrayBuffer::Create(aCx, publicKey.Length(), publicKey.Elements()));
+  if (!buffer) {
+    aRv.NoteJSContextException(aCx);
+    return;
+  }
+  aValue.set(buffer);
+}
+
+COSEAlgorithmIdentifier AuthenticatorAttestationResponse::GetPublicKeyAlgorithm(
+    ErrorResult& aRv) {
+  if (!mAttestationObjectParsed) {
+    nsresult rv = authrs_webauthn_att_obj_constructor(
+        mAttestationObject, false, getter_AddRefs(mAttestationObjectParsed));
+    if (NS_FAILED(rv)) {
+      aRv.Throw(rv);
+      return 0;
+    }
+  }
+
+  COSEAlgorithmIdentifier alg;
+  mAttestationObjectParsed->GetPublicKeyAlgorithm(&alg);
+  return alg;
+}
+
+}  // namespace mozilla::dom

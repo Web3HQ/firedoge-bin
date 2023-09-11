@@ -1,43 +1,29 @@
 use super::{
     ast::*,
-    builtins::{inject_builtin, inject_double_builtin, sampled_to_depth},
+    builtins::{inject_builtin, sampled_to_depth},
     context::{Context, ExprPos, StmtContext},
     error::{Error, ErrorKind},
     types::scalar_components,
-    Parser, Result,
+    Frontend, Result,
 };
 use crate::{
-    front::glsl::types::type_power, proc::ensure_block_returns, Arena, Block, Constant,
-    ConstantInner, EntryPoint, Expression, FastHashMap, Function, FunctionArgument, FunctionResult,
-    Handle, LocalVariable, ScalarKind, ScalarValue, Span, Statement, StorageClass, StructMember,
-    Type, TypeInner,
+    front::glsl::types::type_power, proc::ensure_block_returns, AddressSpace, Arena, Block,
+    EntryPoint, Expression, Function, FunctionArgument, FunctionResult, Handle, Literal,
+    LocalVariable, ScalarKind, Span, Statement, StructMember, Type, TypeInner,
 };
 use std::iter;
 
-impl Parser {
-    fn add_constant_value(
-        &mut self,
-        scalar_kind: ScalarKind,
-        value: u64,
-        meta: Span,
-    ) -> Handle<Constant> {
-        let value = match scalar_kind {
-            ScalarKind::Uint => ScalarValue::Uint(value),
-            ScalarKind::Sint => ScalarValue::Sint(value as i64),
-            ScalarKind::Float => ScalarValue::Float(value as f64),
-            _ => unreachable!(),
-        };
+/// Struct detailing a store operation that must happen after a function call
+struct ProxyWrite {
+    /// The store target
+    target: Handle<Expression>,
+    /// A pointer to read the value of the store
+    value: Handle<Expression>,
+    /// An optional conversion to be applied
+    convert: Option<(ScalarKind, crate::Bytes)>,
+}
 
-        self.module.constants.fetch_or_append(
-            Constant {
-                name: None,
-                specialization: None,
-                inner: ConstantInner::Scalar { width: 4, value },
-            },
-            meta,
-        )
-    }
-
+impl Frontend {
     pub(crate) fn function_or_constructor_call(
         &mut self,
         ctx: &mut Context,
@@ -88,10 +74,10 @@ impl Parser {
                 if expr_type.scalar_kind() == Some(ScalarKind::Bool)
                     && result_scalar_kind != ScalarKind::Bool =>
             {
-                let c0 = self.add_constant_value(result_scalar_kind, 0u64, meta);
-                let c1 = self.add_constant_value(result_scalar_kind, 1u64, meta);
-                let mut reject = ctx.add_expression(Expression::Constant(c0), expr_meta, body);
-                let mut accept = ctx.add_expression(Expression::Constant(c1), expr_meta, body);
+                let l0 = Literal::zero(result_scalar_kind, 4).unwrap();
+                let l1 = Literal::one(result_scalar_kind, 4).unwrap();
+                let mut reject = ctx.add_expression(Expression::Literal(l0), expr_meta, body);
+                let mut accept = ctx.add_expression(Expression::Literal(l1), expr_meta, body);
 
                 ctx.implicit_splat(self, &mut reject, meta, vector_size)?;
                 ctx.implicit_splat(self, &mut accept, meta, vector_size)?;
@@ -113,9 +99,22 @@ impl Parser {
 
         Ok(match self.module.types[ty].inner {
             TypeInner::Vector { size, kind, width } if vector_size.is_none() => {
-                ctx.implicit_conversion(self, &mut value, meta, kind, width)?;
+                ctx.forced_conversion(self, &mut value, expr_meta, kind, width)?;
 
-                ctx.add_expression(Expression::Splat { size, value }, meta, body)
+                if let TypeInner::Scalar { .. } = *self.resolve_type(ctx, value, expr_meta)? {
+                    ctx.add_expression(Expression::Splat { size, value }, meta, body)
+                } else {
+                    self.vector_constructor(
+                        ctx,
+                        body,
+                        ty,
+                        size,
+                        kind,
+                        width,
+                        &[(value, expr_meta)],
+                        meta,
+                    )?
+                }
             }
             TypeInner::Scalar { kind, width } => {
                 let mut expr = value;
@@ -182,14 +181,39 @@ impl Parser {
                 (value, expr_meta),
                 meta,
             )?,
-            TypeInner::Struct { .. } | TypeInner::Array { .. } => ctx.add_expression(
-                Expression::Compose {
-                    ty,
-                    components: vec![value],
-                },
-                meta,
-                body,
-            ),
+            TypeInner::Struct { ref members, .. } => {
+                let scalar_components = members
+                    .get(0)
+                    .and_then(|member| scalar_components(&self.module.types[member.ty].inner));
+                if let Some((kind, width)) = scalar_components {
+                    ctx.implicit_conversion(self, &mut value, expr_meta, kind, width)?;
+                }
+
+                ctx.add_expression(
+                    Expression::Compose {
+                        ty,
+                        components: vec![value],
+                    },
+                    meta,
+                    body,
+                )
+            }
+
+            TypeInner::Array { base, .. } => {
+                let scalar_components = scalar_components(&self.module.types[base].inner);
+                if let Some((kind, width)) = scalar_components {
+                    ctx.implicit_conversion(self, &mut value, expr_meta, kind, width)?;
+                }
+
+                ctx.add_expression(
+                    Expression::Compose {
+                        ty,
+                        components: vec![value],
+                    },
+                    meta,
+                    body,
+                )
+            }
             _ => {
                 self.errors.push(Error {
                     kind: ErrorKind::SemanticError("Bad type constructor".into()),
@@ -218,7 +242,7 @@ impl Parser {
         // `Expression::As` doesn't support matrix width
         // casts so we need to do some extra work for casts
 
-        ctx.implicit_conversion(self, &mut value, expr_meta, ScalarKind::Float, width)?;
+        ctx.forced_conversion(self, &mut value, expr_meta, ScalarKind::Float, width)?;
         match *self.resolve_type(ctx, value, expr_meta)? {
             TypeInner::Scalar { .. } => {
                 // If a matrix is constructed with a single scalar value, then that
@@ -235,18 +259,9 @@ impl Parser {
                     },
                     meta,
                 );
-                let zero_constant = self.module.constants.fetch_or_append(
-                    Constant {
-                        name: None,
-                        specialization: None,
-                        inner: ConstantInner::Scalar {
-                            width,
-                            value: ScalarValue::Float(0.0),
-                        },
-                    },
-                    meta,
-                );
-                let zero = ctx.add_expression(Expression::Constant(zero_constant), meta, body);
+
+                let zero_literal = Literal::zero(ScalarKind::Float, width).unwrap();
+                let zero = ctx.add_expression(Expression::Literal(zero_literal), meta, body);
 
                 for i in 0..columns as u32 {
                     components.push(
@@ -254,7 +269,6 @@ impl Parser {
                             Expression::Compose {
                                 ty: vector_ty,
                                 components: (0..rows as u32)
-                                    .into_iter()
                                     .map(|r| match r == i {
                                         true => value,
                                         false => zero,
@@ -277,30 +291,12 @@ impl Parser {
                 // (column i, row j) in the argument will be initialized from there. All
                 // other components will be initialized to the identity matrix.
 
-                let zero_constant = self.module.constants.fetch_or_append(
-                    Constant {
-                        name: None,
-                        specialization: None,
-                        inner: ConstantInner::Scalar {
-                            width,
-                            value: ScalarValue::Float(0.0),
-                        },
-                    },
-                    meta,
-                );
-                let zero = ctx.add_expression(Expression::Constant(zero_constant), meta, body);
-                let one_constant = self.module.constants.fetch_or_append(
-                    Constant {
-                        name: None,
-                        specialization: None,
-                        inner: ConstantInner::Scalar {
-                            width,
-                            value: ScalarValue::Float(1.0),
-                        },
-                    },
-                    meta,
-                );
-                let one = ctx.add_expression(Expression::Constant(one_constant), meta, body);
+                let zero_literal = Literal::zero(ScalarKind::Float, width).unwrap();
+                let one_literal = Literal::one(ScalarKind::Float, width).unwrap();
+
+                let zero = ctx.add_expression(Expression::Literal(zero_literal), meta, body);
+                let one = ctx.add_expression(Expression::Literal(one_literal), meta, body);
+
                 let vector_ty = self.module.types.insert(
                     Type {
                         name: None,
@@ -329,7 +325,6 @@ impl Parser {
                         components.push(match ori_rows.cmp(&rows) {
                             Ordering::Less => {
                                 let components = (0..rows as u32)
-                                    .into_iter()
                                     .map(|r| {
                                         if r < ori_rows as u32 {
                                             ctx.add_expression(
@@ -361,25 +356,17 @@ impl Parser {
                             Ordering::Greater => ctx.vector_resize(rows, vector, meta, body),
                         })
                     } else {
-                        let vec_constant = self.module.constants.fetch_or_append(
-                            Constant {
-                                name: None,
-                                specialization: None,
-                                inner: ConstantInner::Composite {
-                                    ty: vector_ty,
-                                    components: (0..rows as u32)
-                                        .into_iter()
-                                        .map(|r| match r == i {
-                                            true => one_constant,
-                                            false => zero_constant,
-                                        })
-                                        .collect(),
-                                },
-                            },
-                            meta,
-                        );
-                        let vec =
-                            ctx.add_expression(Expression::Constant(vec_constant), meta, body);
+                        let compose_expr = Expression::Compose {
+                            ty: vector_ty,
+                            components: (0..rows as u32)
+                                .map(|r| match r == i {
+                                    true => one,
+                                    false => zero,
+                                })
+                                .collect(),
+                        };
+
+                        let vec = ctx.add_expression(compose_expr, meta, body);
 
                         components.push(vec)
                     }
@@ -389,6 +376,68 @@ impl Parser {
                 components = iter::repeat(value).take(columns as usize).collect();
             }
         }
+
+        Ok(ctx.add_expression(Expression::Compose { ty, components }, meta, body))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn vector_constructor(
+        &mut self,
+        ctx: &mut Context,
+        body: &mut Block,
+        ty: Handle<Type>,
+        size: crate::VectorSize,
+        kind: ScalarKind,
+        width: crate::Bytes,
+        args: &[(Handle<Expression>, Span)],
+        meta: Span,
+    ) -> Result<Handle<Expression>> {
+        let mut components = Vec::with_capacity(size as usize);
+
+        for (mut arg, expr_meta) in args.iter().copied() {
+            ctx.forced_conversion(self, &mut arg, expr_meta, kind, width)?;
+
+            if components.len() >= size as usize {
+                break;
+            }
+
+            match *self.resolve_type(ctx, arg, expr_meta)? {
+                TypeInner::Scalar { .. } => components.push(arg),
+                TypeInner::Matrix { rows, columns, .. } => {
+                    components.reserve(rows as usize * columns as usize);
+                    for c in 0..(columns as u32) {
+                        let base = ctx.add_expression(
+                            Expression::AccessIndex {
+                                base: arg,
+                                index: c,
+                            },
+                            expr_meta,
+                            body,
+                        );
+                        for r in 0..(rows as u32) {
+                            components.push(ctx.add_expression(
+                                Expression::AccessIndex { base, index: r },
+                                expr_meta,
+                                body,
+                            ))
+                        }
+                    }
+                }
+                TypeInner::Vector { size: ori_size, .. } => {
+                    components.reserve(ori_size as usize);
+                    for index in 0..(ori_size as u32) {
+                        components.push(ctx.add_expression(
+                            Expression::AccessIndex { base: arg, index },
+                            expr_meta,
+                            body,
+                        ))
+                    }
+                }
+                _ => components.push(arg),
+            }
+        }
+
+        components.truncate(size as usize);
 
         Ok(ctx.add_expression(Expression::Compose { ty, components }, meta, body))
     }
@@ -412,10 +461,7 @@ impl Parser {
                 let mut flattened = Vec::with_capacity(columns as usize * rows as usize);
 
                 for (mut arg, meta) in args.iter().copied() {
-                    let scalar_components = scalar_components(&self.module.types[ty].inner);
-                    if let Some((kind, width)) = scalar_components {
-                        ctx.implicit_conversion(self, &mut arg, meta, kind, width)?;
-                    }
+                    ctx.forced_conversion(self, &mut arg, meta, ScalarKind::Float, width)?;
 
                     match *self.resolve_type(ctx, arg, meta)? {
                         TypeInner::Vector { size, .. } => {
@@ -457,15 +503,34 @@ impl Parser {
                     ))
                 }
             }
-            _ => {
+            TypeInner::Vector { size, kind, width } => {
+                return self.vector_constructor(ctx, body, ty, size, kind, width, &args, meta)
+            }
+            TypeInner::Array { base, .. } => {
                 for (mut arg, meta) in args.iter().copied() {
-                    let scalar_components = scalar_components(&self.module.types[ty].inner);
+                    let scalar_components = scalar_components(&self.module.types[base].inner);
                     if let Some((kind, width)) = scalar_components {
                         ctx.implicit_conversion(self, &mut arg, meta, kind, width)?;
                     }
 
                     components.push(arg)
                 }
+            }
+            TypeInner::Struct { ref members, .. } => {
+                for ((mut arg, meta), member) in args.iter().copied().zip(members.iter()) {
+                    let scalar_components = scalar_components(&self.module.types[member.ty].inner);
+                    if let Some((kind, width)) = scalar_components {
+                        ctx.implicit_conversion(self, &mut arg, meta, kind, width)?;
+                    }
+
+                    components.push(arg)
+                }
+            }
+            _ => {
+                return Err(Error {
+                    kind: ErrorKind::SemanticError("Constructor: Too many arguments".into()),
+                    meta,
+                })
             }
         }
 
@@ -483,26 +548,26 @@ impl Parser {
         raw_args: &[Handle<HirExpr>],
         meta: Span,
     ) -> Result<Option<Handle<Expression>>> {
-        // If the name for the function hasn't yet been initialized check if any
-        // builtin can be injected.
-        if self.lookup_function.get(&name).is_none() {
-            let declaration = self.lookup_function.entry(name.clone()).or_default();
-            inject_builtin(declaration, &mut self.module, &name);
+        // Grow the typifier to be able to index it later without needing
+        // to hold the context mutably
+        for &(expr, span) in args.iter() {
+            self.typifier_grow(ctx, expr, span)?;
         }
 
-        // Check if any argument uses a double type
-        let has_double = args
-            .iter()
-            .any(|&(expr, meta)| self.resolve_type(ctx, expr, meta).map_or(false, is_double));
+        // Check if the passed arguments require any special variations
+        let mut variations = builtin_required_variations(
+            args.iter()
+                .map(|&(expr, _)| ctx.typifier.get(expr, &self.module.types)),
+        );
 
-        // At this point a declaration is guaranteed
-        let declaration = self.lookup_function.get_mut(&name).unwrap();
+        // Initiate the declaration if it wasn't previously initialized and inject builtins
+        let declaration = self.lookup_function.entry(name.clone()).or_insert_with(|| {
+            variations |= BuiltinVariations::STANDARD;
+            Default::default()
+        });
+        inject_builtin(declaration, &mut self.module, &name, variations);
 
-        if declaration.builtin && !declaration.double && has_double {
-            inject_double_builtin(declaration, &mut self.module, &name);
-        }
-
-        // Borrow again but without mutability
+        // Borrow again but without mutability, at this point a declaration is guaranteed
         let declaration = self.lookup_function.get(&name).unwrap();
 
         // Possibly contains the overload to be used in the call
@@ -515,12 +580,14 @@ impl Parser {
 
         // Iterate over all the available overloads to select either an exact match or a
         // overload which has suitable implicit conversions
-        'outer: for overload in declaration.overloads.iter() {
+        'outer: for (overload_idx, overload) in declaration.overloads.iter().enumerate() {
             // If the overload and the function call don't have the same number of arguments
             // continue to the next overload
             if args.len() != overload.parameters.len() {
                 continue;
             }
+
+            log::trace!("Testing overload {}", overload_idx);
 
             // Stores whether the current overload matches exactly the function call
             let mut exact = true;
@@ -533,7 +600,7 @@ impl Parser {
             // conversions used for querying the best overload
             let mut new_conversions = vec![Conversion::None; args.len()];
 
-            // Loop trough the overload parameters and check if the current overload is better
+            // Loop through the overload parameters and check if the current overload is better
             // compared to the previous best overload.
             for (i, overload_parameter) in overload.parameters.iter().enumerate() {
                 let call_argument = &args[i];
@@ -555,21 +622,99 @@ impl Parser {
                 let overload_param_ty = &self.module.types[*overload_parameter].inner;
                 let call_arg_ty = self.resolve_type(ctx, call_argument.0, call_argument.1)?;
 
-                // If the types match there's no need to check for conversions so continue
-                if overload_param_ty == call_arg_ty {
+                log::trace!(
+                    "Testing parameter {}\n\tOverload = {:?}\n\tCall = {:?}",
+                    i,
+                    overload_param_ty,
+                    call_arg_ty
+                );
+
+                // Storage images cannot be directly compared since while the access is part of the
+                // type in naga's IR, in glsl they are a qualifier and don't enter in the match as
+                // long as the access needed is satisfied.
+                if let (
+                    &TypeInner::Image {
+                        class:
+                            crate::ImageClass::Storage {
+                                format: overload_format,
+                                access: overload_access,
+                            },
+                        dim: overload_dim,
+                        arrayed: overload_arrayed,
+                    },
+                    &TypeInner::Image {
+                        class:
+                            crate::ImageClass::Storage {
+                                format: call_format,
+                                access: call_access,
+                            },
+                        dim: call_dim,
+                        arrayed: call_arrayed,
+                    },
+                ) = (overload_param_ty, call_arg_ty)
+                {
+                    // Images size must match otherwise the overload isn't what we want
+                    let good_size = call_dim == overload_dim && call_arrayed == overload_arrayed;
+                    // Glsl requires the formats to strictly match unless you are builtin
+                    // function overload and have not been replaced, in which case we only
+                    // check that the format scalar kind matches
+                    let good_format = overload_format == call_format
+                        || (overload.internal
+                            && ScalarKind::from(overload_format) == ScalarKind::from(call_format));
+                    if !(good_size && good_format) {
+                        continue 'outer;
+                    }
+
+                    // While storage access mismatch is an error it isn't one that causes
+                    // the overload matching to fail so we defer the error and consider
+                    // that the images match exactly
+                    if !call_access.contains(overload_access) {
+                        self.errors.push(Error {
+                            kind: ErrorKind::SemanticError(
+                                format!(
+                                    "'{name}': image needs {overload_access:?} access but only {call_access:?} was provided"
+                                )
+                                .into(),
+                            ),
+                            meta,
+                        });
+                    }
+
+                    // The images satisfy the conditions to be considered as an exact match
+                    new_conversions[i] = Conversion::Exact;
+                    continue;
+                } else if overload_param_ty == call_arg_ty {
+                    // If the types match there's no need to check for conversions so continue
                     new_conversions[i] = Conversion::Exact;
                     continue;
                 }
 
-                // If the argument is to be passed as a pointer (i.e. either `out` or
-                // `inout` where used as qualifiers) no conversion shall be performed
-                if parameter_info.qualifier.is_lhs() {
+                // Glsl defines that inout follows both the conversions for input parameters and
+                // output parameters, this means that the type must have a conversion from both the
+                // call argument to the function parameter and the function parameter to the call
+                // argument, the only way this is possible is for the conversion to be an identity
+                // (i.e. call argument = function parameter)
+                if let ParameterQualifier::InOut = parameter_info.qualifier {
                     continue 'outer;
                 }
 
-                // Try to get the type of conversion needed otherwise this overload can't be used
-                // since no conversion makes it possible so skip it
-                let conversion = match conversion(overload_param_ty, call_arg_ty) {
+                // The function call argument and the function definition
+                // parameter are not equal at this point, so we need to try
+                // implicit conversions.
+                //
+                // Now there are two cases, the argument is defined as a normal
+                // parameter (`in` or `const`), in this case an implicit
+                // conversion is made from the calling argument to the
+                // definition argument. If the parameter is `out` the
+                // opposite needs to be done, so the implicit conversion is made
+                // from the definition argument to the calling argument.
+                let maybe_conversion = if parameter_info.qualifier.is_lhs() {
+                    conversion(call_arg_ty, overload_param_ty)
+                } else {
+                    conversion(overload_param_ty, call_arg_ty)
+                };
+
+                let conversion = match maybe_conversion {
                     Some(info) => info,
                     None => continue 'outer,
                 };
@@ -601,7 +746,7 @@ impl Parser {
                 };
 
                 // Check if the best parameter corresponds to the current selected overload
-                // to pass to the next comparation, if this isn't true mark it as ambiguous
+                // to pass to the next comparison, if this isn't true mark it as ambiguous
                 match best_arg {
                     true => match superior {
                         Some(false) => ambiguous = true,
@@ -641,7 +786,7 @@ impl Parser {
                 None => {
                     ambiguous = true;
                     // Assign the new overload, this helps ensures that in this case of
-                    // amiguity the parsing won't end immediately and allow for further
+                    // ambiguity the parsing won't end immediately and allow for further
                     // collection of errors.
                     maybe_overload = Some(overload);
                 }
@@ -651,14 +796,14 @@ impl Parser {
         if ambiguous {
             self.errors.push(Error {
                 kind: ErrorKind::SemanticError(
-                    format!("Ambiguous best function for '{}'", name).into(),
+                    format!("Ambiguous best function for '{name}'").into(),
                 ),
                 meta,
             })
         }
 
         let overload = maybe_overload.ok_or_else(|| Error {
-            kind: ErrorKind::SemanticError(format!("Unknown function '{}'", name).into()),
+            kind: ErrorKind::SemanticError(format!("Unknown function '{name}'").into()),
             meta,
         })?;
 
@@ -669,99 +814,37 @@ impl Parser {
 
         let mut arguments = Vec::with_capacity(args.len());
         let mut proxy_writes = Vec::new();
-        // Iterate trough the function call arguments applying transformations as needed
-        for (parameter_info, (expr, parameter)) in parameters_info
+
+        // Iterate through the function call arguments applying transformations as needed
+        for (((parameter_info, call_argument), expr), parameter) in parameters_info
             .iter()
-            .zip(raw_args.iter().zip(parameters.iter()))
+            .zip(&args)
+            .zip(raw_args)
+            .zip(&parameters)
         {
             let (mut handle, meta) =
                 ctx.lower_expect_inner(stmt, self, *expr, parameter_info.qualifier.as_pos(), body)?;
 
             if parameter_info.qualifier.is_lhs() {
-                let (ty, value) = match *self.resolve_type(ctx, handle, meta)? {
-                    // If the argument is to be passed as a pointer but the type of the
-                    // expression returns a vector it must mean that it was for example
-                    // swizzled and it must be spilled into a local before calling
-                    // TODO: this part doesn't work because of #1385 once that's sorted out
-                    // revisit this part.
-                    TypeInner::Vector { size, kind, width } => (
-                        self.module.types.insert(
-                            Type {
-                                name: None,
-                                inner: TypeInner::Vector { size, kind, width },
-                            },
-                            Span::default(),
-                        ),
-                        handle,
-                    ),
-                    // If the argument is a pointer whose storage class isn't `Function` an
-                    // indirection trough a local variable is needed to align the storage
-                    // classes of the call argument and the overload parameter
-                    TypeInner::Pointer { base, class } if class != StorageClass::Function => (
-                        base,
-                        ctx.add_expression(
-                            Expression::Load { pointer: handle },
-                            Span::default(),
-                            body,
-                        ),
-                    ),
-                    TypeInner::ValuePointer {
-                        size,
-                        kind,
-                        width,
-                        class,
-                    } if class != StorageClass::Function => {
-                        let inner = match size {
-                            Some(size) => TypeInner::Vector { size, kind, width },
-                            None => TypeInner::Scalar { kind, width },
-                        };
+                self.process_lhs_argument(
+                    ctx,
+                    body,
+                    meta,
+                    *parameter,
+                    parameter_info,
+                    handle,
+                    call_argument,
+                    &mut proxy_writes,
+                    &mut arguments,
+                )?;
 
-                        (
-                            self.module
-                                .types
-                                .insert(Type { name: None, inner }, Span::default()),
-                            ctx.add_expression(
-                                Expression::Load { pointer: handle },
-                                Span::default(),
-                                body,
-                            ),
-                        )
-                    }
-                    _ => {
-                        arguments.push(handle);
-                        continue;
-                    }
-                };
-
-                let temp_var = ctx.locals.append(
-                    LocalVariable {
-                        name: None,
-                        ty,
-                        init: None,
-                    },
-                    Span::default(),
-                );
-                let temp_expr =
-                    ctx.add_expression(Expression::LocalVariable(temp_var), Span::default(), body);
-
-                body.push(
-                    Statement::Store {
-                        pointer: temp_expr,
-                        value,
-                    },
-                    Span::default(),
-                );
-
-                arguments.push(temp_expr);
-                // Register the temporary local to be written back to it's original
-                // place after the function call
-                proxy_writes.push((handle, temp_expr));
                 continue;
             }
 
+            let scalar_comps = scalar_components(&self.module.types[*parameter].inner);
+
             // Apply implicit conversions as needed
-            let scalar_components = scalar_components(&self.module.types[*parameter].inner);
-            if let Some((kind, width)) = scalar_components {
+            if let Some((kind, width)) = scalar_comps {
                 ctx.implicit_conversion(self, &mut handle, meta, kind, width)?;
             }
 
@@ -770,7 +853,7 @@ impl Parser {
 
         match kind {
             FunctionKind::Call(function) => {
-                ctx.emit_flush(body);
+                ctx.emit_end(body);
 
                 let result = if !is_void {
                     Some(ctx.add_expression(Expression::CallResult(function), meta, body))
@@ -790,15 +873,24 @@ impl Parser {
                 ctx.emit_start();
 
                 // Write back all the variables that were scheduled to their original place
-                for (original, pointer) in proxy_writes {
-                    let value = ctx.add_expression(Expression::Load { pointer }, meta, body);
+                for proxy_write in proxy_writes {
+                    let mut value = ctx.add_expression(
+                        Expression::Load {
+                            pointer: proxy_write.value,
+                        },
+                        meta,
+                        body,
+                    );
 
-                    ctx.emit_flush(body);
-                    ctx.emit_start();
+                    if let Some((kind, width)) = proxy_write.convert {
+                        ctx.conversion(&mut value, meta, kind, width)?;
+                    }
+
+                    ctx.emit_restart(body);
 
                     body.push(
                         Statement::Store {
-                            pointer: original,
+                            pointer: proxy_write.target,
                             value,
                         },
                         meta,
@@ -807,10 +899,174 @@ impl Parser {
 
                 Ok(result)
             }
-            FunctionKind::Macro(builtin) => builtin
-                .call(self, ctx, body, arguments.as_mut_slice(), meta)
-                .map(Some),
+            FunctionKind::Macro(builtin) => {
+                builtin.call(self, ctx, body, arguments.as_mut_slice(), meta)
+            }
         }
+    }
+
+    /// Processes a function call argument that appears in place of an output
+    /// parameter.
+    #[allow(clippy::too_many_arguments)]
+    fn process_lhs_argument(
+        &mut self,
+        ctx: &mut Context,
+        body: &mut Block,
+        meta: Span,
+        parameter_ty: Handle<Type>,
+        parameter_info: &ParameterInfo,
+        original: Handle<Expression>,
+        call_argument: &(Handle<Expression>, Span),
+        proxy_writes: &mut Vec<ProxyWrite>,
+        arguments: &mut Vec<Handle<Expression>>,
+    ) -> Result<()> {
+        let original_ty = self.resolve_type(ctx, original, meta)?;
+        let original_pointer_space = original_ty.pointer_space();
+
+        // The type of a possible spill variable needed for a proxy write
+        let mut maybe_ty = match *original_ty {
+            // If the argument is to be passed as a pointer but the type of the
+            // expression returns a vector it must mean that it was for example
+            // swizzled and it must be spilled into a local before calling
+            TypeInner::Vector { size, kind, width } => Some(self.module.types.insert(
+                Type {
+                    name: None,
+                    inner: TypeInner::Vector { size, kind, width },
+                },
+                Span::default(),
+            )),
+            // If the argument is a pointer whose address space isn't `Function`, an
+            // indirection through a local variable is needed to align the address
+            // spaces of the call argument and the overload parameter.
+            TypeInner::Pointer { base, space } if space != AddressSpace::Function => Some(base),
+            TypeInner::ValuePointer {
+                size,
+                kind,
+                width,
+                space,
+            } if space != AddressSpace::Function => {
+                let inner = match size {
+                    Some(size) => TypeInner::Vector { size, kind, width },
+                    None => TypeInner::Scalar { kind, width },
+                };
+
+                Some(
+                    self.module
+                        .types
+                        .insert(Type { name: None, inner }, Span::default()),
+                )
+            }
+            _ => None,
+        };
+
+        // Since the original expression might be a pointer and we want a value
+        // for the proxy writes, we might need to load the pointer.
+        let value = if original_pointer_space.is_some() {
+            ctx.add_expression(
+                Expression::Load { pointer: original },
+                Span::default(),
+                body,
+            )
+        } else {
+            original
+        };
+
+        let call_arg_ty = self.resolve_type(ctx, call_argument.0, call_argument.1)?;
+        let overload_param_ty = &self.module.types[parameter_ty].inner;
+        let needs_conversion = call_arg_ty != overload_param_ty;
+
+        let arg_scalar_comps = scalar_components(call_arg_ty);
+
+        // Since output parameters also allow implicit conversions from the
+        // parameter to the argument, we need to spill the conversion to a
+        // variable and create a proxy write for the original variable.
+        if needs_conversion {
+            maybe_ty = Some(parameter_ty);
+        }
+
+        if let Some(ty) = maybe_ty {
+            // Create the spill variable
+            let spill_var = ctx.locals.append(
+                LocalVariable {
+                    name: None,
+                    ty,
+                    init: None,
+                },
+                Span::default(),
+            );
+            let spill_expr =
+                ctx.add_expression(Expression::LocalVariable(spill_var), Span::default(), body);
+
+            // If the argument is also copied in we must store the value of the
+            // original variable to the spill variable.
+            if let ParameterQualifier::InOut = parameter_info.qualifier {
+                body.push(
+                    Statement::Store {
+                        pointer: spill_expr,
+                        value,
+                    },
+                    Span::default(),
+                );
+            }
+
+            // Add the spill variable as an argument to the function call
+            arguments.push(spill_expr);
+
+            let convert = if needs_conversion {
+                arg_scalar_comps
+            } else {
+                None
+            };
+
+            // Register the temporary local to be written back to it's original
+            // place after the function call
+            if let Expression::Swizzle {
+                size,
+                mut vector,
+                pattern,
+            } = ctx.expressions[original]
+            {
+                if let Expression::Load { pointer } = ctx.expressions[vector] {
+                    vector = pointer;
+                }
+
+                for (i, component) in pattern.iter().take(size as usize).enumerate() {
+                    let original = ctx.add_expression(
+                        Expression::AccessIndex {
+                            base: vector,
+                            index: *component as u32,
+                        },
+                        Span::default(),
+                        body,
+                    );
+
+                    let spill_component = ctx.add_expression(
+                        Expression::AccessIndex {
+                            base: spill_expr,
+                            index: i as u32,
+                        },
+                        Span::default(),
+                        body,
+                    );
+
+                    proxy_writes.push(ProxyWrite {
+                        target: original,
+                        value: spill_component,
+                        convert,
+                    });
+                }
+            } else {
+                proxy_writes.push(ProxyWrite {
+                    target: original,
+                    value: spill_expr,
+                    convert,
+                });
+            }
+        } else {
+            arguments.push(original);
+        }
+
+        Ok(())
     }
 
     pub(crate) fn add_function(
@@ -821,22 +1077,26 @@ impl Parser {
         mut body: Block,
         meta: Span,
     ) {
-        if self.lookup_function.get(&name).is_none() {
-            let declaration = self.lookup_function.entry(name.clone()).or_default();
-            inject_builtin(declaration, &mut self.module, &name);
-        }
-
         ensure_block_returns(&mut body);
 
         let void = result.is_none();
 
-        let &mut Parser {
+        let &mut Frontend {
             ref mut lookup_function,
             ref mut module,
             ..
         } = self;
 
-        let declaration = lookup_function.entry(name.clone()).or_default();
+        // Check if the passed arguments require any special variations
+        let mut variations =
+            builtin_required_variations(ctx.parameters.iter().map(|&arg| &module.types[arg].inner));
+
+        // Initiate the declaration if it wasn't previously initialized and inject builtins
+        let declaration = lookup_function.entry(name.clone()).or_insert_with(|| {
+            variations |= BuiltinVariations::STANDARD;
+            Default::default()
+        });
+        inject_builtin(declaration, module, &name, variations);
 
         let Context {
             expressions,
@@ -847,22 +1107,13 @@ impl Parser {
             ..
         } = ctx;
 
-        if declaration.builtin
-            && !declaration.double
-            && parameters
-                .iter()
-                .any(|ty| is_double(&module.types[*ty].inner))
-        {
-            inject_double_builtin(declaration, module, &name);
-        }
-
         let function = Function {
             name: Some(name),
             arguments,
             result,
             local_variables: locals,
             expressions,
-            named_expressions: FastHashMap::default(),
+            named_expressions: crate::NamedExpressions::default(),
             body,
         };
 
@@ -905,6 +1156,7 @@ impl Parser {
             parameters_info,
             kind: FunctionKind::Call(handle),
             defined: true,
+            internal: false,
             void,
         });
     }
@@ -916,20 +1168,24 @@ impl Parser {
         result: Option<FunctionResult>,
         meta: Span,
     ) {
-        if self.lookup_function.get(&name).is_none() {
-            let declaration = self.lookup_function.entry(name.clone()).or_default();
-            inject_builtin(declaration, &mut self.module, &name);
-        }
-
         let void = result.is_none();
 
-        let &mut Parser {
+        let &mut Frontend {
             ref mut lookup_function,
             ref mut module,
             ..
         } = self;
 
-        let declaration = lookup_function.entry(name.clone()).or_default();
+        // Check if the passed arguments require any special variations
+        let mut variations =
+            builtin_required_variations(ctx.parameters.iter().map(|&arg| &module.types[arg].inner));
+
+        // Initiate the declaration if it wasn't previously initialized and inject builtins
+        let declaration = lookup_function.entry(name.clone()).or_insert_with(|| {
+            variations |= BuiltinVariations::STANDARD;
+            Default::default()
+        });
+        inject_builtin(declaration, module, &name, variations);
 
         let Context {
             arguments,
@@ -937,15 +1193,6 @@ impl Parser {
             parameters_info,
             ..
         } = ctx;
-
-        if declaration.builtin
-            && !declaration.double
-            && parameters
-                .iter()
-                .any(|ty| is_double(&module.types[*ty].inner))
-        {
-            inject_double_builtin(declaration, module, &name);
-        }
 
         let function = Function {
             name: Some(name),
@@ -980,8 +1227,133 @@ impl Parser {
             parameters_info,
             kind: FunctionKind::Call(handle),
             defined: false,
+            internal: false,
             void,
         });
+    }
+
+    /// Helper function for building the input/output interface of the entry point
+    ///
+    /// Calls `f` with the data of the entry point argument, flattening composite types
+    /// recursively
+    ///
+    /// The passed arguments to the callback are:
+    /// - The name
+    /// - The pointer expression to the global storage
+    /// - The handle to the type of the entry point argument
+    /// - The binding of the entry point argument
+    /// - The expression arena
+    fn arg_type_walker(
+        &self,
+        name: Option<String>,
+        binding: crate::Binding,
+        pointer: Handle<Expression>,
+        ty: Handle<Type>,
+        expressions: &mut Arena<Expression>,
+        f: &mut impl FnMut(
+            Option<String>,
+            Handle<Expression>,
+            Handle<Type>,
+            crate::Binding,
+            &mut Arena<Expression>,
+        ),
+    ) {
+        match self.module.types[ty].inner {
+            // TODO: Better error reporting
+            // right now we just don't walk the array if the size isn't known at
+            // compile time and let validation catch it
+            TypeInner::Array {
+                base,
+                size: crate::ArraySize::Constant(size),
+                ..
+            } => {
+                let mut location = match binding {
+                    crate::Binding::Location { location, .. } => location,
+                    crate::Binding::BuiltIn(_) => return,
+                };
+
+                let interpolation =
+                    self.module.types[base]
+                        .inner
+                        .scalar_kind()
+                        .map(|kind| match kind {
+                            ScalarKind::Float => crate::Interpolation::Perspective,
+                            _ => crate::Interpolation::Flat,
+                        });
+
+                for index in 0..size.get() {
+                    let member_pointer = expressions.append(
+                        Expression::AccessIndex {
+                            base: pointer,
+                            index,
+                        },
+                        crate::Span::default(),
+                    );
+
+                    let binding = crate::Binding::Location {
+                        location,
+                        interpolation,
+                        sampling: None,
+                    };
+                    location += 1;
+
+                    self.arg_type_walker(
+                        name.clone(),
+                        binding,
+                        member_pointer,
+                        base,
+                        expressions,
+                        f,
+                    )
+                }
+            }
+            TypeInner::Struct { ref members, .. } => {
+                let mut location = match binding {
+                    crate::Binding::Location { location, .. } => location,
+                    crate::Binding::BuiltIn(_) => return,
+                };
+
+                for (i, member) in members.iter().enumerate() {
+                    let member_pointer = expressions.append(
+                        Expression::AccessIndex {
+                            base: pointer,
+                            index: i as u32,
+                        },
+                        crate::Span::default(),
+                    );
+
+                    let binding = match member.binding.clone() {
+                        Some(binding) => binding,
+                        None => {
+                            let interpolation = self.module.types[member.ty]
+                                .inner
+                                .scalar_kind()
+                                .map(|kind| match kind {
+                                    ScalarKind::Float => crate::Interpolation::Perspective,
+                                    _ => crate::Interpolation::Flat,
+                                });
+                            let binding = crate::Binding::Location {
+                                location,
+                                interpolation,
+                                sampling: None,
+                            };
+                            location += 1;
+                            binding
+                        }
+                    };
+
+                    self.arg_type_walker(
+                        member.name.clone(),
+                        binding,
+                        member_pointer,
+                        member.ty,
+                        expressions,
+                        f,
+                    )
+                }
+            }
+            _ => f(name, pointer, ty, binding, expressions),
+        }
     }
 
     pub(crate) fn add_entry_point(
@@ -1005,20 +1377,29 @@ impl Parser {
                 continue;
             }
 
-            let ty = self.module.global_variables[arg.handle].ty;
-            let idx = arguments.len() as u32;
-
-            arguments.push(FunctionArgument {
-                name: arg.name.clone(),
-                ty,
-                binding: Some(arg.binding.clone()),
-            });
-
             let pointer =
                 expressions.append(Expression::GlobalVariable(arg.handle), Default::default());
-            let value = expressions.append(Expression::FunctionArgument(idx), Default::default());
 
-            body.push(Statement::Store { pointer, value }, Default::default());
+            self.arg_type_walker(
+                arg.name.clone(),
+                arg.binding.clone(),
+                pointer,
+                self.module.global_variables[arg.handle].ty,
+                &mut expressions,
+                &mut |name, pointer, ty, binding, expressions| {
+                    let idx = arguments.len() as u32;
+
+                    arguments.push(FunctionArgument {
+                        name,
+                        ty,
+                        binding: Some(binding),
+                    });
+
+                    let value =
+                        expressions.append(Expression::FunctionArgument(idx), Default::default());
+                    body.push(Statement::Store { pointer, value }, Default::default());
+                },
+            )
         }
 
         body.extend_block(global_init_body);
@@ -1041,37 +1422,41 @@ impl Parser {
                 continue;
             }
 
-            let ty = self.module.global_variables[arg.handle].ty;
-
-            members.push(StructMember {
-                name: arg.name.clone(),
-                ty,
-                binding: Some(arg.binding.clone()),
-                offset: span,
-            });
-
-            span += self.module.types[ty].inner.span(&self.module.constants);
-
             let pointer =
                 expressions.append(Expression::GlobalVariable(arg.handle), Default::default());
-            let len = expressions.len();
-            let load = expressions.append(Expression::Load { pointer }, Default::default());
-            body.push(
-                Statement::Emit(expressions.range_from(len)),
-                Default::default(),
-            );
-            components.push(load)
+
+            self.arg_type_walker(
+                arg.name.clone(),
+                arg.binding.clone(),
+                pointer,
+                self.module.global_variables[arg.handle].ty,
+                &mut expressions,
+                &mut |name, pointer, ty, binding, expressions| {
+                    members.push(StructMember {
+                        name,
+                        ty,
+                        binding: Some(binding),
+                        offset: span,
+                    });
+
+                    span += self.module.types[ty].inner.size(self.module.to_ctx());
+
+                    let len = expressions.len();
+                    let load = expressions.append(Expression::Load { pointer }, Default::default());
+                    body.push(
+                        Statement::Emit(expressions.range_from(len)),
+                        Default::default(),
+                    );
+                    components.push(load)
+                },
+            )
         }
 
         let (ty, value) = if !components.is_empty() {
             let ty = self.module.types.insert(
                 Type {
                     name: None,
-                    inner: TypeInner::Struct {
-                        top_level: false,
-                        members,
-                        span,
-                    },
+                    inner: TypeInner::Struct { members, span },
                 },
                 Default::default(),
             );
@@ -1105,16 +1490,6 @@ impl Parser {
                 ..Default::default()
             },
         });
-    }
-}
-
-fn is_double(ty: &TypeInner) -> bool {
-    match *ty {
-        TypeInner::ValuePointer { kind, width, .. }
-        | TypeInner::Scalar { kind, width }
-        | TypeInner::Vector { kind, width, .. } => kind == ScalarKind::Float && width == 8,
-        TypeInner::Matrix { width, .. } => width == 8,
-        _ => false,
     }
 }
 
@@ -1195,10 +1570,49 @@ fn conversion(target: &TypeInner, source: &TypeInner) -> Option<Conversion> {
             // A conversion from a float to a double is special
             ((Float, 8), (Float, 4)) => Conversion::FloatToDouble,
             // A conversion from an integer to a float is special
-            ((Float, 4), (Sint, _)) | ((Float, 4), (Uint, _)) => Conversion::IntToFloat,
+            ((Float, 4), (Sint | Uint, _)) => Conversion::IntToFloat,
             // A conversion from an integer to a double is special
-            ((Float, 8), (Sint, _)) | ((Float, 8), (Uint, _)) => Conversion::IntToDouble,
+            ((Float, 8), (Sint | Uint, _)) => Conversion::IntToDouble,
             _ => Conversion::Other,
         },
     )
+}
+
+/// Helper method returning all the non standard builtin variations needed
+/// to process the function call with the passed arguments
+fn builtin_required_variations<'a>(args: impl Iterator<Item = &'a TypeInner>) -> BuiltinVariations {
+    let mut variations = BuiltinVariations::empty();
+
+    for ty in args {
+        match *ty {
+            TypeInner::ValuePointer { kind, width, .. }
+            | TypeInner::Scalar { kind, width }
+            | TypeInner::Vector { kind, width, .. } => {
+                if kind == ScalarKind::Float && width == 8 {
+                    variations |= BuiltinVariations::DOUBLE
+                }
+            }
+            TypeInner::Matrix { width, .. } => {
+                if width == 8 {
+                    variations |= BuiltinVariations::DOUBLE
+                }
+            }
+            TypeInner::Image {
+                dim,
+                arrayed,
+                class,
+            } => {
+                if dim == crate::ImageDimension::Cube && arrayed {
+                    variations |= BuiltinVariations::CUBE_TEXTURES_ARRAY
+                }
+
+                if dim == crate::ImageDimension::D2 && arrayed && class.is_multisampled() {
+                    variations |= BuiltinVariations::D2_MULTI_TEXTURES_ARRAY
+                }
+            }
+            _ => {}
+        }
+    }
+
+    variations
 }

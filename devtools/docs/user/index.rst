@@ -105,13 +105,13 @@ Network Monitor
 See the network requests made when a page is loaded.
 
 
-Performance Tools
+Performance Panel
 -----------------
 
-.. image:: landingpage_performance.png
+.. image:: landingpage_performance_2022.png
     :class: border
-    :target: performance
-    :alt: Performance Tools in Firefox 57 Developer Tools.
+    :target: https://profiler.firefox.com/docs/
+    :alt: Performance Panel in Firefox 103 Developer Tools.
 
 Analyze your site's general responsiveness, JavaScript, and layout performance.
 
@@ -187,6 +187,9 @@ These developer tools are also built into Firefox. Unlike the "Core Tools" above
   * - :doc:`Rulers <rulers/index>`
     - Overlay horizontal and vertical rulers on a web page
 
+  * - :doc:`Custom formatters <custom_formatters/index>`
+    - Customize the way objects are displayed within the DevTools.
+
 
 .. image:: logo-developer-quantum.png
     :class: center
@@ -211,7 +214,7 @@ If you open the developer tools using :ref:`keyboard shortcuts <keyboard-shortcu
    * - :doc:`about:debugging <about_colon_debugging/index>`
      - Debug add-ons, content tabs, and workers running in the browser.
 
-   * - :ref:`Connecting to Firefox for Android <about-color-debugging-connecting-over-the-network>`
+   * - :ref:`Connecting to Firefox for Android <about-colon-debugging-connecting-to-a-remote-device>`
      - Connect the developer tools to an instance of Firefox running on an Android device.
 
    * - :doc:`Connecting to iframes <working_with_iframes/index>`
@@ -244,7 +247,7 @@ For information on extending the Firefox DevTools, see `Extending the developer 
 Migrating from Firebug
 **********************
 
-Firebug has come to the end of its lifespan (see `Firebug lives on in Firefox DevTools <Attach the Developer Tools to the browser itself.>`_ for details of why), and we appreciate that some people will find migrating to another less familiar set of DevTools to be challenging. To ease a transition from Firebug to the Firefox developer tools, we have written a handy guide — `Migrating from Firebug <https://developer.mozilla.org/en-US/docs/Tools/Migrating_from_Firebug>`_
+Firebug has come to the end of its lifespan (see `Firebug lives on in Firefox DevTools <https://hacks.mozilla.org/2016/12/firebug-lives-on-in-firefox-devtools/>`_ for details of why), and we appreciate that some people will find migrating to another less familiar set of DevTools to be challenging. To ease a transition from Firebug to the Firefox developer tools, we have written a handy guide — :doc:`Migrating from Firebug <./migrating_from_firebug/index>`
 
 
 Contribute

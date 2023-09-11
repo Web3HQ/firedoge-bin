@@ -12,6 +12,7 @@ import android.graphics.Matrix;
 import android.graphics.RectF;
 import android.media.AudioManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
@@ -27,7 +28,12 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.ExtractedText;
 import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputContentInfo;
 import androidx.annotation.NonNull;
+import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -50,7 +56,7 @@ import org.mozilla.gecko.util.ThreadUtils;
   private static Handler sBackgroundHandler;
 
   // Managed only by notifyIMEContext; see comments in notifyIMEContext
-  private int mIMEState;
+  @IMEState private int mIMEState;
   private String mIMEActionHint = "";
   private int mLastSelectionStart;
   private int mLastSelectionEnd;
@@ -377,7 +383,7 @@ import org.mozilla.gecko.util.ThreadUtils;
 
   @TargetApi(21)
   @Override // SessionTextInput.EditableListener
-  public void updateCompositionRects(final RectF[] rects) {
+  public void updateCompositionRects(final RectF[] rects, final RectF caretRect) {
     if (!(Build.VERSION.SDK_INT >= 21)) {
       return;
     }
@@ -407,21 +413,21 @@ import org.mozilla.gecko.util.ThreadUtils;
         new Runnable() {
           @Override
           public void run() {
-            updateCompositionRectsOnUi(view, rects, composition);
+            updateCompositionRectsOnUi(view, rects, caretRect, composition);
           }
         });
   }
 
   @TargetApi(21)
   /* package */ void updateCompositionRectsOnUi(
-      final View view, final RectF[] rects, final CharSequence composition) {
+      final View view, final RectF[] rects, final RectF caretRect, final CharSequence composition) {
     if (mCursorAnchorInfoBuilder == null) {
       mCursorAnchorInfoBuilder = new CursorAnchorInfo.Builder();
     }
     mCursorAnchorInfoBuilder.reset();
 
     final Matrix matrix = new Matrix();
-    mSession.getClientToScreenMatrix(matrix);
+    mSession.getClientToScreenOffsetMatrix(matrix);
     mCursorAnchorInfoBuilder.setMatrix(matrix);
 
     for (int i = 0; i < rects.length; i++) {
@@ -435,6 +441,16 @@ import org.mozilla.gecko.util.ThreadUtils;
     }
 
     mCursorAnchorInfoBuilder.setComposingText(0, composition);
+
+    if (!caretRect.isEmpty()) {
+      // Gecko doesn't provide baseline information of caret.
+      mCursorAnchorInfoBuilder.setInsertionMarkerLocation(
+          caretRect.left,
+          caretRect.top,
+          caretRect.bottom,
+          caretRect.bottom,
+          CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION);
+    }
 
     final CursorAnchorInfo info = mCursorAnchorInfoBuilder.build();
     getView()
@@ -717,8 +733,51 @@ import org.mozilla.gecko.util.ThreadUtils;
     }
   }
 
+  @TargetApi(Build.VERSION_CODES.N_MR1)
+  @Override
+  public boolean commitContent(
+      final InputContentInfo inputContentInfo, final int flags, final Bundle opts) {
+    final boolean requestPermission =
+        ((flags & InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION) != 0);
+    if (requestPermission) {
+      try {
+        inputContentInfo.requestPermission();
+      } catch (final Exception e) {
+        Log.e(LOGTAG, "InputContentInfo.requestPermission() failed.", e);
+        return false;
+      }
+    }
+
+    try (final InputStream inputStream =
+            getView()
+                .getContext()
+                .getContentResolver()
+                .openInputStream(inputContentInfo.getContentUri());
+        final ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+      final byte[] data = new byte[4096];
+      int readed;
+      while ((readed = inputStream.read(data)) != -1) {
+        outputStream.write(data, 0, readed);
+      }
+      mEditableClient.insertImage(
+          outputStream.toByteArray(), inputContentInfo.getDescription().getMimeType(0));
+    } catch (final FileNotFoundException e) {
+      Log.e(LOGTAG, "Cannot open provider URI.", e);
+      return false;
+    } catch (final IOException e) {
+      Log.e(LOGTAG, "Cannot read/write provider URI.", e);
+      return false;
+    } finally {
+      if (requestPermission) {
+        inputContentInfo.releasePermission();
+      }
+    }
+
+    return true;
+  }
+
   @Override // SessionTextInput.EditableListener
-  public void notifyIME(final int type) {
+  public void notifyIME(final @IMENotificationType int type) {
     switch (type) {
       case NOTIFY_IME_OF_FOCUS:
         // Showing/hiding vkb is done in notifyIMEContext
@@ -731,6 +790,11 @@ import org.mozilla.gecko.util.ThreadUtils;
       case NOTIFY_IME_OF_BLUR:
         break;
 
+      case NOTIFY_IME_OF_TOKEN:
+      case NOTIFY_IME_OPEN_VKB:
+      case NOTIFY_IME_REPLY_EVENT:
+      case NOTIFY_IME_TO_CANCEL_COMPOSITION:
+      case NOTIFY_IME_TO_COMMIT_COMPOSITION:
       default:
         if (DEBUG) {
           throw new IllegalArgumentException("Unexpected NOTIFY_IME=" + type);
@@ -741,11 +805,11 @@ import org.mozilla.gecko.util.ThreadUtils;
 
   @Override // SessionTextInput.EditableListener
   public synchronized void notifyIMEContext(
-      final int state,
+      @IMEState final int state,
       final String typeHint,
       final String modeHint,
       final String actionHint,
-      final int flags) {
+      @IMEContextFlags final int flags) {
     // mIMEState and the mIME*Hint fields should only be changed by notifyIMEContext,
     // and not reset anywhere else. Usually, notifyIMEContext is called right after a
     // focus or blur, so resetting mIMEState during the focus or blur seems harmless.

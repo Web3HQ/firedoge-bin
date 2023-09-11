@@ -5,12 +5,14 @@
 
 const {
   windowGlobalTargetSpec,
-} = require("devtools/shared/specs/targets/window-global");
+} = require("resource://devtools/shared/specs/targets/window-global.js");
 const {
   FrontClassWithSpec,
   registerFront,
-} = require("devtools/shared/protocol");
-const { TargetMixin } = require("devtools/client/fronts/targets/target-mixin");
+} = require("resource://devtools/shared/protocol.js");
+const {
+  TargetMixin,
+} = require("resource://devtools/client/fronts/targets/target-mixin.js");
 
 class WindowGlobalTargetFront extends TargetMixin(
   FrontClassWithSpec(windowGlobalTargetSpec)
@@ -27,6 +29,10 @@ class WindowGlobalTargetFront extends TargetMixin(
     // used anywhere else.
     this._javascriptEnabled = null;
 
+    // If this target was retrieved via NodeFront connectToFrame, keep a
+    // reference to the parent NodeFront.
+    this._parentNodeFront = null;
+
     this._onTabNavigated = this._onTabNavigated.bind(this);
     this._onFrameUpdate = this._onFrameUpdate.bind(this);
 
@@ -38,6 +44,7 @@ class WindowGlobalTargetFront extends TargetMixin(
     this.actorID = json.actor;
     this.browsingContextID = json.browsingContextID;
     this.innerWindowId = json.innerWindowId;
+    this.processID = json.processID;
 
     // Save the full form for Target class usage.
     // Do not use `form` name to avoid colliding with protocol.js's `form` method
@@ -61,9 +68,7 @@ class WindowGlobalTargetFront extends TargetMixin(
    * Event listener for `frameUpdate` event.
    */
   _onFrameUpdate(packet) {
-    // @backward-compat { version 96 } isTopLevel was added on the server in 96, so we
-    // can simply send `packet` when 96 hits release.
-    this.emit("frame-update", { ...packet, isTopLevel: !packet.parentID });
+    this.emit("frame-update", packet);
   }
 
   /**
@@ -73,7 +78,6 @@ class WindowGlobalTargetFront extends TargetMixin(
     const event = Object.create(null);
     event.url = packet.url;
     event.title = packet.title;
-    event.nativeConsoleAPI = packet.nativeConsoleAPI;
     event.isFrameSwitching = packet.isFrameSwitching;
 
     // Keep the title unmodified when a developer toolbox switches frame
@@ -94,6 +98,14 @@ class WindowGlobalTargetFront extends TargetMixin(
     }
   }
 
+  getParentNodeFront() {
+    return this._parentNodeFront;
+  }
+
+  setParentNodeFront(nodeFront) {
+    this._parentNodeFront = nodeFront;
+  }
+
   /**
    * Set the targetFront url.
    *
@@ -110,20 +122,6 @@ class WindowGlobalTargetFront extends TargetMixin(
    */
   setTitle(title) {
     this._title = title;
-  }
-
-  // @backward-compat { version 96 } Fx 96 dropped the attach method on all but worker targets
-  //                  This can be removed once we drop 95 support
-  async attach() {
-    if (this._attach) {
-      return this._attach;
-    }
-    this._attach = (async () => {
-      const response = await super.attach();
-
-      this.targetForm.threadActor = response.threadActor;
-    })();
-    return this._attach;
   }
 
   async detach() {
@@ -159,6 +157,7 @@ class WindowGlobalTargetFront extends TargetMixin(
 
   destroy() {
     const promise = super.destroy();
+    this._parentNodeFront = null;
 
     // As detach isn't necessarily called on target's destroy
     // (it isn't for local tabs), ensure removing listeners set in constructor.

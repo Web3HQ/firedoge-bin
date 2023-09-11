@@ -10,8 +10,18 @@ const TEST_PAGE =
   ) + "dummy_page.html";
 
 async function runTest(privilegedLoad) {
-  // Test with both pref on and off
-  for (let requireUserInteraction of [true, false]) {
+  let prefVals;
+  // Test with both pref on and off, unless parent-controlled pref is enabled.
+  // This distinction can be removed once SHIP is enabled by default.
+  if (
+    Services.prefs.getBoolPref("browser.tabs.documentchannel.parent-controlled")
+  ) {
+    prefVals = [false];
+  } else {
+    prefVals = [true, false];
+  }
+
+  for (let requireUserInteraction of prefVals) {
     Services.prefs.setBoolPref(
       "browser.navigation.requireUserInteraction",
       requireUserInteraction
@@ -90,7 +100,7 @@ async function runTest(privilegedLoad) {
 // a new site from user interaction with privileged UI, e.g. through the
 // URL bar.
 add_task(async function test_urlBar() {
-  await runTest(async function(url) {
+  await runTest(async function (url) {
     info(`Loading ${url} via the URL bar.`);
     let browser = gBrowser.selectedBrowser;
     let loaded = BrowserTestUtils.browserLoaded(browser, false, url);

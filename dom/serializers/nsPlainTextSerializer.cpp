@@ -22,15 +22,16 @@
 #include "nsContentUtils.h"
 #include "nsReadableUtils.h"
 #include "nsUnicharUtils.h"
-#include "nsUnicodeProperties.h"
 #include "nsCRT.h"
 #include "mozilla/Casting.h"
-#include "mozilla/EditorUtils.h"
+#include "mozilla/TextEditor.h"
 #include "mozilla/dom/CharacterData.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/HTMLBRElement.h"
 #include "mozilla/dom/Text.h"
 #include "mozilla/intl/Segmenter.h"
+#include "mozilla/intl/UnicodeProperties.h"
+#include "nsUnicodeProperties.h"
 #include "mozilla/Span.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/StaticPrefs_converter.h"
@@ -130,7 +131,19 @@ int32_t nsPlainTextSerializer::CurrentLine::FindWrapIndexForContent(
     // mContent until we find a width less than or equal to wrap column.
     uint32_t width = 0;
     intl::LineBreakIteratorUtf16 lineBreakIter(mContent);
-    while (const Maybe<uint32_t> nextGoodSpace = lineBreakIter.Next()) {
+    while (Maybe<uint32_t> nextGoodSpace = lineBreakIter.Next()) {
+      // Trim space at the tail. UAX#14 doesn't have break opportunity for
+      // ASCII space at the tail.
+      const Maybe<uint32_t> originalNextGoodSpace = nextGoodSpace;
+      while (*nextGoodSpace > 0 &&
+             mContent.CharAt(*nextGoodSpace - 1) == 0x20) {
+        nextGoodSpace = Some(*nextGoodSpace - 1);
+      }
+      if (*nextGoodSpace == 0) {
+        // Restore the original nextGoodSpace.
+        nextGoodSpace = originalNextGoodSpace;
+      }
+
       width += GetUnicharStringWidth(Span<const char16_t>(
           mContent.get() + goodSpace, *nextGoodSpace - goodSpace));
       if (prefixwidth + width > aWrapColumn) {
@@ -148,8 +161,8 @@ int32_t nsPlainTextSerializer::CurrentLine::FindWrapIndexForContent(
   // bug 333064 for more information. We break only at ASCII spaces.
   if (aWrapColumn >= prefixwidth) {
     // Search backward from the adjusted wrap column or from the text end.
-    goodSpace = static_cast<int32_t>(
-        std::min(aWrapColumn - prefixwidth, mContent.Length() - 1));
+    goodSpace =
+        std::min<int32_t>(aWrapColumn - prefixwidth, mContent.Length() - 1);
     while (goodSpace >= 0) {
       if (nsCRT::IsAsciiSpace(mContent.CharAt(goodSpace))) {
         return goodSpace;
@@ -376,7 +389,7 @@ bool nsPlainTextSerializer::IsIgnorableRubyAnnotation(
 
 // Return true if aElement has 'display:none' or if we just don't know.
 static bool IsDisplayNone(Element* aElement) {
-  RefPtr<ComputedStyle> computedStyle =
+  RefPtr<const ComputedStyle> computedStyle =
       nsComputedDOMStyle::GetComputedStyleNoFlush(aElement);
   return !computedStyle ||
          computedStyle->StyleDisplay()->mDisplay == StyleDisplay::None;
@@ -429,13 +442,13 @@ nsPlainTextSerializer::AppendText(nsIContent* aText, int32_t aStartOffset,
 
   // Mask the text if the text node is in a password field.
   if (content->HasFlag(NS_MAYBE_MASKED)) {
-    EditorUtils::MaskString(textstr, *content->AsText(), 0, aStartOffset);
+    TextEditor::MaskString(textstr, *content->AsText(), 0, aStartOffset);
   }
 
   // We have to split the string across newlines
   // to match parser behavior
   int32_t start = 0;
-  int32_t offset = textstr.FindCharInSet("\n\r");
+  int32_t offset = textstr.FindCharInSet(u"\n\r");
   while (offset != kNotFound) {
     if (offset > start) {
       // Pass in the line
@@ -446,7 +459,7 @@ nsPlainTextSerializer::AppendText(nsIContent* aText, int32_t aStartOffset,
     DoAddText();
 
     start = offset + 1;
-    offset = textstr.FindCharInSet("\n\r", start);
+    offset = textstr.FindCharInSet(u"\n\r", start);
   }
 
   // Consume the last bit of the string if there's any left
@@ -643,13 +656,13 @@ nsresult nsPlainTextSerializer::DoOpenContainer(const nsAtom* aTag) {
     nsAutoString style;
     int32_t whitespace;
     if (NS_SUCCEEDED(GetAttributeValue(nsGkAtoms::style, style)) &&
-        (kNotFound != (whitespace = style.Find("white-space:")))) {
-      if (kNotFound != style.Find("pre-wrap", true, whitespace)) {
+        (kNotFound != (whitespace = style.Find(u"white-space:")))) {
+      if (kNotFound != style.LowerCaseFindASCII("pre-wrap", whitespace)) {
 #ifdef DEBUG_preformatted
         printf("Set mPreFormattedMail based on style pre-wrap\n");
 #endif
         mPreFormattedMail = true;
-      } else if (kNotFound != style.Find("pre", true, whitespace)) {
+      } else if (kNotFound != style.LowerCaseFindASCII("pre", whitespace)) {
 #ifdef DEBUG_preformatted
         printf("Set mPreFormattedMail based on style pre\n");
 #endif
@@ -1582,7 +1595,7 @@ void nsPlainTextSerializer::Write(const nsAString& aStr) {
   int32_t bol = 0;
   while (bol < totLen) {  // Loop over lines
     // Find a place where we may have to do whitespace compression
-    nextpos = str.FindCharInSet(" \t\n\r", bol);
+    nextpos = str.FindCharInSet(u" \t\n\r", bol);
 #ifdef DEBUG_wrapping
     nsAutoString remaining;
     str.Right(remaining, totLen - bol);
@@ -1654,7 +1667,7 @@ void nsPlainTextSerializer::Write(const nsAString& aStr) {
 nsresult nsPlainTextSerializer::GetAttributeValue(const nsAtom* aName,
                                                   nsString& aValueRet) const {
   if (mElement) {
-    if (mElement->GetAttr(kNameSpaceID_None, aName, aValueRet)) {
+    if (mElement->GetAttr(aName, aValueRet)) {
       return NS_OK;
     }
   }
@@ -1669,8 +1682,11 @@ nsresult nsPlainTextSerializer::GetAttributeValue(const nsAtom* aName,
 bool nsPlainTextSerializer::IsCurrentNodeConverted() const {
   nsAutoString value;
   nsresult rv = GetAttributeValue(nsGkAtoms::_class, value);
-  return (NS_SUCCEEDED(rv) && (value.EqualsIgnoreCase("moz-txt", 7) ||
-                               value.EqualsIgnoreCase("\"moz-txt", 8)));
+  return (NS_SUCCEEDED(rv) &&
+          (StringBeginsWith(value, u"moz-txt"_ns,
+                            nsASCIICaseInsensitiveStringComparator) ||
+           StringBeginsWith(value, u"\"moz-txt"_ns,
+                            nsASCIICaseInsensitiveStringComparator)));
 }
 
 // static
@@ -1688,7 +1704,7 @@ bool nsPlainTextSerializer::IsElementPreformatted() const {
 }
 
 bool nsPlainTextSerializer::IsElementPreformatted(Element* aElement) {
-  RefPtr<ComputedStyle> computedStyle =
+  RefPtr<const ComputedStyle> computedStyle =
       nsComputedDOMStyle::GetComputedStyleNoFlush(aElement);
   if (computedStyle) {
     const nsStyleText* textStyle = computedStyle->StyleText();
@@ -1699,7 +1715,7 @@ bool nsPlainTextSerializer::IsElementPreformatted(Element* aElement) {
 }
 
 bool nsPlainTextSerializer::IsCssBlockLevelElement(Element* aElement) {
-  RefPtr<ComputedStyle> computedStyle =
+  RefPtr<const ComputedStyle> computedStyle =
       nsComputedDOMStyle::GetComputedStyleNoFlush(aElement);
   if (computedStyle) {
     const nsStyleDisplay* displayStyle = computedStyle->StyleDisplay();
@@ -1803,14 +1819,14 @@ int32_t GetUnicharWidth(char32_t aCh) {
     return 1;
   }
 
-  return unicode::IsEastAsianWidthFW(aCh) ? 2 : 1;
+  return intl::UnicodeProperties::IsEastAsianWidthFW(aCh) ? 2 : 1;
 }
 
 int32_t GetUnicharStringWidth(Span<const char16_t> aString) {
   int32_t width = 0;
   for (auto iter = aString.begin(); iter != aString.end(); ++iter) {
     char32_t c = *iter;
-    if (NS_IS_HIGH_SURROGATE(c) && iter != aString.end() &&
+    if (NS_IS_HIGH_SURROGATE(c) && (iter + 1) != aString.end() &&
         NS_IS_LOW_SURROGATE(*(iter + 1))) {
       c = SURROGATE_TO_UCS4(c, *++iter);
     }

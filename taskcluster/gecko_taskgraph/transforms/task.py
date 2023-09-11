@@ -9,40 +9,38 @@ complexities of worker implementations, scopes, and treeherder annotations.
 """
 
 
+import datetime
 import hashlib
 import os
 import re
 import time
-from copy import deepcopy
 
 import attr
-
 from mozbuild.util import memoize
-from gecko_taskgraph.util.attributes import TRUNK_PROJECTS
-from gecko_taskgraph.util.hash import hash_path
-from gecko_taskgraph.util.treeherder import split_symbol
-from gecko_taskgraph.transforms.base import TransformSequence
-from gecko_taskgraph.util.keyed_by import evaluate_keyed_by
-from gecko_taskgraph.util.schema import (
-    validate_schema,
+from taskcluster.utils import fromNow
+from taskgraph.transforms.base import TransformSequence
+from taskgraph.util.keyed_by import evaluate_keyed_by
+from taskgraph.util.schema import (
     Schema,
     optionally_keyed_by,
     resolve_keyed_by,
     taskref_or_string,
+    validate_schema,
 )
-from gecko_taskgraph.optimize.schema import OptimizationSchema
-from gecko_taskgraph.util.partners import get_partners_to_be_published
-from gecko_taskgraph.util.scriptworker import (
-    BALROG_ACTIONS,
-    get_release_config,
-)
-from gecko_taskgraph.util.signed_artifacts import get_signed_artifacts
-from gecko_taskgraph.util.time import value_of
-from gecko_taskgraph.util.workertypes import worker_type_implementation
-from voluptuous import Any, Required, Optional, Extra, Match, All, NotIn
+from taskgraph.util.treeherder import split_symbol
+from voluptuous import All, Any, Extra, Match, NotIn, Optional, Required
+
 from gecko_taskgraph import GECKO, MAX_DEPENDENCIES
-from ..util import docker as dockerutil
-from ..util.workertypes import get_worker_type
+from gecko_taskgraph.optimize.schema import OptimizationSchema
+from gecko_taskgraph.transforms.job.common import get_expiration
+from gecko_taskgraph.util import docker as dockerutil
+from gecko_taskgraph.util.attributes import TRUNK_PROJECTS, is_try, release_level
+from gecko_taskgraph.util.copy_task import copy_task
+from gecko_taskgraph.util.hash import hash_path
+from gecko_taskgraph.util.partners import get_partners_to_be_published
+from gecko_taskgraph.util.scriptworker import BALROG_ACTIONS, get_release_config
+from gecko_taskgraph.util.signed_artifacts import get_signed_artifacts
+from gecko_taskgraph.util.workertypes import get_worker_type, worker_type_implementation
 
 RUN_TASK = os.path.join(GECKO, "taskcluster", "scripts", "run-task")
 
@@ -95,6 +93,7 @@ task_description_schema = Schema(
         # (e.g., "14 days").  Defaults are set based on the project.
         Optional("expires-after"): str,
         Optional("deadline-after"): str,
+        Optional("expiration-policy"): str,
         # custom routes for this task; the default treeherder routes will be added
         # automatically
         Optional("routes"): [str],
@@ -192,8 +191,6 @@ task_description_schema = Schema(
         "worker-type": str,
         # Whether the job should use sccache compiler caching.
         Required("use-sccache"): bool,
-        # Set of artifacts relevant to release tasks
-        Optional("release-artifacts"): [str],
         # information specific to the worker implementation that will run this task
         Optional("worker"): {
             Required("implementation"): str,
@@ -294,6 +291,7 @@ def payload_builder(name, schema):
     )
 
     def wrap(func):
+        assert name not in payload_builders, f"duplicate payload builder name {name}"
         payload_builders[name] = PayloadBuilder(schema, func)
         return func
 
@@ -306,6 +304,7 @@ index_builders = {}
 
 def index_builder(name):
     def wrap(func):
+        assert name not in index_builders, f"duplicate index builder name {name}"
         index_builders[name] = func
         return func
 
@@ -392,6 +391,7 @@ def verify_index(config, index):
                 # name of the produced artifact (root of the names for
                 # type=directory)
                 "name": str,
+                "expires-after": str,
             }
         ],
         # environment variables
@@ -406,7 +406,7 @@ def verify_index(config, index):
         # the exit status code(s) that indicates the caches used by the task
         # should be purged
         Optional("purge-caches-exit-status"): [int],
-        # Wether any artifacts are assigned to this worker
+        # Whether any artifacts are assigned to this worker
         Optional("skip-artifacts"): bool,
     },
 )
@@ -464,7 +464,9 @@ def build_docker_worker_payload(config, task, task_def):
     if worker.get("docker-in-docker"):
         features["dind"] = True
 
-    if task.get("use-sccache"):
+    # Never enable sccache on the toolchains repo, as there is no benefit from it
+    # because each push uses a different compiler.
+    if task.get("use-sccache") and config.params["project"] != "toolchains":
         features["taskclusterProxy"] = True
         task_def["scopes"].append(
             "assume:project:taskcluster:{trust_domain}:level-{level}-sccache-buckets".format(
@@ -521,11 +523,19 @@ def build_docker_worker_payload(config, task, task_def):
 
     if "artifacts" in worker:
         artifacts = {}
+        expires_policy = get_expiration(
+            config, task.get("expiration-policy", "default")
+        )
+        now = datetime.datetime.utcnow()
+        task_exp = task_def["expires"]["relative-datestamp"]
+        task_exp_from_now = fromNow(task_exp)
         for artifact in worker["artifacts"]:
+            art_exp = artifact.get("expires-after", expires_policy)
+            expires = art_exp if fromNow(art_exp, now) < task_exp_from_now else task_exp
             artifacts[artifact["name"]] = {
                 "path": artifact["path"],
                 "type": artifact["type"],
-                "expires": task_def["expires"],  # always expire with the task
+                "expires": {"relative-datestamp": expires},
             }
         payload["artifacts"] = artifacts
 
@@ -577,7 +587,7 @@ def build_docker_worker_payload(config, task, task_def):
         else:
             suffix = cache_version
 
-        skip_untrusted = config.params.is_try() or level == 1
+        skip_untrusted = is_try(config.params) or level == 1
 
         for cache in worker["caches"]:
             # Some caches aren't enabled in environments where we can't
@@ -639,6 +649,7 @@ def build_docker_worker_payload(config, task, task_def):
                 "path": str,
                 # if not specified, path is used for artifact name
                 Optional("name"): str,
+                "expires-after": str,
             }
         ],
         # Directories and/or files to be mounted.
@@ -724,7 +735,9 @@ def build_generic_worker_payload(config, task, task_def):
 
     env = worker.get("env", {})
 
-    if task.get("use-sccache"):
+    # Never enable sccache on the toolchains repo, as there is no benefit from it
+    # because each push uses a different compiler.
+    if task.get("use-sccache") and config.params["project"] != "toolchains":
         features["taskclusterProxy"] = True
         task_def["scopes"].append(
             "assume:project:taskcluster:{trust_domain}:level-{level}-sccache-buckets".format(
@@ -744,10 +757,18 @@ def build_generic_worker_payload(config, task, task_def):
 
     artifacts = []
 
+    expires_policy = get_expiration(config, task.get("expiration-policy", "default"))
+    now = datetime.datetime.utcnow()
+    task_exp = task_def["expires"]["relative-datestamp"]
+    task_exp_from_now = fromNow(task_exp)
     for artifact in worker.get("artifacts", []):
+        art_exp = artifact.get("expires-after", expires_policy)
+        task_exp = task_def["expires"]["relative-datestamp"]
+        expires = art_exp if fromNow(art_exp, now) < task_exp_from_now else task_exp
         a = {
             "path": artifact["path"],
             "type": artifact["type"],
+            "expires": {"relative-datestamp": expires},
         }
         if "name" in artifact:
             a["name"] = artifact["name"]
@@ -760,7 +781,7 @@ def build_generic_worker_payload(config, task, task_def):
     #   * 'cache-name' -> 'cacheName'
     #   * 'task-id'    -> 'taskId'
     # All other key names are already suitable, and don't need renaming.
-    mounts = deepcopy(worker.get("mounts", []))
+    mounts = copy_task(worker.get("mounts", []))
     for mount in mounts:
         if "cache-name" in mount:
             mount["cacheName"] = "{trust_domain}-level-{level}-{name}".format(
@@ -829,13 +850,15 @@ def build_generic_worker_payload(config, task, task_def):
         ],
         # behavior for mac iscript
         Optional("mac-behavior"): Any(
-            "mac_notarize_part_1",
-            "mac_notarize_part_3",
+            "apple_notarization",
             "mac_sign_and_pkg",
             "mac_geckodriver",
+            "mac_notarize_geckodriver",
             "mac_single_file",
+            "mac_notarize_single_file",
         ),
         Optional("entitlements-url"): str,
+        Optional("requirements-plist-url"): str,
     },
 )
 def build_scriptworker_signing_payload(config, task, task_def):
@@ -847,9 +870,11 @@ def build_scriptworker_signing_payload(config, task, task_def):
     }
     if worker.get("mac-behavior"):
         task_def["payload"]["behavior"] = worker["mac-behavior"]
-        if worker.get("entitlements-url"):
-            task_def["payload"]["entitlements-url"] = worker["entitlements-url"]
-    artifacts = set(task.get("release-artifacts", []))
+        for attribute in ("entitlements-url", "requirements-plist-url"):
+            if worker.get(attribute):
+                task_def["payload"][attribute] = worker[attribute]
+
+    artifacts = set(task.setdefault("attributes", {}).get("release_artifacts", []))
     for upstream_artifact in worker["upstream-artifacts"]:
         for path in upstream_artifact["paths"]:
             artifacts.update(
@@ -859,22 +884,7 @@ def build_scriptworker_signing_payload(config, task, task_def):
                     behavior=worker.get("mac-behavior"),
                 )
             )
-    task["release-artifacts"] = list(artifacts)
-
-
-@payload_builder(
-    "notarization-poller",
-    schema={
-        Required("uuid-manifest"): taskref_or_string,
-        # the maximum time to run, in seconds
-        Optional("max-run-time"): int,
-    },
-)
-def notarization_poller_payload(config, task, task_def):
-    worker = task["worker"]
-    task_def["payload"] = {"uuid_manifest": worker["uuid-manifest"]}
-    if "max-run-time" in worker:
-        task_def["payload"]["maxRunTime"] = worker["max-run-time"]
+    task["attributes"]["release_artifacts"] = sorted(list(artifacts))
 
 
 @payload_builder(
@@ -960,6 +970,21 @@ def build_beetmover_push_to_release_payload(config, task, task_def):
 
 
 @payload_builder(
+    "beetmover-import-from-gcs-to-artifact-registry",
+    schema={
+        Required("max-run-time"): int,
+        Required("gcs-sources"): [str],
+        Required("product"): str,
+    },
+)
+def build_import_from_gcs_to_artifact_registry_payload(config, task, task_def):
+    task_def["payload"] = {
+        "product": task["worker"]["product"],
+        "gcs_sources": task["worker"]["gcs-sources"],
+    }
+
+
+@payload_builder(
     "beetmover-maven",
     schema={
         Required("max-run-time"): int,
@@ -1029,6 +1054,9 @@ def build_beetmover_maven_payload(config, task, task_def):
         Optional("force-fallback-mapping-update"): optionally_keyed_by(
             "release-type", "beta-number", bool
         ),
+        Optional("pin-channels"): optionally_keyed_by(
+            "release-type", "release-level", [str]
+        ),
         # list of artifact URLs for the artifacts that should be beetmoved
         Optional("upstream-artifacts"): [
             {
@@ -1072,6 +1100,7 @@ def build_balrog_payload(config, task, task_def):
             "rules-to-update",
             "background-rate",
             "force-fallback-mapping-update",
+            "pin-channels",
         ):
             if prop in worker:
                 resolve_keyed_by(
@@ -1080,7 +1109,7 @@ def build_balrog_payload(config, task, task_def):
                     task["description"],
                     **{
                         "release-type": config.params["release_type"],
-                        "release-level": config.params.release_level(),
+                        "release-level": release_level(config.params["project"]),
                         "beta-number": beta_number,
                     },
                 )
@@ -1095,6 +1124,7 @@ def build_balrog_payload(config, task, task_def):
             "blob-suffix",
             "complete-mar-filename-pattern",
             "complete-mar-bouncer-product-pattern",
+            "pin-channels",
         ):
             if prop in worker:
                 task_def["payload"][prop.replace("-", "_")] = worker[prop]
@@ -1199,6 +1229,31 @@ def build_push_flatpak_payload(config, task, task_def):
         "channel": worker["channel"],
         "upstreamArtifacts": worker["upstream-artifacts"],
     }
+
+
+@payload_builder(
+    "push-msix",
+    schema={
+        Required("channel"): str,
+        Optional("publish-mode"): str,
+        Required("upstream-artifacts"): [
+            {
+                Required("taskId"): taskref_or_string,
+                Required("taskType"): str,
+                Required("paths"): [str],
+            }
+        ],
+    },
+)
+def build_push_msix_payload(config, task, task_def):
+    worker = task["worker"]
+
+    task_def["payload"] = {
+        "channel": worker["channel"],
+        "upstreamArtifacts": worker["upstream-artifacts"],
+    }
+    if worker.get("publish-mode"):
+        task_def["payload"]["publishMode"] = worker["publish-mode"]
 
 
 @payload_builder(
@@ -1398,17 +1453,20 @@ def set_implementation(config, tasks):
     Set the worker implementation based on the worker-type alias.
     """
     for task in tasks:
+        worker = task.setdefault("worker", {})
         if "implementation" in task["worker"]:
             yield task
             continue
 
-        impl, os = worker_type_implementation(config.graph_config, task["worker-type"])
+        impl, os = worker_type_implementation(
+            config.graph_config, config.params, task["worker-type"]
+        )
 
         tags = task.setdefault("tags", {})
         tags["worker-implementation"] = impl
         if os:
-            task["tags"]["os"] = os
-        worker = task.setdefault("worker", {})
+            tags["os"] = os
+
         worker["implementation"] = impl
         if os:
             worker["os"] = os
@@ -1453,6 +1511,7 @@ def set_defaults(config, tasks):
             "beetmover",
             "beetmover-push-to-release",
             "beetmover-maven",
+            "beetmover-import-from-gcs-to-artifact-registry",
         ):
             worker.setdefault("max-run-time", 600)
         elif worker["implementation"] == "push-apk":
@@ -1462,14 +1521,33 @@ def set_defaults(config, tasks):
 
 
 @transforms.add
+def setup_raptor(config, tasks):
+    """Add options that are specific to raptor jobs (identified by suite=raptor).
+
+    This variant uses a separate set of transforms for manipulating the tests at the
+    task-level. Currently only used for setting the taskcluster proxy setting and
+    the scopes required for perftest secrets.
+    """
+    from gecko_taskgraph.transforms.test.raptor import (
+        task_transforms as raptor_transforms,
+    )
+
+    for task in tasks:
+        if task.get("extra", {}).get("suite", "") != "raptor":
+            yield task
+            continue
+
+        yield from raptor_transforms(config, [task])
+
+
+@transforms.add
 def task_name_from_label(config, tasks):
     for task in tasks:
+        taskname = task.pop("name", None)
         if "label" not in task:
-            if "name" not in task:
+            if taskname is None:
                 raise Exception("task has neither a name nor a label")
-            task["label"] = "{}-{}".format(config.kind, task["name"])
-        if task.get("name"):
-            del task["name"]
+            task["label"] = "{}-{}".format(config.kind, taskname)
         yield task
 
 
@@ -1723,6 +1801,10 @@ def add_index_routes(config, tasks):
 def try_task_config_env(config, tasks):
     """Set environment variables in the task."""
     env = config.params["try_task_config"].get("env")
+    if not env:
+        yield from tasks
+        return
+
     # Find all implementations that have an 'env' key.
     implementations = {
         name
@@ -1730,7 +1812,7 @@ def try_task_config_env(config, tasks):
         if "env" in builder.schema.schema
     }
     for task in tasks:
-        if env and task["worker"]["implementation"] in implementations:
+        if task["worker"]["implementation"] in implementations:
             task["worker"]["env"].update(env)
         yield task
 
@@ -1739,8 +1821,12 @@ def try_task_config_env(config, tasks):
 def try_task_config_chemspill_prio(config, tasks):
     """Increase the priority from lowest and very-low -> low, but leave others unchanged."""
     chemspill_prio = config.params["try_task_config"].get("chemspill-prio")
+    if not chemspill_prio:
+        yield from tasks
+        return
+
     for task in tasks:
-        if chemspill_prio and task["priority"] in ("lowest", "very-low"):
+        if task["priority"] in ("lowest", "very-low"):
             task["priority"] = "low"
         yield task
 
@@ -1757,23 +1843,47 @@ def try_task_config_routes(config, tasks):
 
 
 @transforms.add
+def set_task_and_artifact_expiry(config, jobs):
+    """Set the default expiry for tasks and their artifacts.
+
+    These values are read from ci/config.yml
+    """
+    now = datetime.datetime.utcnow()
+    for job in jobs:
+        expires = get_expiration(config, job.get("expiration-policy", "default"))
+        job_expiry = job.setdefault("expires-after", expires)
+        job_expiry_from_now = fromNow(job_expiry)
+
+        for artifact in job["worker"].get("artifacts", ()):
+            artifact_expiry = artifact.setdefault("expires-after", expires)
+
+            # By using > instead of >=, there's a chance of mismatch
+            #   where the artifact expires sooner than the task.
+            #   There is no chance, however, of mismatch where artifacts
+            #   expire _after_ the task.
+            # Currently this leads to some build tasks having logs
+            #   that expire in 1 year while the task expires in 3 years.
+            if fromNow(artifact_expiry, now) > job_expiry_from_now:
+                artifact["expires-after"] = job_expiry
+
+        yield job
+
+
+@transforms.add
 def build_task(config, tasks):
     for task in tasks:
         level = str(config.params["level"])
 
-        if task["worker-type"] in config.params["try_task_config"].get(
-            "worker-overrides", {}
-        ):
-            worker_pool = config.params["try_task_config"]["worker-overrides"][
-                task["worker-type"]
-            ]
+        task_worker_type = task["worker-type"]
+        worker_overrides = config.params["try_task_config"].get("worker-overrides", {})
+        if task_worker_type in worker_overrides:
+            worker_pool = worker_overrides[task_worker_type]
             provisioner_id, worker_type = worker_pool.split("/", 1)
         else:
             provisioner_id, worker_type = get_worker_type(
                 config.graph_config,
-                task["worker-type"],
-                level=level,
-                release_level=config.params.release_level(),
+                config.params,
+                task_worker_type,
             )
         task["worker-type"] = "/".join([provisioner_id, worker_type])
         project = config.params["project"]
@@ -1824,14 +1934,6 @@ def build_task(config, tasks):
                     branch_rev,
                 )
             )
-
-        if "expires-after" in task:
-            if config.params.is_try():
-                delta = value_of(task["expires-after"])
-                if delta.days >= 28:
-                    task["expires-after"] = "28 days"
-        else:
-            task["expires-after"] = "28 days" if config.params.is_try() else "1 year"
 
         if "deadline-after" not in task:
             task["deadline-after"] = "1 day"
@@ -1961,7 +2063,6 @@ def build_task(config, tasks):
             "soft-dependencies": task.get("soft-dependencies", []),
             "attributes": attributes,
             "optimization": task.get("optimization", None),
-            "release-artifacts": task.get("release-artifacts", []),
         }
 
 
@@ -1983,7 +2084,7 @@ def chain_of_trust(config, tasks):
 @transforms.add
 def check_task_identifiers(config, tasks):
     """Ensures that all tasks have well defined identifiers:
-    ^[a-zA-Z0-9_-]{1,38}$
+    ``^[a-zA-Z0-9_-]{1,38}$``
     """
     e = re.compile("^[a-zA-Z0-9_-]{1,38}$")
     for task in tasks:

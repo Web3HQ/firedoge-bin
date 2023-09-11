@@ -16,7 +16,8 @@ add_task(async function test_broadcasting_filter_top_browsing_context() {
   const tab2 = await addTab(FRAME_TEST_PAGE);
   const browsingContext2 = tab2.linkedBrowser.browsingContext;
 
-  const contextsForTab2 = tab2.linkedBrowser.browsingContext.getAllBrowsingContextsInSubtree();
+  const contextsForTab2 =
+    tab2.linkedBrowser.browsingContext.getAllBrowsingContextsInSubtree();
   is(
     contextsForTab2.length,
     4,
@@ -75,7 +76,7 @@ function sendBroadcastForTopBrowsingContext(
     "testBroadcast",
     {},
     {
-      type: CONTEXT_DESCRIPTOR_TYPES.TOP_BROWSING_CONTEXT,
+      type: ContextDescriptorType.TopBrowsingContext,
       id: topBrowsingContext.browserId,
     },
     rootMessageHandler

@@ -8,7 +8,9 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/UniquePtr.h"
 
+#include "gc/AllocKind.h"
 #include "gc/Cell.h"
+#include "gc/GCInternals.h"
 #include "gc/GCRuntime.h"
 #include "js/ArrayBuffer.h"  // JS::NewArrayBuffer
 #include "js/experimental/TypedData.h"
@@ -16,6 +18,7 @@
 #include "js/RootingAPI.h"
 #include "jsapi-tests/tests.h"
 #include "vm/Runtime.h"
+#include "vm/TypedArrayObject.h"
 
 #include "vm/JSContext-inl.h"
 
@@ -103,8 +106,11 @@ JS::ArrayBuffer CreateTenuredGCThing(JSContext* cx) {
 
 template <>
 JS::Uint8Array CreateTenuredGCThing(JSContext* cx) {
-  gc::AutoSuppressNurseryCellAlloc suppress(cx);
-  return JS::Uint8Array::create(cx, 100);
+  // Use internal APIs that lets us specify the InitialHeap so we can ensure
+  // that this is tenured.
+  JSObject* obj = js::NewUint8ArrayWithLength(cx, 100, gc::Heap::Tenured);
+  MOZ_ASSERT(!IsInsideNursery(obj));
+  return JS::Uint8Array::fromObject(obj);
 }
 
 template <typename T>
@@ -253,10 +259,7 @@ bool TestHeapPostBarrierConstruction() {
 
     // Disable the check that GCPtrs are only destroyed by the GC. What happens
     // on destruction isn't relevant to the test.
-    mozilla::Maybe<gc::AutoSetThreadIsFinalizing> threadIsFinalizing;
-    if constexpr (std::is_same_v<std::remove_const_t<W>, GCPtr<T>>) {
-      threadIsFinalizing.emplace();
-    }
+    gc::AutoSetThreadIsFinalizing threadIsFinalizing;
 
     js_delete(testStruct);
   }
@@ -500,7 +503,8 @@ bool CallDuringIncrementalGC(uint32_t mode, F&& f) {
 
   JS_SetGCZeal(cx, mode, 0);
   JS::PrepareZoneForGC(cx, js::GetContextZone(cx));
-  JS::StartIncrementalGC(cx, JS::GCOptions(), JS::GCReason::DEBUG_GC, BudgetMS);
+  js::SliceBudget budget{TimeBudget(BudgetMS)};
+  JS::StartIncrementalGC(cx, JS::GCOptions(), JS::GCReason::DEBUG_GC, budget);
   CHECK(JS::IsIncrementalGCInProgress(cx));
 
   CHECK(f());
@@ -783,8 +787,8 @@ bool TestGCPtrCopyConstruction(JSObject* obj) {
     // Let us destroy GCPtrs ourselves for testing purposes.
     gc::AutoSetThreadIsFinalizing threadIsFinalizing;
 
-    GCPtrObject wrapper1(obj);
-    GCPtrObject wrapper2(wrapper1);
+    GCPtr<JSObject*> wrapper1(obj);
+    GCPtr<JSObject*> wrapper2(wrapper1);
     CHECK(wrapper1 == obj);
     CHECK(wrapper2 == obj);
     CHECK(GetColor(obj) == gc::CellColor::White);
@@ -804,8 +808,8 @@ bool TestGCPtrAssignment(JSObject* obj1, JSObject* obj2) {
     // Let us destroy GCPtrs ourselves for testing purposes.
     gc::AutoSetThreadIsFinalizing threadIsFinalizing;
 
-    GCPtrObject wrapper1(obj1);
-    GCPtrObject wrapper2(obj2);
+    GCPtr<JSObject*> wrapper1(obj1);
+    GCPtr<JSObject*> wrapper2(obj2);
 
     wrapper2 = wrapper1;
 

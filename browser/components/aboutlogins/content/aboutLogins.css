@@ -2,16 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+html {
+   position: fixed;
+}
 html,
 body {
   height: 100%;
+  width: 100%;
 }
 
 body {
   --sidebar-width: 320px;
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;
-  grid-template-areas: "logins main";
+  grid-template-rows: auto 1fr;
 }
 
 @media (max-width: 830px) {
@@ -23,8 +27,8 @@ body {
 header {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   background-color: var(--in-content-page-background);
-  border-bottom: 1px solid var(--in-content-border-color);
   padding-block: 9px;
   padding-inline-start: 16px;
   padding-inline-end: 23px;
@@ -44,7 +48,7 @@ menu-button {
 }
 
 login-list {
-  grid-area: logins;
+  grid-row: 1/4;
 }
 
 :root:not(.initialized) login-intro,
@@ -58,7 +62,6 @@ login-item[data-editing="true"] + login-intro,
   display: none;
 }
 
-
 .heading-wrapper {
   display: flex;
   justify-content: center;
@@ -66,28 +69,31 @@ login-item[data-editing="true"] + login-intro,
   font-weight: 600;
 }
 
-body > section {
-  grid-area: main;
-}
-
-:root:not(.official-branding) #branding-logo {
-  visibility: hidden;
-}
-
-:root:not(.master-password-auth-required) #master-password-required-overlay {
+:root:not(.primary-password-auth-required) #primary-password-required-overlay {
   display: none;
 }
 
-.master-password-auth-required > body > header,
-.master-password-auth-required > body > login-list,
-.master-password-auth-required > body > section {
+.primary-password-auth-required > body > header,
+.primary-password-auth-required > body > login-list,
+.primary-password-auth-required > body > section {
   filter: blur(2px)
 }
 
-#master-password-required-overlay {
+#primary-password-required-overlay {
   z-index: 1;
   position: fixed;
   width: 100vw;
   height: 100vh;
   background-color: rgba(0,0,0,0.2);
+}
+
+body > section {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow-y: hidden;
+  overflow-x: auto;
+}
+
+login-intro {
+  overflow-y: scroll;
 }

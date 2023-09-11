@@ -43,7 +43,7 @@ typedef struct Dav1dTask Dav1dTask;
 #include "src/cdf.h"
 #include "src/data.h"
 #include "src/env.h"
-#include "src/film_grain.h"
+#include "src/filmgrain.h"
 #include "src/intra_edge.h"
 #include "src/ipred.h"
 #include "src/itx.h"
@@ -73,6 +73,22 @@ struct Dav1dTileGroup {
     int start, end;
 };
 
+enum TaskType {
+    DAV1D_TASK_TYPE_INIT,
+    DAV1D_TASK_TYPE_INIT_CDF,
+    DAV1D_TASK_TYPE_TILE_ENTROPY,
+    DAV1D_TASK_TYPE_ENTROPY_PROGRESS,
+    DAV1D_TASK_TYPE_TILE_RECONSTRUCTION,
+    DAV1D_TASK_TYPE_DEBLOCK_COLS,
+    DAV1D_TASK_TYPE_DEBLOCK_ROWS,
+    DAV1D_TASK_TYPE_CDEF,
+    DAV1D_TASK_TYPE_SUPER_RESOLUTION,
+    DAV1D_TASK_TYPE_LOOP_RESTORATION,
+    DAV1D_TASK_TYPE_RECONSTRUCTION_PROGRESS,
+    DAV1D_TASK_TYPE_FG_PREP,
+    DAV1D_TASK_TYPE_FG_APPLY,
+};
+
 struct Dav1dContext {
     Dav1dFrameContext *fc;
     unsigned n_fc;
@@ -99,10 +115,11 @@ struct Dav1dContext {
     Dav1dMasteringDisplay *mastering_display;
     Dav1dRef *itut_t35_ref;
     Dav1dITUTT35 *itut_t35;
+    int n_itut_t35;
 
     // decoded output picture queue
     Dav1dData in;
-    Dav1dPicture out;
+    Dav1dThreadPicture out, cache;
     // dummy is a pointer to prevent compiler errors about atomic_load()
     // not taking const arguments
     atomic_int flush_mem, *flush;
@@ -123,6 +140,24 @@ struct Dav1dContext {
         // See src/thread_task.c:reset_task_cur().
         atomic_uint reset_task_cur;
         atomic_int cond_signaled;
+        struct {
+            int exec;
+            pthread_cond_t cond;
+            const Dav1dPicture *in;
+            Dav1dPicture *out;
+            enum TaskType type;
+            atomic_int progress[2]; /* [0]=started, [1]=completed */
+            union {
+                struct {
+                    ALIGN(int8_t grain_lut_8bpc[3][GRAIN_HEIGHT + 1][GRAIN_WIDTH], 16);
+                    ALIGN(uint8_t scaling_8bpc[3][256], 64);
+                };
+                struct {
+                    ALIGN(int16_t grain_lut_16bpc[3][GRAIN_HEIGHT + 1][GRAIN_WIDTH], 16);
+                    ALIGN(uint8_t scaling_16bpc[3][4096], 64);
+                };
+            };
+        } delayed_fg;
         int inited;
     } task_thread;
 
@@ -141,40 +176,27 @@ struct Dav1dContext {
     Dav1dDSPContext dsp[3 /* 8, 10, 12 bits/component */];
     Dav1dRefmvsDSPContext refmvs_dsp;
 
-    // tree to keep track of which edges are available
-    struct {
-        EdgeNode *root[2 /* BL_128X128 vs. BL_64X64 */];
-        EdgeBranch branch_sb128[1 + 4 + 16 + 64];
-        EdgeBranch branch_sb64[1 + 4 + 16];
-        EdgeTip tip_sb128[256];
-        EdgeTip tip_sb64[64];
-    } intra_edge;
-
     Dav1dPicAllocator allocator;
     int apply_grain;
     int operating_point;
     unsigned operating_point_idc;
     int all_layers;
+    int max_spatial_id;
     unsigned frame_size_limit;
+    int strict_std_compliance;
+    int output_invisible_frames;
+    enum Dav1dInloopFilterType inloop_filters;
+    enum Dav1dDecodeFrameType decode_frame_type;
     int drain;
     enum PictureFlags frame_flags;
     enum Dav1dEventFlags event_flags;
+    Dav1dDataProps cached_error_props;
+    int cached_error;
 
     Dav1dLogger logger;
 
     Dav1dMemPool *picture_pool;
-};
-
-enum TaskType {
-    DAV1D_TASK_TYPE_INIT,
-    DAV1D_TASK_TYPE_TILE_ENTROPY,
-    DAV1D_TASK_TYPE_TILE_RECONSTRUCTION,
-    DAV1D_TASK_TYPE_DEBLOCK_COLS,
-    DAV1D_TASK_TYPE_DEBLOCK_ROWS,
-    DAV1D_TASK_TYPE_CDEF,
-    DAV1D_TASK_TYPE_SUPER_RESOLUTION,
-    DAV1D_TASK_TYPE_LOOP_RESTORATION,
-    DAV1D_TASK_TYPE_ENTROPY_PROGRESS,
+    Dav1dMemPool *pic_ctx_pool;
 };
 
 struct Dav1dTask {
@@ -183,7 +205,7 @@ struct Dav1dTask {
     int sby;                    // sbrow
 
     // task dependencies
-    int recon_progress, deblock_progress, cdef_progress, lr_progress;
+    int recon_progress, deblock_progress;
     int deps_skip;
     struct Dav1dTask *next; // only used in task queue
 };
@@ -226,7 +248,7 @@ struct Dav1dFrameContext {
         filter_sbrow_fn filter_sbrow;
         filter_sbrow_fn filter_sbrow_deblock_cols;
         filter_sbrow_fn filter_sbrow_deblock_rows;
-        filter_sbrow_fn filter_sbrow_cdef;
+        void (*filter_sbrow_cdef)(Dav1dTaskContext *tc, int sby);
         filter_sbrow_fn filter_sbrow_resize;
         filter_sbrow_fn filter_sbrow_lr;
         backup_ipred_edge_fn backup_ipred_edge;
@@ -247,19 +269,18 @@ struct Dav1dFrameContext {
 
     struct {
         int next_tile_row[2 /* 0: reconstruction, 1: entropy */];
-        int entropy_progress;
-        atomic_int deblock_progress, cdef_progress, lr_progress; // in sby units
+        atomic_int entropy_progress;
+        atomic_int deblock_progress; // in sby units
+        atomic_uint *frame_progress, *copy_lpf_progress;
         // indexed using t->by * f->b4_stride + t->bx
         Av1Block *b;
-        struct CodedBlockInfo {
-            int16_t eob[3 /* plane */];
-            uint8_t txtp[3 /* plane */];
-        } *cbi;
+        int16_t (*cbi)[3 /* plane */]; /* bits 0-4: txtp, bits 5-15: eob */
         // indexed using (t->by >> 1) * (f->b4_stride >> 1) + (t->bx >> 1)
         uint16_t (*pal)[3 /* plane */][8 /* idx */];
         // iterated over inside tile state
         uint8_t *pal_idx;
         coef *cf;
+        int prog_sz;
         int pal_sz, pal_idx_sz, cf_sz;
         // start offsets per tile
         int *tile_start_off;
@@ -270,41 +291,51 @@ struct Dav1dFrameContext {
         uint8_t (*level)[4];
         Av1Filter *mask;
         Av1Restoration *lr_mask;
-        int top_pre_cdef_toggle;
-        int mask_sz /* w*h */, lr_mask_sz, cdef_line_sz[2] /* stride */;
-        size_t lr_plane_sz; /* w*sbh*4*is_sb128 if n_tc > 1, else w*12 */
+        int mask_sz /* w*h */, lr_mask_sz;
+        int cdef_buf_plane_sz[2]; /* stride*sbh*4 */
+        int cdef_buf_sbh;
+        int lr_buf_plane_sz[2]; /* (stride*sbh*4) << sb128 if n_tc > 1, else stride*4 */
         int re_sz /* h */;
         ALIGN(Av1FilterLUT lim_lut, 16);
         int last_sharpness;
         uint8_t lvl[8 /* seg_id */][4 /* dir */][8 /* ref */][2 /* is_gmv */];
         uint8_t *tx_lpf_right_edge[2];
-        uint8_t *cdef_line_buf;
+        uint8_t *cdef_line_buf, *lr_line_buf;
         pixel *cdef_line[2 /* pre, post */][3 /* plane */];
+        pixel *cdef_lpf_line[3 /* plane */];
         pixel *lr_lpf_line[3 /* plane */];
 
         // in-loop filter per-frame state keeping
         uint8_t *start_of_tile_row;
         int start_of_tile_row_sz;
+        int need_cdef_lpf_copy;
         pixel *p[3], *sr_p[3];
-        Av1Filter *mask_ptr, *prev_mask_ptr;
         int restore_planes; // enum LrRestorePlanes
     } lf;
 
     struct {
+        pthread_mutex_t lock;
         pthread_cond_t cond;
         struct TaskThreadData *ttd;
         struct Dav1dTask *tasks, *tile_tasks[2], init_task;
         int num_tasks, num_tile_tasks;
-        int done[2];
+        atomic_int init_done;
+        atomic_int done[2];
+        int retval;
         int update_set; // whether we need to update CDF reference
         atomic_int error;
-        int task_counter;
+        atomic_int task_counter;
         struct Dav1dTask *task_head, *task_tail;
         // Points to the task directly before the cur pointer in the queue.
         // This cur pointer is theoretical here, we actually keep track of the
         // "prev_t" variable. This is needed to not loose the tasks in
         // [head;cur-1] when picking one for execution.
         struct Dav1dTask *task_cur_prev;
+        struct { // async task insertion
+            atomic_int merge;
+            pthread_mutex_t lock;
+            Dav1dTask *head, *tail;
+        } pending_tasks;
     } task_thread;
 
     // threading (refer to tc[] for per-thread things)
@@ -351,7 +382,8 @@ struct Dav1dTaskContext {
     Dav1dTileState *ts;
     int bx, by;
     BlockContext l, *a;
-    ALIGN(union, 32) {
+    refmvs_tile rt;
+    ALIGN(union, 64) {
         int16_t cf_8bpc [32 * 32];
         int32_t cf_16bpc[32 * 32];
     };
@@ -359,8 +391,6 @@ struct Dav1dTaskContext {
     // which would make copy/assign operations slightly faster?
     uint16_t al_pal[2 /* a/l */][32 /* bx/y4 */][3 /* plane */][8 /* palette_idx */];
     uint8_t pal_sz_uv[2 /* a/l */][32 /* bx4/by4 */];
-    uint8_t txtp_map[32 * 32]; // inter-only
-    refmvs_tile rt;
     ALIGN(union, 64) {
         struct {
             union {
@@ -385,10 +415,13 @@ struct Dav1dTaskContext {
                     uint8_t pal_ctx[64];
                 };
             };
-            int16_t ac[32 * 32];
+            union {
+                int16_t ac[32 * 32]; // intra-only
+                uint8_t txtp_map[32 * 32]; // inter-only
+            };
             uint8_t pal_idx[2 * 64 * 64];
             uint16_t pal[3 /* plane */][8 /* palette_idx */];
-            ALIGN(union, 32) {
+            ALIGN(union, 64) {
                 struct {
                     uint8_t interintra_8bpc[64 * 64];
                     uint8_t edge_8bpc[257];
@@ -403,6 +436,7 @@ struct Dav1dTaskContext {
 
     Dav1dWarpedMotionParams warpmv;
     Av1Filter *lf_mask;
+    int top_pre_cdef_toggle;
     int8_t *cur_sb_cdef_idx_ptr;
     // for chroma sub8x8, we need to know the filter for all 4 subblocks in
     // a 4x4 area, but the top/left one can go out of cache already, so this

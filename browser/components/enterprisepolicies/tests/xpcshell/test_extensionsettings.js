@@ -2,11 +2,11 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 "use strict";
 
-const { AddonTestUtils } = ChromeUtils.import(
-  "resource://testing-common/AddonTestUtils.jsm"
+const { AddonTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/AddonTestUtils.sys.mjs"
 );
-const { AddonManager } = ChromeUtils.import(
-  "resource://gre/modules/AddonManager.jsm"
+const { AddonManager } = ChromeUtils.importESModule(
+  "resource://gre/modules/AddonManager.sys.mjs"
 );
 
 AddonTestUtils.init(this);
@@ -26,7 +26,7 @@ add_task(async function setup() {
 
   let webExtensionFile = AddonTestUtils.createTempWebExtensionFile({
     manifest: {
-      applications: {
+      browser_specific_settings: {
         gecko: {
           id: addonID,
         },
@@ -198,10 +198,38 @@ add_task(async function test_addon_normalinstalled() {
   await addon.uninstall();
 });
 
+add_task(async function test_extensionsettings_string() {
+  await setupPolicyEngineWithJson({
+    policies: {
+      ExtensionSettings: '{"*": {"installation_mode": "blocked"}}',
+    },
+  });
+
+  let extensionSettings = Services.policies.getExtensionSettings("*");
+  equal(extensionSettings.installation_mode, "blocked");
+});
+
+add_task(async function test_extensionsettings_string() {
+  let restrictedDomains = Services.prefs.getCharPref(
+    "extensions.webextensions.restrictedDomains"
+  );
+  await setupPolicyEngineWithJson({
+    policies: {
+      ExtensionSettings:
+        '{"*": {"restricted_domains": ["example.com","example.org"]}}',
+    },
+  });
+
+  let newRestrictedDomains = Services.prefs.getCharPref(
+    "extensions.webextensions.restrictedDomains"
+  );
+  equal(newRestrictedDomains, restrictedDomains + ",example.com,example.org");
+});
+
 add_task(async function test_theme() {
   let themeFile = AddonTestUtils.createTempWebExtensionFile({
     manifest: {
-      applications: {
+      browser_specific_settings: {
         gecko: {
           id: themeID,
         },

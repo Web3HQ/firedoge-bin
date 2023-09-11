@@ -7,6 +7,7 @@
 #ifndef jit_CacheIRCompiler_h
 #define jit_CacheIRCompiler_h
 
+#include "mozilla/Casting.h"
 #include "mozilla/Maybe.h"
 
 #include "jit/CacheIR.h"
@@ -14,6 +15,7 @@
 #include "jit/CacheIRWriter.h"
 #include "jit/JitOptions.h"
 #include "jit/MacroAssembler.h"
+#include "jit/PerfSpewer.h"
 #include "jit/SharedICRegisters.h"
 #include "js/ScalarType.h"  // js::Scalar::Type
 
@@ -741,7 +743,7 @@ class MOZ_RAII CacheIRCompiler {
 
   enum class Mode { Baseline, Ion };
 
-  bool preparedForVMCall_;
+  bool enteredStubFrame_;
 
   bool isBaseline();
   bool isIon();
@@ -772,11 +774,13 @@ class MOZ_RAII CacheIRCompiler {
 
   StubFieldPolicy stubFieldPolicy_;
 
-  CacheIRCompiler(JSContext* cx, const CacheIRWriter& writer,
-                  uint32_t stubDataOffset, Mode mode, StubFieldPolicy policy)
-      : preparedForVMCall_(false),
+  CacheIRCompiler(JSContext* cx, TempAllocator& alloc,
+                  const CacheIRWriter& writer, uint32_t stubDataOffset,
+                  Mode mode, StubFieldPolicy policy)
+      : enteredStubFrame_(false),
         cx_(cx),
         writer_(writer),
+        masm(cx, alloc),
         allocator(writer_),
         liveFloatRegs_(FloatRegisterSet::All()),
         mode_(mode),
@@ -803,9 +807,6 @@ class MOZ_RAII CacheIRCompiler {
     return JitOptions.spectreObjectMitigations &&
            !allocator.isDeadAfterInstruction(objId);
   }
-
-  void emitRegisterEnumerator(Register enumeratorsList, Register iter,
-                              Register scratch);
 
  private:
   void emitPostBarrierShared(Register obj, const ConstantOrRegister& val,
@@ -860,22 +861,28 @@ class MOZ_RAII CacheIRCompiler {
                                                         IntPtrOperandId indexId,
                                                         uint32_t valueId);
 
+  void emitActivateIterator(Register objBeingIterated, Register iterObject,
+                            Register nativeIter, Register scratch,
+                            Register scratch2, uint32_t enumeratorsAddrOffset);
+
   CACHE_IR_COMPILER_SHARED_GENERATED
 
   void emitLoadStubField(StubFieldOffset val, Register dest);
   void emitLoadStubFieldConstant(StubFieldOffset val, Register dest);
 
   void emitLoadValueStubField(StubFieldOffset val, ValueOperand dest);
+  void emitLoadDoubleValueStubField(StubFieldOffset val, ValueOperand dest,
+                                    FloatRegister scratch);
 
   uintptr_t readStubWord(uint32_t offset, StubField::Type type) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
     MOZ_ASSERT((offset % sizeof(uintptr_t)) == 0);
-    return writer_.readStubFieldForIon(offset, type).asWord();
+    return writer_.readStubField(offset, type).asWord();
   }
   uint64_t readStubInt64(uint32_t offset, StubField::Type type) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
     MOZ_ASSERT((offset % sizeof(uintptr_t)) == 0);
-    return writer_.readStubFieldForIon(offset, type).asInt64();
+    return writer_.readStubField(offset, type).asInt64();
   }
   int32_t int32StubField(uint32_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
@@ -889,18 +896,36 @@ class MOZ_RAII CacheIRCompiler {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
     return (Shape*)readStubWord(offset, StubField::Type::Shape);
   }
-  GetterSetter* getterSetterStubField(uint32_t offset) {
+  Shape* weakShapeStubField(uint32_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
-    return (GetterSetter*)readStubWord(offset, StubField::Type::GetterSetter);
+    Shape* shape = (Shape*)readStubWord(offset, StubField::Type::WeakShape);
+    gc::ReadBarrier(shape);
+    return shape;
+  }
+  GetterSetter* weakGetterSetterStubField(uint32_t offset) {
+    MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
+    GetterSetter* gs =
+        (GetterSetter*)readStubWord(offset, StubField::Type::WeakGetterSetter);
+    gc::ReadBarrier(gs);
+    return gs;
   }
   JSObject* objectStubField(uint32_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
     return (JSObject*)readStubWord(offset, StubField::Type::JSObject);
   }
+  JSObject* weakObjectStubField(uint32_t offset) {
+    MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
+    return (JSObject*)readStubWord(offset, StubField::Type::WeakObject);
+  }
   Value valueStubField(uint32_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
     uint64_t raw = readStubInt64(offset, StubField::Type::Value);
     return Value::fromRawBits(raw);
+  }
+  double doubleStubField(uint32_t offset) {
+    MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
+    uint64_t raw = readStubInt64(offset, StubField::Type::Double);
+    return mozilla::BitwiseCast<double>(raw);
   }
   JSString* stringStubField(uint32_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
@@ -913,6 +938,13 @@ class MOZ_RAII CacheIRCompiler {
   JS::Compartment* compartmentStubField(uint32_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
     return (JS::Compartment*)readStubWord(offset, StubField::Type::RawPointer);
+  }
+  BaseScript* weakBaseScriptStubField(uint32_t offset) {
+    MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
+    BaseScript* script =
+        (BaseScript*)readStubWord(offset, StubField::Type::WeakBaseScript);
+    gc::ReadBarrier(script);
+    return script;
   }
   const JSClass* classStubField(uintptr_t offset) {
     MOZ_ASSERT(stubFieldPolicy_ == StubFieldPolicy::Constant);
@@ -935,7 +967,6 @@ class MOZ_RAII CacheIRCompiler {
   void assertFloatRegisterAvailable(FloatRegister reg);
 #endif
 
- public:
   void callVMInternal(MacroAssembler& masm, VMFunctionId id);
   template <typename Fn, Fn fn>
   void callVM(MacroAssembler& masm);
@@ -975,8 +1006,6 @@ class MOZ_RAII AutoOutputRegister {
   operator TypedOrValueRegister() const { return output_; }
 };
 
-enum class CallCanGC { CanGC, CanNotGC };
-
 // Instructions that have to perform a callVM require a stub frame. Call its
 // enter() and leave() methods to enter/leave the stub frame.
 // Hoisted from jit/BaselineCacheIRCompiler.cpp. See there for method
@@ -993,9 +1022,11 @@ class MOZ_RAII AutoStubFrame {
  public:
   explicit AutoStubFrame(BaselineCacheIRCompiler& compiler);
 
-  void enter(MacroAssembler& masm, Register scratch,
-             CallCanGC canGC = CallCanGC::CanGC);
-  void leave(MacroAssembler& masm, bool calledIntoIon = false);
+  void enter(MacroAssembler& masm, Register scratch);
+  void leave(MacroAssembler& masm);
+  void storeTracedValue(MacroAssembler& masm, ValueOperand val);
+  void loadTracedValue(MacroAssembler& masm, uint8_t slotIndex,
+                       ValueOperand result);
 
 #ifdef DEBUG
   ~AutoStubFrame();
@@ -1074,6 +1105,7 @@ class MOZ_RAII AutoScratchRegisterMaybeOutputType {
 
   void operator=(const AutoScratchRegisterMaybeOutputType&) = delete;
 
+  Register get() const { return scratchReg_; }
   operator Register() const { return scratchReg_; }
 };
 
@@ -1211,28 +1243,31 @@ class MOZ_RAII AutoAvailableFloatRegister {
 
 // See the 'Sharing Baseline stub code' comment in CacheIR.h for a description
 // of this class.
+//
+// CacheIRStubInfo has a trailing variable-length array of bytes. The memory
+// layout is as follows:
+//
+//   Item             | Offset
+//   -----------------+--------------------------------------
+//   CacheIRStubInfo  | 0
+//   CacheIR bytecode | sizeof(CacheIRStubInfo)
+//   Stub field types | sizeof(CacheIRStubInfo) + codeLength_
+//
+// The array of stub field types is terminated by StubField::Type::Limit.
 class CacheIRStubInfo {
-  // These fields don't require 8 bits, but GCC complains if these fields are
-  // smaller than the size of the enums.
-  CacheKind kind_ : 8;
-  ICStubEngine engine_ : 8;
-  bool makesGCCalls_ : 1;
+  uint32_t codeLength_;
+  CacheKind kind_;
+  ICStubEngine engine_;
   uint8_t stubDataOffset_;
-
-  const uint8_t* code_;
-  uint32_t length_;
-  const uint8_t* fieldTypes_;
+  bool makesGCCalls_;
 
   CacheIRStubInfo(CacheKind kind, ICStubEngine engine, bool makesGCCalls,
-                  uint32_t stubDataOffset, const uint8_t* code,
-                  uint32_t codeLength, const uint8_t* fieldTypes)
-      : kind_(kind),
+                  uint32_t stubDataOffset, uint32_t codeLength)
+      : codeLength_(codeLength),
+        kind_(kind),
         engine_(engine),
-        makesGCCalls_(makesGCCalls),
         stubDataOffset_(stubDataOffset),
-        code_(code),
-        length_(codeLength),
-        fieldTypes_(fieldTypes) {
+        makesGCCalls_(makesGCCalls) {
     MOZ_ASSERT(kind_ == kind, "Kind must fit in bitfield");
     MOZ_ASSERT(engine_ == engine, "Engine must fit in bitfield");
     MOZ_ASSERT(stubDataOffset_ == stubDataOffset,
@@ -1247,14 +1282,18 @@ class CacheIRStubInfo {
   ICStubEngine engine() const { return engine_; }
   bool makesGCCalls() const { return makesGCCalls_; }
 
-  const uint8_t* code() const { return code_; }
-  uint32_t codeLength() const { return length_; }
+  const uint8_t* code() const {
+    return reinterpret_cast<const uint8_t*>(this) + sizeof(CacheIRStubInfo);
+  }
+  uint32_t codeLength() const { return codeLength_; }
   uint32_t stubDataOffset() const { return stubDataOffset_; }
 
   size_t stubDataSize() const;
 
   StubField::Type fieldType(uint32_t i) const {
-    return (StubField::Type)fieldTypes_[i];
+    static_assert(sizeof(StubField::Type) == sizeof(uint8_t));
+    const uint8_t* fieldTypes = code() + codeLength_;
+    return static_cast<StubField::Type>(fieldTypes[i]);
   }
 
   static CacheIRStubInfo* New(CacheKind kind, ICStubEngine engine,
@@ -1284,6 +1323,10 @@ class CacheIRStubInfo {
 
 template <typename T>
 void TraceCacheIRStub(JSTracer* trc, T* stub, const CacheIRStubInfo* stubInfo);
+
+template <typename T>
+bool TraceWeakCacheIRStub(JSTracer* trc, T* stub,
+                          const CacheIRStubInfo* stubInfo);
 
 }  // namespace jit
 }  // namespace js

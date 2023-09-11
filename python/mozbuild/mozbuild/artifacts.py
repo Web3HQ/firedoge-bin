@@ -27,14 +27,11 @@ This module performs the following steps:
   so we don't have to mount DMG files frequently.
 
 This module requires certain modules be importable from the ambient Python
-environment.  |mach artifact| ensures these modules are available, but other
+environment.  ``mach artifact`` ensures these modules are available, but other
 consumers will need to arrange this themselves.
 """
 
 
-from __future__ import absolute_import, print_function, unicode_literals
-
-import buildconfig
 import collections
 import functools
 import glob
@@ -43,36 +40,32 @@ import operator
 import os
 import pickle
 import re
-import requests
 import shutil
-import six
 import stat
 import subprocess
 import tarfile
 import tempfile
-import six.moves.urllib_parse as urlparse
 import zipfile
 from contextlib import contextmanager
 from io import BufferedReader
+from urllib.parse import urlparse
 
-import pylru
-from gecko_taskgraph.util.taskcluster import (
-    find_task_id,
-    get_artifact_url,
-    list_artifacts,
-)
-
-from mach.util import UserError
-
-from mozbuild.artifact_cache import ArtifactCache
-from mozbuild.artifact_builds import JOB_CHOICES
-from mozbuild.util import ensureParentDir, FileAvoidWrite, mkdir
+import buildconfig
 import mozinstall
+import mozpack.path as mozpath
+import pylru
+import requests
+import six
+from mach.util import UserError
+from mozpack import executables
 from mozpack.files import JarFinder, TarFinder
 from mozpack.mozjar import JarReader, JarWriter
 from mozpack.packager.unpack import UnpackFinder
-import mozpack.path as mozpath
-from mozpack import executables
+from taskgraph.util.taskcluster import find_task_id, get_artifact_url, list_artifacts
+
+from mozbuild.artifact_builds import JOB_CHOICES
+from mozbuild.artifact_cache import ArtifactCache
+from mozbuild.util import FileAvoidWrite, ensureParentDir, mkdir
 
 # Number of candidate pushheads to cache per parent changeset.
 NUM_PUSHHEADS_TO_QUERY_PER_PARENT = 50
@@ -107,7 +100,8 @@ class ArtifactJob(object):
     ]
     # The list below list should be updated when we have new ESRs.
     esr_candidate_trees = [
-        "releases/mozilla-esr91",
+        "releases/mozilla-esr102",
+        "releases/mozilla-esr115",
     ]
     try_tree = "try"
 
@@ -120,6 +114,7 @@ class ArtifactJob(object):
         ("bin/BadCertAndPinningServer", ("bin", "bin")),
         ("bin/DelegatedCredentialsServer", ("bin", "bin")),
         ("bin/EncryptedClientHelloServer", ("bin", "bin")),
+        ("bin/FaultyServer", ("bin", "bin")),
         ("bin/GenerateOCSPResponse", ("bin", "bin")),
         ("bin/OCSPStaplingServer", ("bin", "bin")),
         ("bin/SanctionsTestServer", ("bin", "bin")),
@@ -129,16 +124,42 @@ class ArtifactJob(object):
         ("bin/screentopng", ("bin", "bin")),
         ("bin/ssltunnel", ("bin", "bin")),
         ("bin/xpcshell", ("bin", "bin")),
+        ("bin/plugin-container", ("bin", "bin")),
         ("bin/http3server", ("bin", "bin")),
         ("bin/plugins/gmp-*/*/*", ("bin/plugins", "bin")),
         ("bin/plugins/*", ("bin/plugins", "plugins")),
-        ("bin/components/*.xpt", ("bin/components", "bin/components")),
     }
 
     # We can tell our input is a test archive by this suffix, which happens to
     # be the same across platforms.
     _test_zip_archive_suffix = ".common.tests.zip"
     _test_tar_archive_suffix = ".common.tests.tar.gz"
+
+    # A map of extra archives to fetch and unpack.  An extra archive might
+    # include optional build output to incorporate into the local artifact
+    # build.  Test archives and crashreporter symbols could be extra archives
+    # but they require special handling; this mechanism is generic and intended
+    # only for the simplest cases.
+    #
+    # Each suffix key matches a candidate archive (i.e., an artifact produced by
+    # an upstream build).  Each value is itself a dictionary that must contain
+    # the following keys:
+    #
+    # - `description`: a purely informational string description.
+    # - `src_prefix`: entry names in the archive with leading `src_prefix` will
+    #   have the prefix stripped.
+    # - `dest_prefix`: entry names in the archive will have `dest_prefix`
+    #   prepended.
+    #
+    # The entries in the archive, suitably renamed, will be extracted into `dist`.
+    _extra_archives = {
+        ".xpt_artifacts.zip": {
+            "description": "XPT Artifacts",
+            "src_prefix": "",
+            "dest_prefix": "xpt_artifacts",
+        },
+    }
+    _extra_archive_suffixes = tuple(sorted(_extra_archives.keys()))
 
     def __init__(
         self,
@@ -153,11 +174,11 @@ class ArtifactJob(object):
         self._tests_re = None
         if download_tests:
             self._tests_re = re.compile(
-                r"public/build/(en-US/)?target\.common\.tests\.(zip|tar\.gz)"
+                r"public/build/(en-US/)?target\.common\.tests\.(zip|tar\.gz)$"
             )
         self._maven_zip_re = None
         if download_maven_zip:
-            self._maven_zip_re = re.compile(r"public/build/target\.maven\.zip")
+            self._maven_zip_re = re.compile(r"public/build/target\.maven\.zip$")
         self._log = log
         self._substs = substs
         self._symbols_archive_suffix = None
@@ -193,6 +214,8 @@ class ArtifactJob(object):
                 self._symbols_archive_suffix
             ):
                 yield name
+            elif name.endswith(ArtifactJob._extra_archive_suffixes):
+                yield name
             else:
                 self.log(
                     logging.DEBUG,
@@ -225,6 +248,8 @@ class ArtifactJob(object):
             self._symbols_archive_suffix
         ):
             return self.process_symbols_archive(filename, processed_filename)
+        if filename.endswith(ArtifactJob._extra_archive_suffixes):
+            return self.process_extra_archive(filename, processed_filename)
         return self.process_package_artifact(filename, processed_filename)
 
     def process_package_artifact(self, filename, processed_filename):
@@ -376,6 +401,43 @@ class ArtifactJob(object):
                 )
                 writer.add(destpath.encode("utf-8"), entry)
 
+    def process_extra_archive(self, filename, processed_filename):
+        for suffix, extra_archive in ArtifactJob._extra_archives.items():
+            if filename.endswith(suffix):
+                self.log(
+                    logging.INFO,
+                    "artifact",
+                    {"filename": filename, "description": extra_archive["description"]},
+                    '"{filename}" is a recognized extra archive ({description})',
+                )
+                break
+        else:
+            raise ValueError('"{}" is not a recognized extra archive!'.format(filename))
+
+        src_prefix = extra_archive["src_prefix"]
+        dest_prefix = extra_archive["dest_prefix"]
+
+        with self.get_writer(file=processed_filename, compress_level=5) as writer:
+            for filename, entry in self.iter_artifact_archive(filename):
+                if not filename.startswith(src_prefix):
+                    self.log(
+                        logging.DEBUG,
+                        "artifact",
+                        {"filename": filename, "src_prefix": src_prefix},
+                        "Skipping extra archive item {filename} "
+                        "that does not start with {src_prefix}",
+                    )
+                    continue
+                destpath = mozpath.relpath(filename, src_prefix)
+                destpath = mozpath.join(dest_prefix, destpath)
+                self.log(
+                    logging.INFO,
+                    "artifact",
+                    {"destpath": destpath},
+                    "Adding {destpath} to processed archive",
+                )
+                writer.add(destpath.encode("utf-8"), entry)
+
     def iter_artifact_archive(self, filename):
         if filename.endswith(".zip"):
             reader = JarReader(filename)
@@ -405,9 +467,10 @@ class ArtifactJob(object):
         return self._candidate_trees
 
     def select_candidate_trees(self):
+        source_repo = buildconfig.substs.get("MOZ_SOURCE_REPO", "")
         version_display = buildconfig.substs.get("MOZ_APP_VERSION_DISPLAY")
 
-        if "esr" in version_display:
+        if "esr" in version_display or "esr" in source_repo:
             return self.esr_candidate_trees
         elif re.search("a\d+$", version_display):
             return self.nightly_candidate_trees
@@ -418,7 +481,7 @@ class ArtifactJob(object):
 
 
 class AndroidArtifactJob(ArtifactJob):
-    package_re = r"public/build/geckoview_example\.apk"
+    package_re = r"public/build/geckoview_example\.apk$"
     product = "mobile"
 
     package_artifact_patterns = {"**/*.so"}
@@ -483,7 +546,7 @@ class AndroidArtifactJob(ArtifactJob):
 
 
 class LinuxArtifactJob(ArtifactJob):
-    package_re = r"public/build/target\.tar\.bz2"
+    package_re = r"public/build/target\.tar\.bz2$"
     product = "firefox"
 
     _package_artifact_patterns = {
@@ -495,7 +558,12 @@ class LinuxArtifactJob(ArtifactJob):
         "{product}/pingsender",
         "{product}/plugin-container",
         "{product}/updater",
+        "{product}/glxtest",
+        "{product}/v4l2test",
+        "{product}/vaapitest",
         "{product}/**/*.so",
+        # Preserve signatures when present.
+        "{product}/**/*.sig",
     }
 
     @property
@@ -556,7 +624,10 @@ class ResignJarWriter(JarWriter):
                     shutil.copyfileobj(data, tmp)
                     tmp.close()
                     self._job.log(
-                        logging.DEBUG, "artifact", {"path": name}, "Re-signing {path}"
+                        logging.DEBUG,
+                        "artifact",
+                        {"path": name.decode("utf-8")},
+                        "Re-signing {path}",
                     )
                     subprocess.check_call(
                         ["codesign", "-s", "-", "-f", tmp.name],
@@ -570,7 +641,7 @@ class ResignJarWriter(JarWriter):
 
 
 class MacArtifactJob(ArtifactJob):
-    package_re = r"public/build/target\.dmg"
+    package_re = r"public/build/target\.dmg$"
     product = "firefox"
 
     # These get copied into dist/bin without the path, so "root/a/b/c" -> "dist/bin/c".
@@ -694,7 +765,7 @@ class MacArtifactJob(ArtifactJob):
 
 
 class WinArtifactJob(ArtifactJob):
-    package_re = r"public/build/target\.(zip|tar\.gz)"
+    package_re = r"public/build/target\.(zip|tar\.gz)$"
     product = "firefox"
 
     _package_artifact_patterns = {
@@ -713,6 +784,7 @@ class WinArtifactJob(ArtifactJob):
         ("bin/BadCertAndPinningServer.exe", ("bin", "bin")),
         ("bin/DelegatedCredentialsServer.exe", ("bin", "bin")),
         ("bin/EncryptedClientHelloServer.exe", ("bin", "bin")),
+        ("bin/FaultyServer.exe", ("bin", "bin")),
         ("bin/GenerateOCSPResponse.exe", ("bin", "bin")),
         ("bin/OCSPStaplingServer.exe", ("bin", "bin")),
         ("bin/SanctionsTestServer.exe", ("bin", "bin")),
@@ -770,7 +842,8 @@ class ThunderbirdMixin(object):
     ]
     # The list below list should be updated when we have new ESRs.
     esr_candidate_trees = [
-        "releases/comm-esr91",
+        "releases/comm-esr102",
+        "releases/comm-esr115",
     ]
 
 
@@ -1388,7 +1461,15 @@ https://firefox-source-docs.mozilla.org/contributing/vcs/mercurial_bundles.html
                 {"processed_filename": processed_filename},
                 "Writing processed {processed_filename}",
             )
-            self._artifact_job.process_artifact(filename, processed_filename)
+            try:
+                self._artifact_job.process_artifact(filename, processed_filename)
+            except Exception as e:
+                # Delete the partial output of failed processing.
+                try:
+                    os.remove(processed_filename)
+                except FileNotFoundError:
+                    pass
+                raise e
 
         self._artifact_cache._persist_limit.register_file(processed_filename)
 
@@ -1546,25 +1627,34 @@ https://firefox-source-docs.mozilla.org/contributing/vcs/mercurial_bundles.html
 
     def install_from(self, source, distdir):
         """Install artifacts from a ``source`` into the given ``distdir``."""
-        if source and os.path.isfile(source):
-            return self.install_from_file(source, distdir)
-        elif source and urlparse(source).scheme:
-            return self.install_from_url(source, distdir)
-        else:
-            if source is None and "MOZ_ARTIFACT_REVISION" in os.environ:
-                source = os.environ["MOZ_ARTIFACT_REVISION"]
+        if (source and os.path.isfile(source)) or "MOZ_ARTIFACT_FILE" in os.environ:
+            source = source or os.environ["MOZ_ARTIFACT_FILE"]
+            for source in source.split(os.pathsep):
+                ret = self.install_from_file(source, distdir)
+                if ret:
+                    return ret
+            return 0
 
-            if source:
-                return self.install_from_revset(source, distdir)
+        if (source and urlparse(source).scheme) or "MOZ_ARTIFACT_URL" in os.environ:
+            source = source or os.environ["MOZ_ARTIFACT_URL"]
+            for source in source.split():
+                ret = self.install_from_url(source, distdir)
+                if ret:
+                    return ret
+            return 0
 
-            for var in (
-                "MOZ_ARTIFACT_TASK_%s" % self._job.upper().replace("-", "_"),
-                "MOZ_ARTIFACT_TASK",
-            ):
-                if var in os.environ:
-                    return self.install_from_task(os.environ[var], distdir)
+        if source or "MOZ_ARTIFACT_REVISION" in os.environ:
+            source = source or os.environ["MOZ_ARTIFACT_REVISION"]
+            return self.install_from_revset(source, distdir)
 
-            return self.install_from_recent(distdir)
+        for var in (
+            "MOZ_ARTIFACT_TASK_%s" % self._job.upper().replace("-", "_"),
+            "MOZ_ARTIFACT_TASK",
+        ):
+            if var in os.environ:
+                return self.install_from_task(os.environ[var], distdir)
+
+        return self.install_from_recent(distdir)
 
     def clear_cache(self):
         self.log(logging.INFO, "artifact", {}, "Deleting cached artifacts and caches.")

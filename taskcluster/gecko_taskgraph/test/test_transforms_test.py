@@ -7,6 +7,7 @@ Tests for the 'tests.py' transforms
 import hashlib
 import json
 from functools import partial
+from pprint import pprint
 
 import mozunit
 import pytest
@@ -22,7 +23,7 @@ def make_test_task():
         task = {
             "attributes": {},
             "build-platform": "linux64",
-            "mozharness": {},
+            "mozharness": {"extra-options": []},
             "test-platform": "linux64",
             "treeherder-symbol": "g(t)",
             "try-name": "task",
@@ -33,7 +34,7 @@ def make_test_task():
     return inner
 
 
-def test_split_variants(monkeypatch, run_transform, make_test_task):
+def test_split_variants(monkeypatch, run_full_config_transform, make_test_task):
     # mock out variant definitions
     monkeypatch.setattr(
         test_transforms.variant,
@@ -42,6 +43,9 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
             "foo": {
                 "description": "foo variant",
                 "suffix": "foo",
+                "mozinfo": "foo",
+                "component": "foo bar",
+                "expiration": "never",
                 "merge": {
                     "mozharness": {
                         "extra-options": [
@@ -53,6 +57,9 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
             "bar": {
                 "description": "bar variant",
                 "suffix": "bar",
+                "mozinfo": "bar",
+                "component": "foo bar",
+                "expiration": "never",
                 "when": {
                     "$eval": "task['test-platform'][:5] == 'linux'",
                 },
@@ -82,16 +89,27 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
             }
         )
 
-    run_split_variants = partial(run_transform, test_transforms.variant.split_variants)
+    run_split_variants = partial(
+        run_full_config_transform, test_transforms.variant.split_variants
+    )
 
     # test no variants
-    input_task = make_test_task()
+    input_task = make_test_task(
+        **{
+            "run-without-variant": True,
+        }
+    )
     tasks = list(run_split_variants(input_task))
     assert len(tasks) == 1
     assert tasks[0] == input_task
 
     # test variants are split into expected tasks
-    input_task["variants"] = ["foo", "bar"]
+    input_task = make_test_task(
+        **{
+            "run-without-variant": True,
+            "variants": ["foo", "bar"],
+        }
+    )
     tasks = list(run_split_variants(input_task))
     assert len(tasks) == 3
     assert tasks[0] == make_test_task()
@@ -104,6 +122,7 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
     # test composite variants
     input_task = make_test_task(
         **{
+            "run-without-variant": True,
             "variants": ["foo+bar"],
         }
     )
@@ -119,9 +138,10 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
     # test 'when' filter
     input_task = make_test_task(
         **{
-            "variants": ["foo", "bar", "foo+bar"],
+            "run-without-variant": True,
             # this should cause task to be filtered out of 'bar' and 'foo+bar' variants
             "test-platform": "windows",
+            "variants": ["foo", "bar", "foo+bar"],
         }
     )
     tasks = list(run_split_variants(input_task))
@@ -129,14 +149,24 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
     assert "unittest_variant" not in tasks[0]["attributes"]
     assert tasks[1]["attributes"]["unittest_variant"] == "foo"
 
+    # test 'run-without-variants=False'
+    input_task = make_test_task(
+        **{
+            "run-without-variant": False,
+            "variants": ["foo"],
+        }
+    )
+    tasks = list(run_split_variants(input_task))
+    assert len(tasks) == 1
+    assert tasks[0]["attributes"]["unittest_variant"] == "foo"
+
 
 @pytest.mark.parametrize(
     "task,expected",
     (
         pytest.param(
             {
-                "attributes": {"unittest_variant": "webrender-sw+wayland"},
-                "e10s": False,
+                "attributes": {"unittest_variant": "webrender-sw+1proc"},
                 "test-platform": "linux1804-64-clang-trunk-qr/opt",
             },
             {
@@ -153,7 +183,6 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
                 },
                 "runtime": {
                     "1proc": True,
-                    "wayland": True,
                     "webrender-sw": True,
                 },
             },
@@ -162,16 +191,37 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
         pytest.param(
             {
                 "attributes": {},
-                "e10s": True,
-                "test-platform": "android-hw-s7-8-0-android-aarch64-shippable-qr/opt",
+                "test-platform": "linux2204-64-wayland-shippable/opt",
             },
             {
                 "platform": {
-                    "arch": "aarch64",
-                    "device": "s7",
+                    "arch": "64",
+                    "display": "wayland",
+                    "os": {
+                        "name": "linux",
+                        "version": "2204",
+                    },
+                },
+                "build": {
+                    "type": "opt",
+                    "shippable": True,
+                },
+                "runtime": {},
+            },
+            id="linux wayland shippable",
+        ),
+        pytest.param(
+            {
+                "attributes": {},
+                "test-platform": "android-hw-a51-11-0-arm7-shippable-qr/opt",
+            },
+            {
+                "platform": {
+                    "arch": "arm7",
+                    "device": "a51",
                     "os": {
                         "name": "android",
-                        "version": "8.0",
+                        "version": "11.0",
                     },
                 },
                 "build": {
@@ -185,7 +235,6 @@ def test_split_variants(monkeypatch, run_transform, make_test_task):
         pytest.param(
             {
                 "attributes": {},
-                "e10s": True,
                 "test-platform": "windows10-64-2004-ref-hw-2017-ccov/debug",
             },
             {
@@ -217,6 +266,64 @@ def test_set_test_setting(run_transform, task, expected):
     task = list(run_transform(test_transforms.other.set_test_setting, task))[0]
     assert "test-setting" in task
     assert task["test-setting"] == expected
+
+
+def assert_spi_not_disabled(task):
+    extra_options = task["mozharness"]["extra-options"]
+    # The pref to enable this gets set outside of this transform, so only
+    # bother asserting that the pref to disable does not exist.
+    assert (
+        "--setpref=media.peerconnection.mtransport_process=false" not in extra_options
+    )
+    assert "--setpref=network.process.enabled=false" not in extra_options
+
+
+def assert_spi_disabled(task):
+    extra_options = task["mozharness"]["extra-options"]
+    assert "--setpref=media.peerconnection.mtransport_process=false" in extra_options
+    assert "--setpref=media.peerconnection.mtransport_process=true" not in extra_options
+    assert "--setpref=network.process.enabled=false" in extra_options
+    assert "--setpref=network.process.enabled=true" not in extra_options
+
+
+@pytest.mark.parametrize(
+    "task,callback",
+    (
+        pytest.param(
+            {"attributes": {"unittest_variant": "socketprocess"}},
+            assert_spi_not_disabled,
+            id="socketprocess",
+        ),
+        pytest.param(
+            {
+                "attributes": {"unittest_variant": "socketprocess_networking"},
+            },
+            assert_spi_not_disabled,
+            id="socketprocess_networking",
+        ),
+        pytest.param({}, assert_spi_disabled, id="no variant"),
+        pytest.param(
+            {"suite": "cppunit", "attributes": {"unittest_variant": "socketprocess"}},
+            assert_spi_not_disabled,
+            id="excluded suite",
+        ),
+        pytest.param(
+            {"attributes": {"unittest_variant": "no-fission+socketprocess"}},
+            assert_spi_not_disabled,
+            id="composite variant",
+        ),
+    ),
+)
+def test_ensure_spi_disabled_on_all_but_spi(
+    make_test_task, run_transform, task, callback
+):
+    task.setdefault("suite", "mochitest-plain")
+    task = make_test_task(**task)
+    task = list(
+        run_transform(test_transforms.other.ensure_spi_disabled_on_all_but_spi, task)
+    )[0]
+    pprint(task)
+    callback(task)
 
 
 if __name__ == "__main__":

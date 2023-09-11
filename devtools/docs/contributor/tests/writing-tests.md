@@ -75,7 +75,7 @@ For example, if you were to add the test from the previous section, you'd add th
 
 Sometimes your test may need to open an HTML file in a tab, and it may also need to load CSS or JavaScript. For this to work, you'll need to...
 
-1. place these files in the same directory, and also 
+1. place these files in the same directory, and also
 2. reference them in the `browser.ini` file.
 
 There's a naming convention for support files: `doc_<support-some-test>.html`
@@ -120,7 +120,7 @@ You can learn more about E10S [from this blog post](https://timtaubert.de/blog/2
 
 One of the direct consequences of E10S on tests is that you cannot retrieve and manipulate objects from the content page as you'd do without E10S.
 
-So when creating a new test, if this test needs to access the content page in any way, you can use [the message manager](https://developer.mozilla.org/en-US/docs/The_message_manager) to communicate with a script loaded in the content process to do things for you instead of accessing objects in the page directly.
+So when creating a new test, if this test needs to access the content page in any way, you can use [the message manager or JSActors](https://firefox-source-docs.mozilla.org/dom/ipc/jsactors.html) to communicate with a script loaded in the content process to do things for you instead of accessing objects in the page directly.
 
 You can use the helper `ContentTask.spawn()` for this. See [this list of DevTools tests that use that helper for examples](https://searchfox.org/mozilla-central/search?q=ContentTask.spawn%28&path=devtools%2Fclient).
 
@@ -222,7 +222,7 @@ When tests fail, it's far better to have them fail and end immediately with an e
 
 ## Adding new helpers
 
-In some cases, you may want to extract some common code from your test to use it another another test. 
+In some cases, you may want to extract some common code from your test to use it another another test.
 
 * If this is very common code that all tests could use, then add it to `devtools/client/shared/test/shared-head.js`.
 * If this is common code specific to a given tool, then add it to the corresponding `head.js` file.
@@ -235,4 +235,3 @@ In some cases, you may want to extract some common code from your test to use it
  * Use the special ESLint comment `/* import-globals-from helper_file.js */` to prevent ESLint errors for undefined variables.
 
 In all cases, new helper functions should be properly commented with an jsdoc comment block.
-

@@ -28,7 +28,7 @@ bool WarpBuilderShared::resumeAfter(MInstruction* ins, BytecodeLocation loc) {
   MOZ_ASSERT(!ins->isMovable());
 
   MResumePoint* resumePoint = MResumePoint::New(
-      alloc(), ins->block(), loc.toRawBytecode(), MResumePoint::ResumeAfter);
+      alloc(), ins->block(), loc.toRawBytecode(), ResumeMode::ResumeAfter);
   if (!resumePoint) {
     return false;
   }
@@ -49,6 +49,22 @@ MConstant* WarpBuilderShared::constant(const Value& v) {
 void WarpBuilderShared::pushConstant(const Value& v) {
   MConstant* cst = constant(v);
   current->push(cst);
+}
+
+MDefinition* WarpBuilderShared::unboxObjectInfallible(MDefinition* def,
+                                                      IsMovable movable) {
+  if (def->type() == MIRType::Object) {
+    return def;
+  }
+
+  MOZ_ASSERT(def->type() == MIRType::Value);
+
+  auto* unbox = MUnbox::New(alloc(), def, MIRType::Object, MUnbox::Infallible);
+  if (movable == IsMovable::No) {
+    unbox->setNotMovable();
+  }
+  current->add(unbox);
+  return unbox;
 }
 
 MCall* WarpBuilderShared::makeCall(CallInfo& callInfo, bool needsThisCheck,
@@ -73,9 +89,10 @@ MInstruction* WarpBuilderShared::makeSpreadCall(CallInfo& callInfo,
   current->add(elements);
 
   if (callInfo.constructing()) {
+    auto* newTarget = unboxObjectInfallible(callInfo.getNewTarget());
     auto* construct =
         MConstructArray::New(alloc(), target, callInfo.callee(), elements,
-                             callInfo.thisArg(), callInfo.getNewTarget());
+                             callInfo.thisArg(), newTarget);
     if (isSameRealm) {
       construct->setNotCrossRealm();
     }

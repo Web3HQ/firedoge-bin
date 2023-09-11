@@ -6,11 +6,12 @@
 //!
 //! [custom]: https://drafts.csswg.org/css-variables/
 
-use crate::hash::map::Entry;
+use crate::applicable_declarations::CascadePriority;
 use crate::media_queries::Device;
 use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValue};
+use crate::properties_and_values::value::ComputedValue as ComputedRegisteredValue;
+use crate::stylist::Stylist;
 use crate::selector_map::{PrecomputedHashMap, PrecomputedHashSet, PrecomputedHasher};
-use crate::stylesheets::{Origin, PerOrigin};
 use crate::Atom;
 use cssparser::{
     CowRcStr, Delimiter, Parser, ParserInput, SourcePosition, Token, TokenSerializationType,
@@ -21,6 +22,7 @@ use servo_arc::Arc;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp;
+use std::collections::hash_map::Entry;
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
@@ -64,6 +66,24 @@ fn get_safearea_inset_right(device: &Device) -> VariableValue {
     VariableValue::pixels(device.safe_area_insets().right)
 }
 
+fn get_content_preferred_color_scheme(device: &Device) -> VariableValue {
+    use crate::gecko::media_features::PrefersColorScheme;
+    let prefers_color_scheme = unsafe {
+        crate::gecko_bindings::bindings::Gecko_MediaFeatures_PrefersColorScheme(
+            device.document(),
+            /* use_content = */ true,
+        )
+    };
+    VariableValue::ident(match prefers_color_scheme {
+        PrefersColorScheme::Light => "light",
+        PrefersColorScheme::Dark => "dark",
+    })
+}
+
+fn get_scrollbar_inline_size(device: &Device) -> VariableValue {
+    VariableValue::pixels(device.scrollbar_inline_size().px())
+}
+
 static ENVIRONMENT_VARIABLES: [EnvironmentVariable; 4] = [
     make_variable!(atom!("safe-area-inset-top"), get_safearea_inset_top),
     make_variable!(atom!("safe-area-inset-bottom"), get_safearea_inset_bottom),
@@ -90,13 +110,12 @@ macro_rules! lnf_int_variable {
     }};
 }
 
-static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 5] = [
+static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 6] = [
     lnf_int_variable!(
         atom!("-moz-gtk-csd-titlebar-radius"),
         TitlebarRadius,
         int_pixels
     ),
-    lnf_int_variable!(atom!("-moz-gtk-csd-menu-radius"), GtkMenuRadius, int_pixels),
     lnf_int_variable!(
         atom!("-moz-gtk-csd-close-button-position"),
         GTKCSDCloseButtonPosition,
@@ -112,6 +131,11 @@ static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 5] = [
         GTKCSDMaximizeButtonPosition,
         integer
     ),
+    make_variable!(
+        atom!("-moz-content-preferred-color-scheme"),
+        get_content_preferred_color_scheme
+    ),
+    make_variable!(atom!("scrollbar-inline-size"), get_scrollbar_inline_size),
 ];
 
 impl CssEnvironment {
@@ -120,7 +144,7 @@ impl CssEnvironment {
         if let Some(var) = ENVIRONMENT_VARIABLES.iter().find(|var| var.name == *name) {
             return Some((var.evaluator)(device));
         }
-        if !device.is_chrome_document() {
+        if !device.chrome_rules_enabled_for_document() {
             return None;
         }
         let var = CHROME_ENVIRONMENT_VARIABLES
@@ -157,14 +181,8 @@ pub struct VariableValue {
     first_token_type: TokenSerializationType,
     last_token_type: TokenSerializationType,
 
-    /// Whether a variable value has a reference to an environment variable.
-    ///
-    /// If this is the case, we need to perform variable substitution on the
-    /// value.
-    references_environment: bool,
-
-    /// Custom property names in var() functions.
-    references: Box<[Name]>,
+    /// var() or env() references.
+    references: VarOrEnvReferences,
 }
 
 impl ToCss for SpecifiedValue {
@@ -198,10 +216,16 @@ pub type ComputedValue = VariableValue;
 
 /// A struct holding information about the external references to that a custom
 /// property value may have.
-#[derive(Default)]
+#[derive(Clone, Debug, Default, MallocSizeOf, PartialEq, ToShmem)]
 struct VarOrEnvReferences {
-    custom_property_references: PrecomputedHashSet<Name>,
-    references_environment: bool,
+    custom_properties: PrecomputedHashSet<Name>,
+    environment: bool,
+}
+
+impl VarOrEnvReferences {
+    fn has_references(&self) -> bool {
+        self.environment || !self.custom_properties.is_empty()
+    }
 }
 
 impl VariableValue {
@@ -211,7 +235,6 @@ impl VariableValue {
             last_token_type: TokenSerializationType::nothing(),
             first_token_type: TokenSerializationType::nothing(),
             references: Default::default(),
-            references_environment: false,
         }
     }
 
@@ -276,7 +299,7 @@ impl VariableValue {
         input: &Parser<'i, '_>,
         variable: &ComputedValue,
     ) -> Result<(), ParseError<'i>> {
-        debug_assert!(variable.references.is_empty());
+        debug_assert!(!variable.has_references(), "{}", variable.css);
         self.push(
             input,
             &variable.css,
@@ -292,21 +315,16 @@ impl VariableValue {
         let (first_token_type, css, last_token_type) =
             parse_self_contained_declaration_value(input, Some(&mut references))?;
 
-        let custom_property_references = references
-            .custom_property_references
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-
         let mut css = css.into_owned();
         css.shrink_to_fit();
+
+        references.custom_properties.shrink_to_fit();
 
         Ok(Arc::new(VariableValue {
             css,
             first_token_type,
             last_token_type,
-            references: custom_property_references,
-            references_environment: references.references_environment,
+            references,
         }))
     }
 
@@ -317,6 +335,11 @@ impl VariableValue {
             value: number as f32,
             int_value: Some(number),
         })
+    }
+
+    /// Create VariableValue from an int.
+    fn ident(ident: &'static str) -> Self {
+        Self::from_token(Token::Ident(ident.into()))
     }
 
     /// Create VariableValue from a float amount of CSS pixels.
@@ -352,8 +375,18 @@ impl VariableValue {
             first_token_type: token_type,
             last_token_type: token_type,
             references: Default::default(),
-            references_environment: false,
         }
+    }
+
+    /// Returns the raw CSS text from this VariableValue
+    pub fn css_text(&self) -> &str {
+        &self.css
+    }
+
+    /// Returns whether this variable value has any reference to the environment or other
+    /// variables.
+    pub fn has_references(&self) -> bool {
+        self.references.has_references()
     }
 }
 
@@ -552,6 +585,32 @@ fn parse_fallback<'i, 't>(input: &mut Parser<'i, 't>) -> Result<(), ParseError<'
     })
 }
 
+fn parse_and_substitute_fallback<'i>(
+    input: &mut Parser<'i, '_>,
+    custom_properties: &CustomPropertiesMap,
+    stylist: &Stylist,
+) -> Result<ComputedValue, ParseError<'i>> {
+    input.skip_whitespace();
+    let after_comma = input.state();
+    let first_token_type = input
+        .next_including_whitespace_and_comments()
+        .ok()
+        .map_or_else(TokenSerializationType::nothing, |t| t.serialization_type());
+    input.reset(&after_comma);
+    let mut position = (after_comma.position(), first_token_type);
+
+    let mut fallback = ComputedValue::empty();
+    let last_token_type = substitute_block(
+        input,
+        &mut position,
+        &mut fallback,
+        custom_properties,
+        stylist,
+    )?;
+    fallback.push_from(input, position, last_token_type)?;
+    Ok(fallback)
+}
+
 // If the var function is valid, return Ok((custom_property_name, fallback))
 fn parse_var_function<'i, 't>(
     input: &mut Parser<'i, 't>,
@@ -565,7 +624,7 @@ fn parse_var_function<'i, 't>(
         parse_fallback(input)?;
     }
     if let Some(refs) = references {
-        refs.custom_property_references.insert(Atom::from(name));
+        refs.custom_properties.insert(Atom::from(name));
     }
     Ok(())
 }
@@ -581,7 +640,7 @@ fn parse_env_function<'i, 't>(
         parse_fallback(input)?;
     }
     if let Some(references) = references {
-        references.references_environment = true;
+        references.environment = true;
     }
     Ok(())
 }
@@ -590,35 +649,37 @@ fn parse_env_function<'i, 't>(
 /// properties.
 pub struct CustomPropertiesBuilder<'a> {
     seen: PrecomputedHashSet<&'a Name>,
-    reverted: PerOrigin<PrecomputedHashSet<&'a Name>>,
     may_have_cycles: bool,
     custom_properties: Option<CustomPropertiesMap>,
     inherited: Option<&'a Arc<CustomPropertiesMap>>,
-    device: &'a Device,
+    reverted: PrecomputedHashMap<&'a Name, (CascadePriority, bool)>,
+    stylist: &'a Stylist,
 }
 
 impl<'a> CustomPropertiesBuilder<'a> {
     /// Create a new builder, inheriting from a given custom properties map.
-    pub fn new(inherited: Option<&'a Arc<CustomPropertiesMap>>, device: &'a Device) -> Self {
+    pub fn new(inherited: Option<&'a Arc<CustomPropertiesMap>>, stylist: &'a Stylist) -> Self {
         Self {
             seen: PrecomputedHashSet::default(),
             reverted: Default::default(),
             may_have_cycles: false,
             custom_properties: None,
             inherited,
-            device,
+            stylist,
         }
     }
 
     /// Cascade a given custom property declaration.
-    pub fn cascade(&mut self, declaration: &'a CustomDeclaration, origin: Origin) {
+    pub fn cascade(&mut self, declaration: &'a CustomDeclaration, priority: CascadePriority) {
         let CustomDeclaration {
             ref name,
             ref value,
         } = *declaration;
 
-        if self.reverted.borrow_for_origin(&origin).contains(&name) {
-            return;
+        if let Some(&(reverted_priority, is_origin_revert)) = self.reverted.get(&name) {
+            if !reverted_priority.allows_when_reverted(&priority, is_origin_revert) {
+                return;
+            }
         }
 
         let was_already_present = !self.seen.insert(name);
@@ -640,32 +701,43 @@ impl<'a> CustomPropertiesBuilder<'a> {
         let map = self.custom_properties.as_mut().unwrap();
         match *value {
             CustomDeclarationValue::Value(ref unparsed_value) => {
-                let has_references = !unparsed_value.references.is_empty();
-                self.may_have_cycles |= has_references;
+                let has_custom_property_references =
+                    !unparsed_value.references.custom_properties.is_empty();
+                self.may_have_cycles |= has_custom_property_references;
 
-                // If the variable value has no references and it has an
-                // environment variable here, perform substitution here instead
-                // of forcing a full traversal in `substitute_all` afterwards.
-                let value = if !has_references && unparsed_value.references_environment {
-                    let result = substitute_references_in_value(unparsed_value, &map, &self.device);
-                    match result {
-                        Ok(new_value) => new_value,
-                        Err(..) => {
+                // If the variable value has no references and it has an environment variable here,
+                // perform substitution here instead of forcing a full traversal in
+                // `substitute_all` afterwards.
+                if !has_custom_property_references {
+                    if unparsed_value.references.environment {
+                        substitute_references_in_value_and_apply(
+                            name,
+                            unparsed_value,
+                            map,
+                            self.inherited.map(|m| &**m),
+                            self.stylist,
+                        );
+                        return;
+                    }
+                    // TODO(zrhoffman, 1852360): Perform computed value-time validation on
+                    // registered properties that contain references.
+                    if let Some(registration) = self.stylist.get_custom_property_registration(&name)
+                    {
+                        let mut input = ParserInput::new(&unparsed_value.css);
+                        let mut input = Parser::new(&mut input);
+                        if ComputedRegisteredValue::compute(&mut input, registration).is_err() {
                             map.remove(name);
                             return;
-                        },
+                        }
                     }
-                } else {
-                    (*unparsed_value).clone()
-                };
-                map.insert(name.clone(), value);
+                }
+                map.insert(name.clone(), Arc::clone(unparsed_value));
             },
             CustomDeclarationValue::CSSWideKeyword(keyword) => match keyword {
-                CSSWideKeyword::Revert => {
+                CSSWideKeyword::RevertLayer | CSSWideKeyword::Revert => {
+                    let origin_revert = keyword == CSSWideKeyword::Revert;
                     self.seen.remove(name);
-                    for origin in origin.following_including() {
-                        self.reverted.borrow_mut_for_origin(&origin).insert(name);
-                    }
+                    self.reverted.insert(name, (priority, origin_revert));
                 },
                 CSSWideKeyword::Initial => {
                     map.remove(name);
@@ -713,6 +785,22 @@ impl<'a> CustomPropertiesBuilder<'a> {
         true
     }
 
+    fn inherited_properties_match(&self, map: &CustomPropertiesMap) -> bool {
+        let inherited = match self.inherited {
+            Some(inherited) => inherited,
+            None => return false,
+        };
+        if inherited.len() != map.len() {
+            return false;
+        }
+        for name in self.seen.iter() {
+            if inherited.get(*name) != map.get(*name) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Returns the final map of applicable custom properties.
     ///
     /// If there was any specified property, we've created a new map and now we
@@ -724,9 +812,24 @@ impl<'a> CustomPropertiesBuilder<'a> {
             Some(m) => m,
             None => return self.inherited.cloned(),
         };
+
         if self.may_have_cycles {
-            substitute_all(&mut map, self.device);
+            substitute_all(
+                &mut map,
+                self.inherited.map(|m| &**m),
+                &self.seen,
+                self.stylist,
+            );
         }
+
+        // Some pages apply a lot of redundant custom properties, see e.g.
+        // bug 1758974 comment 5. Try to detect the case where the values
+        // haven't really changed, and save some memory by reusing the inherited
+        // map in that case.
+        if self.inherited_properties_match(&map) {
+            return self.inherited.cloned();
+        }
+
         map.shrink_to_fit();
         Some(Arc::new(map))
     }
@@ -736,7 +839,12 @@ impl<'a> CustomPropertiesBuilder<'a> {
 /// (meaning we should use the inherited value).
 ///
 /// It does cycle dependencies removal at the same time as substitution.
-fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Device) {
+fn substitute_all(
+    custom_properties_map: &mut CustomPropertiesMap,
+    inherited: Option<&CustomPropertiesMap>,
+    seen: &PrecomputedHashSet<&Name>,
+    stylist: &Stylist,
+) {
     // The cycle dependencies removal in this function is a variant
     // of Tarjan's algorithm. It is mostly based on the pseudo-code
     // listed in
@@ -759,7 +867,6 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Devi
     }
     /// Context struct for traversing the variable graph, so that we can
     /// avoid referencing all the fields multiple times.
-    #[derive(Debug)]
     struct Context<'a> {
         /// Number of variables visited. This is used as the order index
         /// when we visit a new unresolved variable.
@@ -772,8 +879,11 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Devi
         /// all unfinished strong connected components.
         stack: SmallVec<[usize; 5]>,
         map: &'a mut CustomPropertiesMap,
-        /// To resolve the environment to substitute `env()` variables.
-        device: &'a Device,
+        /// The inherited custom properties to handle wide keywords.
+        inherited: Option<&'a CustomPropertiesMap>,
+        /// The stylist is used to get registered properties, and to resolve the environment to
+        /// substitute `env()` variables.
+        stylist: &'a Stylist,
     }
 
     /// This function combines the traversal for cycle removal and value
@@ -794,15 +904,15 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Devi
     ///   doesn't have reference at all in specified value, or it has
     ///   been completely resolved.
     /// * There is no such variable at all.
-    fn traverse<'a>(name: Name, context: &mut Context<'a>) -> Option<usize> {
+    fn traverse<'a>(name: &Name, context: &mut Context<'a>) -> Option<usize> {
         // Some shortcut checks.
         let (name, value) = {
-            let value = context.map.get(&name)?;
+            let value = context.map.get(name)?;
 
             // Nothing to resolve.
-            if value.references.is_empty() {
+            if value.references.custom_properties.is_empty() {
                 debug_assert!(
-                    !value.references_environment,
+                    !value.references.environment,
                     "Should've been handled earlier"
                 );
                 return None;
@@ -810,7 +920,7 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Devi
 
             // Whether this variable has been visited in this traversal.
             let key;
-            match context.index_map.entry(name) {
+            match context.index_map.entry(name.clone()) {
                 Entry::Occupied(entry) => {
                     return Some(*entry.get());
                 },
@@ -837,8 +947,8 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Devi
 
         let mut self_ref = false;
         let mut lowlink = index;
-        for next in value.references.iter() {
-            let next_index = match traverse(next.clone(), context) {
+        for next in value.references.custom_properties.iter() {
+            let next_index = match traverse(next, context) {
                 Some(index) => index,
                 // There is nothing to do if the next variable has been
                 // fully resolved at this point.
@@ -905,64 +1015,122 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Devi
             return None;
         }
 
-        // Now we have shown that this variable is not in a loop, and all of its
-        // dependencies should have been resolved. We can start substitution
-        // now.
-        let result = substitute_references_in_value(&value, &context.map, &context.device);
-        match result {
-            Ok(computed_value) => {
-                context.map.insert(name, computed_value);
-            },
-            Err(..) => {
-                // This is invalid, reset it to the guaranteed-invalid value.
-                context.map.remove(&name);
-            },
-        }
+        // Now we have shown that this variable is not in a loop, and all of its dependencies
+        // should have been resolved. We can perform substitution now.
+        substitute_references_in_value_and_apply(
+            &name,
+            &value,
+            &mut context.map,
+            context.inherited,
+            context.stylist,
+        );
 
         // All resolved, so return the signal value.
         None
     }
 
-    // We have to clone the names so that we can mutably borrow the map
-    // in the context we create for traversal.
-    let names: Vec<_> = custom_properties_map.keys().cloned().collect();
-    for name in names.into_iter() {
+    // Note that `seen` doesn't contain names inherited from our parent, but
+    // those can't have variable references (since we inherit the computed
+    // variables) so we don't want to spend cycles traversing them anyway.
+    for name in seen {
         let mut context = Context {
             count: 0,
             index_map: PrecomputedHashMap::default(),
             stack: SmallVec::new(),
             var_info: SmallVec::new(),
             map: custom_properties_map,
-            device,
+            inherited,
+            stylist,
         };
         traverse(name, &mut context);
     }
 }
 
 /// Replace `var()` and `env()` functions in a pre-existing variable value.
-fn substitute_references_in_value<'i>(
-    value: &'i VariableValue,
-    custom_properties: &CustomPropertiesMap,
-    device: &Device,
-) -> Result<Arc<ComputedValue>, ParseError<'i>> {
-    debug_assert!(!value.references.is_empty() || value.references_environment);
+fn substitute_references_in_value_and_apply(
+    name: &Name,
+    value: &VariableValue,
+    custom_properties: &mut CustomPropertiesMap,
+    inherited: Option<&CustomPropertiesMap>,
+    stylist: &Stylist,
+) {
+    debug_assert!(value.has_references());
 
-    let mut input = ParserInput::new(&value.css);
-    let mut input = Parser::new(&mut input);
-    let mut position = (input.position(), value.first_token_type);
     let mut computed_value = ComputedValue::empty();
 
-    let last_token_type = substitute_block(
-        &mut input,
-        &mut position,
-        &mut computed_value,
-        custom_properties,
-        device,
-    )?;
+    {
+        let mut input = ParserInput::new(&value.css);
+        let mut input = Parser::new(&mut input);
+        let mut position = (input.position(), value.first_token_type);
 
-    computed_value.push_from(&input, position, last_token_type)?;
-    computed_value.css.shrink_to_fit();
-    Ok(Arc::new(computed_value))
+        let last_token_type = substitute_block(
+            &mut input,
+            &mut position,
+            &mut computed_value,
+            custom_properties,
+            stylist,
+        );
+
+        let last_token_type = match last_token_type {
+            Ok(t) => t,
+            Err(..) => {
+                // Invalid at computed value time.
+                custom_properties.remove(name);
+                return;
+            },
+        };
+
+        if computed_value
+            .push_from(&input, position, last_token_type)
+            .is_err()
+        {
+            custom_properties.remove(name);
+            return;
+        }
+    }
+
+    let should_insert = {
+        let mut input = ParserInput::new(&computed_value.css);
+        let mut input = Parser::new(&mut input);
+
+        // If variable fallback results in a wide keyword, deal with it now.
+        if let Ok(kw) = input.try_parse(CSSWideKeyword::parse) {
+            match kw {
+                CSSWideKeyword::Initial => {
+                    custom_properties.remove(name);
+                },
+                CSSWideKeyword::Revert |
+                CSSWideKeyword::RevertLayer |
+                CSSWideKeyword::Inherit |
+                CSSWideKeyword::Unset => {
+                    // TODO: It's unclear what this should do for revert / revert-layer, see
+                    // https://github.com/w3c/csswg-drafts/issues/9131. For now treating as unset
+                    // seems fine?
+                    match inherited.and_then(|map| map.get(name)) {
+                        Some(value) => {
+                            custom_properties.insert(name.clone(), Arc::clone(value));
+                        },
+                        None => {
+                            custom_properties.remove(name);
+                        },
+                    };
+                },
+            }
+            false
+        } else {
+            if let Some(registration) = stylist.get_custom_property_registration(&name) {
+                if ComputedRegisteredValue::compute(&mut input, registration).is_err() {
+                    custom_properties.remove(name);
+                    return;
+                }
+            }
+            true
+        }
+    };
+    if should_insert {
+        computed_value.css.shrink_to_fit();
+        custom_properties.insert(name.clone(), Arc::new(computed_value));
+    }
 }
 
 /// Replace `var()` functions in an arbitrary bit of input.
@@ -980,7 +1148,7 @@ fn substitute_block<'i>(
     position: &mut (SourcePosition, TokenSerializationType),
     partial_computed_value: &mut ComputedValue,
     custom_properties: &CustomPropertiesMap,
-    device: &Device,
+    stylist: &Stylist,
 ) -> Result<TokenSerializationType, ParseError<'i>> {
     let mut last_token_type = TokenSerializationType::nothing();
     let mut set_position_at_next_iteration = false;
@@ -1025,7 +1193,11 @@ fn substitute_block<'i>(
                     };
 
                     let env_value;
+
+                    let registration;
                     let value = if is_env {
+                        registration = None;
+                        let device = stylist.device();
                         if let Some(v) = device.environment().get(&name, device) {
                             env_value = v;
                             Some(&env_value)
@@ -1033,36 +1205,56 @@ fn substitute_block<'i>(
                             None
                         }
                     } else {
+                        registration = stylist.get_custom_property_registration(&name);
                         custom_properties.get(&name).map(|v| &**v)
                     };
 
                     if let Some(v) = value {
                         last_token_type = v.last_token_type;
+
+                        if let Some(registration) = registration {
+                            if input.try_parse(|input| input.expect_comma()).is_ok() {
+                                let fallback = parse_and_substitute_fallback(
+                                    input,
+                                    custom_properties,
+                                    stylist,
+                                )?;
+                                let mut fallback_input = ParserInput::new(&fallback.css);
+                                let mut fallback_input = Parser::new(&mut fallback_input);
+                                let compute_result = ComputedRegisteredValue::compute(
+                                    &mut fallback_input,
+                                    registration,
+                                );
+                                if compute_result.is_err() {
+                                    return Err(input
+                                        .new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                                }
+                            }
+                        } else {
+                            // Skip over the fallback, as `parse_nested_block` would return `Err`
+                            // if we don't consume all of `input`.
+                            // FIXME: Add a specialized method to cssparser to do this with less work.
+                            while input.next().is_ok() {}
+                        }
                         partial_computed_value.push_variable(input, v)?;
-                        // Skip over the fallback, as `parse_nested_block` would return `Err`
-                        // if we don't consume all of `input`.
-                        // FIXME: Add a specialized method to cssparser to do this with less work.
-                        while input.next().is_ok() {}
                     } else {
                         input.expect_comma()?;
-                        input.skip_whitespace();
-                        let after_comma = input.state();
-                        let first_token_type = input
-                            .next_including_whitespace_and_comments()
-                            .ok()
-                            .map_or_else(TokenSerializationType::nothing, |t| {
-                                t.serialization_type()
-                            });
-                        input.reset(&after_comma);
-                        let mut position = (after_comma.position(), first_token_type);
-                        last_token_type = substitute_block(
-                            input,
-                            &mut position,
-                            partial_computed_value,
-                            custom_properties,
-                            device,
-                        )?;
-                        partial_computed_value.push_from(input, position, last_token_type)?;
+                        let fallback =
+                            parse_and_substitute_fallback(input, custom_properties, stylist)?;
+                        last_token_type = fallback.last_token_type;
+
+                        if let Some(registration) = registration {
+                            let mut fallback_input = ParserInput::new(&fallback.css);
+                            let mut fallback_input = Parser::new(&mut fallback_input);
+                            let compute_result =
+                                ComputedRegisteredValue::compute(&mut fallback_input, registration);
+                            if compute_result.is_err() {
+                                return Err(
+                                    input.new_custom_error(StyleParseErrorKind::UnspecifiedError)
+                                );
+                            }
+                        }
+                        partial_computed_value.push_variable(&input, &fallback)?;
                     }
                     Ok(())
                 })?;
@@ -1078,7 +1270,7 @@ fn substitute_block<'i>(
                         position,
                         partial_computed_value,
                         custom_properties,
-                        device,
+                        stylist,
                     )
                 })?;
                 // It's the same type for CloseCurlyBracket and CloseSquareBracket.
@@ -1104,7 +1296,7 @@ pub fn substitute<'i>(
     input: &'i str,
     first_token_type: TokenSerializationType,
     computed_values_map: Option<&Arc<CustomPropertiesMap>>,
-    device: &Device,
+    stylist: &Stylist,
 ) -> Result<String, ParseError<'i>> {
     let mut substituted = ComputedValue::empty();
     let mut input = ParserInput::new(input);
@@ -1120,7 +1312,7 @@ pub fn substitute<'i>(
         &mut position,
         &mut substituted,
         &custom_properties,
-        device,
+        stylist,
     )?;
     substituted.push_from(&input, position, last_token_type)?;
     Ok(substituted.css)

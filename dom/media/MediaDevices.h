@@ -11,18 +11,27 @@
 #include "mozilla/DOMEventTargetHelper.h"
 #include "mozilla/UseCounter.h"
 #include "mozilla/dom/BindingDeclarations.h"
+#include "mozilla/dom/MediaDeviceInfoBinding.h"
 #include "nsCOMPtr.h"
 #include "nsID.h"
 #include "nsISupports.h"
-#include "nsITimer.h"
 #include "nsTHashSet.h"
 
 class AudioDeviceInfo;
 
 namespace mozilla {
 
+class LocalMediaDevice;
+class MediaDevice;
+class MediaMgrError;
+class DOMMediaStream;
 template <typename ResolveValueT, typename RejectValueT, bool IsExclusive>
 class MozPromise;
+
+namespace media {
+template <typename T>
+class Refcountable;
+}  // namespace media
 
 namespace dom {
 
@@ -34,6 +43,8 @@ struct AudioOutputOptions;
 
 class MediaDevices final : public DOMEventTargetHelper {
  public:
+  using StreamPromise =
+      MozPromise<RefPtr<DOMMediaStream>, RefPtr<MediaMgrError>, true>;
   using SinkInfoPromise = MozPromise<RefPtr<AudioDeviceInfo>, nsresult, true>;
 
   explicit MediaDevices(nsPIDOMWindowInner* aWindow);
@@ -50,6 +61,10 @@ class MediaDevices final : public DOMEventTargetHelper {
   already_AddRefed<Promise> GetUserMedia(
       const MediaStreamConstraints& aConstraints, CallerType aCallerType,
       ErrorResult& aRv);
+
+  RefPtr<StreamPromise> GetUserMedia(nsPIDOMWindowInner* aWindow,
+                                     const MediaStreamConstraints& aConstraints,
+                                     CallerType aCallerType);
 
   already_AddRefed<Promise> EnumerateDevices(ErrorResult& aRv);
 
@@ -85,22 +100,36 @@ class MediaDevices final : public DOMEventTargetHelper {
   void BrowserWindowBecameActive() { MaybeResumeDeviceExposure(); }
 
  private:
-  class GumResolver;
-  class EnumDevResolver;
-  class GumRejecter;
+  using MediaDeviceSet = nsTArray<RefPtr<MediaDevice>>;
+  using MediaDeviceSetRefCnt = media::Refcountable<MediaDeviceSet>;
+  using LocalMediaDeviceSet = nsTArray<RefPtr<LocalMediaDevice>>;
 
   virtual ~MediaDevices();
   void MaybeResumeDeviceExposure();
-  void ResumeEnumerateDevices(RefPtr<Promise> aPromise);
+  void ResumeEnumerateDevices(
+      nsTArray<RefPtr<Promise>>&& aPromises,
+      RefPtr<const MediaDeviceSetRefCnt> aExposedDevices) const;
+  RefPtr<MediaDeviceSetRefCnt> FilterExposedDevices(
+      const MediaDeviceSet& aDevices) const;
+  bool CanExposeInfo(MediaDeviceKind aKind) const;
+  bool ShouldQueueDeviceChange(const MediaDeviceSet& aExposedDevices) const;
+  void ResolveEnumerateDevicesPromise(
+      Promise* aPromise, const LocalMediaDeviceSet& aDevices) const;
 
-  nsTHashSet<nsString> mExplicitlyGrantedAudioOutputIds;
+  nsTHashSet<nsString> mExplicitlyGrantedAudioOutputRawIds;
   nsTArray<RefPtr<Promise>> mPendingEnumerateDevicesPromises;
-  nsCOMPtr<nsITimer> mFuzzTimer;
+  // Set only once, if and when required.
+  mutable nsString mDefaultOutputLabel;
 
   // Connect/Disconnect on main thread only
   MediaEventListener mDeviceChangeListener;
+  // Ordered set of the system physical devices when devicechange event
+  // decisions were last performed.
+  RefPtr<const MediaDeviceSetRefCnt> mLastPhysicalDevices;
   bool mIsDeviceChangeListenerSetUp = false;
+  bool mHaveUnprocessedDeviceListChange = false;
   bool mCanExposeMicrophoneInfo = false;
+  bool mCanExposeCameraInfo = false;
 
   void RecordAccessTelemetry(const UseCounter counter) const;
 };

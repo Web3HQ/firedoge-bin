@@ -2,12 +2,11 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function, unicode_literals
-
 import os
 import struct
 import subprocess
 from io import BytesIO
+
 from mozpack.errors import errors
 
 MACHO_SIGNATURES = [
@@ -67,9 +66,8 @@ def is_executable(path):
     """
     Return whether a given file path points to an executable or a library,
     where an executable or library is identified by:
-        - the file extension on OS/2 and WINNT
-        - the file signature on OS/X and ELF systems (GNU/Linux, Android, BSD,
-          Solaris)
+    - the file extension on OS/2 and WINNT
+    - the file signature on OS/X and ELF systems (GNU/Linux, Android, BSD, Solaris)
 
     As this function is intended for use to choose between the ExecutableFile
     and File classes in FileFinder, and choosing ExecutableFile only matters
@@ -93,11 +91,6 @@ def may_strip(path):
     """
     from buildconfig import substs
 
-    # Bug 1658632: clang-11-based strip complains about d3dcompiler_47.dll.
-    # It's not clear why this happens, but as a quick fix just avoid stripping
-    # this DLL. It's not from our build anyway.
-    if "d3dcompiler" in path:
-        return False
     return bool(substs.get("PKG_STRIP"))
 
 
@@ -140,49 +133,3 @@ def elfhack(path):
     cmd = [os.path.join(topobjdir, "build/unix/elfhack/elfhack"), path]
     if subprocess.call(cmd) != 0:
         errors.fatal("Error executing " + " ".join(cmd))
-
-
-def xz_compress(path):
-    """
-    Execute xz to compress the given path.
-    """
-    if open(path, "rb").read(5)[1:] == "7zXZ":
-        print("%s is already compressed" % path)
-        return
-
-    from buildconfig import substs
-
-    xz = substs.get("XZ")
-    cmd = [xz, "-zkf", path]
-
-    # For now, the mozglue XZStream ELF loader can only support xz files
-    # with a single stream that contains a single block. In xz, there is no
-    # explicit option to set the max block count. Instead, we force xz to use
-    # single thread mode, which results in a single block.
-    cmd.extend(["--threads=1"])
-
-    bcj = None
-    if substs.get("MOZ_THUMB2"):
-        bcj = "--armthumb"
-    elif substs.get("CPU_ARCH") == "arm":
-        bcj = "--arm"
-    elif substs.get("CPU_ARCH") == "x86":
-        bcj = "--x86"
-
-    if bcj:
-        cmd.extend([bcj])
-
-    # We need to explicitly specify the LZMA filter chain to ensure consistent builds
-    # across platforms. Note that the dict size must be less then 16MiB per the hardcoded
-    # value in mozglue/linker/XZStream.cpp. This is the default LZMA filter chain for for
-    # xz-utils version 5.0. See:
-    # https://github.com/xz-mirror/xz/blob/v5.0.0/src/liblzma/lzma/lzma_encoder_presets.c
-    # https://github.com/xz-mirror/xz/blob/v5.0.0/src/liblzma/api/lzma/container.h#L31
-    cmd.extend(["--lzma2=dict=8MiB,lc=3,lp=0,pb=2,mode=normal,nice=64,mf=bt4,depth=0"])
-    print("xz-compressing %s with %s" % (path, " ".join(cmd)))
-
-    if subprocess.call(cmd) != 0:
-        errors.fatal("Error executing " + " ".join(cmd))
-        return
-
-    os.rename(path + ".xz", path)

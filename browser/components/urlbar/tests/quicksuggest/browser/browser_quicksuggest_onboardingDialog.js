@@ -7,197 +7,79 @@
  * Tests the buttons in the onboarding dialog for quick suggest/Firefox Suggest.
  */
 
-XPCOMUtils.defineLazyModuleGetters(this, {
-  TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.jsm",
-  UrlbarQuickSuggest: "resource:///modules/UrlbarQuickSuggest.jsm",
+ChromeUtils.defineESModuleGetters(this, {
+  TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.sys.mjs",
 });
-
-const ONBOARDING_URI =
-  "chrome://browser/content/urlbar/quicksuggestOnboarding.xhtml";
 
 const OTHER_DIALOG_URI = getRootDirectory(gTestPath) + "subdialog.xhtml";
 
-// Allow more time for Mac machines so they don't time out in verify mode.
-if (AppConstants.platform == "macosx") {
-  requestLongerTimeout(3);
+// Default-branch pref values in the offline scenario.
+const OFFLINE_DEFAULT_PREFS = {
+  "suggest.quicksuggest.nonsponsored": true,
+  "suggest.quicksuggest.sponsored": true,
+  "quicksuggest.dataCollection.enabled": false,
+};
+
+let gDefaultBranch = Services.prefs.getDefaultBranch("browser.urlbar.");
+let gUserBranch = Services.prefs.getBranch("browser.urlbar.");
+
+// Allow more time for Mac and Linux machines so they don't time out in verify mode.
+if (AppConstants.platform === "macosx") {
+  requestLongerTimeout(4);
+} else if (AppConstants.platform === "linux") {
+  requestLongerTimeout(2);
 }
 
-// When the accept button is clicked, the user should be opted in.
-add_task(async function accept() {
-  await doDialogTest({
-    expectOptIn: true,
-    callback: async () => {
-      let tabCount = gBrowser.tabs.length;
-      let dialogPromise = openDialog("accept");
-
-      info("Calling maybeShowOnboardingDialog");
-      await UrlbarQuickSuggest.maybeShowOnboardingDialog();
-
-      info("Waiting for dialog");
-      await dialogPromise;
-
-      Assert.equal(
-        gBrowser.currentURI.spec,
-        "about:blank",
-        "Nothing loaded in the current tab"
-      );
-      Assert.equal(gBrowser.tabs.length, tabCount, "No news tabs were opened");
-    },
-    onboardingDialogChoice: "accept",
-    telemetryEvents: [
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "enable_toggled",
-        object: "enabled",
-      },
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "sponsored_toggled",
-        object: "enabled",
-      },
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "data_collect_toggled",
-        object: "enabled",
-      },
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "opt_in_dialog",
-        object: "accept",
-      },
-    ],
-  });
+// Whether the tab key can move the focus. On macOS with full keyboard access
+// disabled (which is default), this will be false. See `canTabMoveFocus`.
+let gCanTabMoveFocus;
+add_setup(async function () {
+  gCanTabMoveFocus = await canTabMoveFocus();
 });
 
-// When the Not Now link is clicked, the user should remain opted out.
-add_task(async function notNow() {
-  await doDialogTest({
-    expectOptIn: false,
-    callback: async () => {
-      let tabCount = gBrowser.tabs.length;
-      let dialogPromise = openDialog("onboardingNotNow");
+// When the user has already enabled the data-collection pref, the dialog should
+// not appear.
+add_task(async function dataCollectionAlreadyEnabled() {
+  setDialogPrereqPrefs();
+  UrlbarPrefs.set("quicksuggest.dataCollection.enabled", true);
 
-      info("Calling maybeShowOnboardingDialog");
-      await UrlbarQuickSuggest.maybeShowOnboardingDialog();
+  info("Calling maybeShowOnboardingDialog");
+  let showed = await QuickSuggest.maybeShowOnboardingDialog();
+  Assert.ok(!showed, "The dialog was not shown");
 
-      info("Waiting for dialog");
-      await dialogPromise;
-
-      Assert.equal(
-        gBrowser.currentURI.spec,
-        "about:blank",
-        "Nothing loaded in the current tab"
-      );
-      Assert.equal(gBrowser.tabs.length, tabCount, "No news tabs were opened");
-    },
-    onboardingDialogChoice: "not_now_link",
-    telemetryEvents: [
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "opt_in_dialog",
-        object: "not_now_link",
-      },
-    ],
-  });
+  UrlbarPrefs.clear("quicksuggest.dataCollection.enabled");
 });
 
-// When the settings button is clicked, the user should remain opted out and
-// about:preferences should load.
-add_task(async function settings() {
-  await doDialogTest({
-    expectOptIn: false,
-    callback: async () => {
-      let dialogPromise = openDialog("extra1");
-
-      // about:preferences will load in the current tab since it's
-      // about:blank.
-      let loadPromise = BrowserTestUtils.browserLoaded(
-        gBrowser.selectedBrowser
-      ).then(() => info("Saw load"));
-
-      info("Calling maybeShowOnboardingDialog");
-      await UrlbarQuickSuggest.maybeShowOnboardingDialog();
-
-      info("Waiting for dialog");
-      await dialogPromise;
-
-      info("Waiting for load");
-      await loadPromise;
-
-      Assert.equal(
-        gBrowser.currentURI.spec,
-        "about:preferences#privacy",
-        "Current tab is about:preferences#privacy"
-      );
-    },
-    onboardingDialogChoice: "settings",
-    telemetryEvents: [
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "opt_in_dialog",
-        object: "settings",
-      },
-    ],
-  });
-});
-
-// When Learn More is clicked, the user should remain opted out and the support
-// URL should open in a new tab.
-add_task(async function learnMore() {
-  await doDialogTest({
-    expectOptIn: false,
-    callback: async () => {
-      let dialogPromise = openDialog("onboardingLearnMore");
-      let loadPromise = BrowserTestUtils.waitForNewTab(
-        gBrowser,
-        QuickSuggestTestUtils.LEARN_MORE_URL
-      ).then(tab => {
-        info("Saw new tab");
-        return tab;
-      });
-
-      info("Calling maybeShowOnboardingDialog");
-      await UrlbarQuickSuggest.maybeShowOnboardingDialog();
-
-      info("Waiting for dialog");
-      await dialogPromise;
-
-      info("Waiting for new tab");
-      let tab = await loadPromise;
-
-      Assert.equal(gBrowser.selectedTab, tab, "Current tab is the new tab");
-      Assert.equal(
-        gBrowser.currentURI.spec,
-        QuickSuggestTestUtils.LEARN_MORE_URL,
-        "Current tab is the support page"
-      );
-      BrowserTestUtils.removeTab(tab);
-    },
-    onboardingDialogChoice: "learn_more",
-    telemetryEvents: [
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "opt_in_dialog",
-        object: "learn_more",
-      },
-    ],
+// When the current tab is about:welcome, the dialog should not appear.
+add_task(async function aboutWelcome() {
+  setDialogPrereqPrefs();
+  await BrowserTestUtils.withNewTab("about:welcome", async () => {
+    info("Calling maybeShowOnboardingDialog");
+    let showed = await QuickSuggest.maybeShowOnboardingDialog();
+    Assert.ok(!showed, "The dialog was not shown");
   });
 });
 
 // The Escape key should dismiss the dialog without opting in. This task tests
 // when Escape is pressed while the focus is inside the dialog.
 add_task(async function escKey_focusInsideDialog() {
-  await doFocusTest({
-    tabKeyRepeat: 0,
-    expectedFocusID: "onboardingAcceptButton",
-    expectOptIn: false,
+  await doDialogTest({
     callback: async () => {
-      let tabCount = gBrowser.tabs.length;
+      const { maybeShowPromise } = await showOnboardingDialog({
+        skipIntroduction: true,
+      });
+
+      const tabCount = gBrowser.tabs.length;
       Assert.ok(
         document.activeElement.classList.contains("dialogFrame"),
         "dialogFrame is focused in the browser window"
       );
+
+      info("Close the dialog");
       EventUtils.synthesizeKey("KEY_Escape");
+
+      await maybeShowPromise;
+
       Assert.equal(
         gBrowser.currentURI.spec,
         "about:blank",
@@ -205,12 +87,21 @@ add_task(async function escKey_focusInsideDialog() {
       );
       Assert.equal(gBrowser.tabs.length, tabCount, "No news tabs were opened");
     },
-    onboardingDialogChoice: "dismissed_escape_key",
+    onboardingDialogVersion: JSON.stringify({ version: 1 }),
+    onboardingDialogChoice: "dismiss_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
+      },
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "dismissed_escape_key",
+        object: "dismiss_2",
       },
     ],
   });
@@ -219,24 +110,38 @@ add_task(async function escKey_focusInsideDialog() {
 // The Escape key should dismiss the dialog without opting in. This task tests
 // when Escape is pressed while the focus is outside the dialog.
 add_task(async function escKey_focusOutsideDialog() {
-  await doFocusTest({
-    tabKeyRepeat: 0,
-    expectedFocusID: "onboardingAcceptButton",
-    expectOptIn: false,
+  await doDialogTest({
     callback: async () => {
+      const { maybeShowPromise } = await showOnboardingDialog({
+        skipIntroduction: true,
+      });
+
       document.documentElement.focus();
       Assert.ok(
         !document.activeElement.classList.contains("dialogFrame"),
         "dialogFrame is not focused in the browser window"
       );
+
+      info("Close the dialog");
       EventUtils.synthesizeKey("KEY_Escape");
+
+      await maybeShowPromise;
     },
-    onboardingDialogChoice: "dismissed_escape_key",
+    onboardingDialogVersion: JSON.stringify({ version: 1 }),
+    onboardingDialogChoice: "dismiss_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
+      },
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "dismissed_escape_key",
+        object: "dismiss_2",
       },
     ],
   });
@@ -258,10 +163,9 @@ add_task(async function escKey_queued_enter() {
 
 async function doQueuedEscKeyTest(otherDialogKey) {
   await doDialogTest({
-    expectOptIn: false,
     callback: async () => {
       // Create promises that will resolve when each dialog is opened.
-      let uris = [OTHER_DIALOG_URI, ONBOARDING_URI];
+      let uris = [OTHER_DIALOG_URI, QuickSuggest.ONBOARDING_URI];
       let [otherOpenedPromise, onboardingOpenedPromise] = uris.map(uri =>
         TestUtils.topicObserved(
           "subdialog-loaded",
@@ -275,7 +179,7 @@ async function doQueuedEscKeyTest(otherDialogKey) {
 
       info("Queuing dialogs for opening");
       let otherClosedPromise = gDialogBox.open(OTHER_DIALOG_URI);
-      let onboardingClosedPromise = UrlbarQuickSuggest.maybeShowOnboardingDialog();
+      let onboardingClosedPromise = QuickSuggest.maybeShowOnboardingDialog();
 
       info("Waiting for the other dialog to open");
       await otherOpenedPromise;
@@ -291,174 +195,1039 @@ async function doQueuedEscKeyTest(otherDialogKey) {
       EventUtils.synthesizeKey("KEY_Escape");
       await onboardingClosedPromise;
     },
-    onboardingDialogChoice: "dismissed_escape_key",
+    onboardingDialogVersion: JSON.stringify({ version: 1 }),
+    onboardingDialogChoice: "dismiss_1",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
+      },
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "dismissed_escape_key",
+        object: "dismiss_1",
       },
     ],
   });
 }
 
 // Tests `dismissed_other` by closing the dialog programmatically.
-add_task(async function dismissed_other() {
+add_task(async function dismissed_other_on_introduction() {
   await doDialogTest({
-    expectOptIn: false,
     callback: async () => {
-      let dialogPromise = BrowserTestUtils.promiseAlertDialogOpen(
-        null,
-        ONBOARDING_URI,
-        { isSubDialog: true }
-      );
-
-      let maybeShowPromise = UrlbarQuickSuggest.maybeShowOnboardingDialog();
-
-      let win = await dialogPromise;
-      if (win.document.readyState != "complete") {
-        await BrowserTestUtils.waitForEvent(win, "load");
-      }
-
+      const { maybeShowPromise } = await showOnboardingDialog();
       gDialogBox._dialog.close();
       await maybeShowPromise;
     },
-    onboardingDialogChoice: "dismissed_other",
+    onboardingDialogVersion: JSON.stringify({ version: 1 }),
+    onboardingDialogChoice: "dismiss_1",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
+      },
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "dismissed_other",
+        object: "dismiss_1",
       },
     ],
   });
 });
 
-// Tests tabbing through the dialog and pressing enter.
-// Tab key count: 0
-// Expected focused element: accept button
-add_task(async function focus_accept() {
-  await doFocusTest({
-    tabKeyRepeat: 0,
-    expectedFocusID: "onboardingAcceptButton",
-    expectOptIn: true,
-    callback: async () => {
-      EventUtils.synthesizeKey("KEY_Enter");
+// The default is to wait for no browser restarts to show the onboarding dialog
+// on the first restart. This tests that we can override it by configuring the
+// `showOnboardingDialogOnNthRestart`
+add_task(async function nimbus_override_wait_after_n_restarts() {
+  UrlbarPrefs.clear("quicksuggest.shouldShowOnboardingDialog");
+  UrlbarPrefs.clear("quicksuggest.showedOnboardingDialog");
+  UrlbarPrefs.clear("quicksuggest.seenRestarts", 0);
+
+  await QuickSuggestTestUtils.withExperiment({
+    valueOverrides: {
+      quickSuggestScenario: "online",
+      // Wait for 1 browser restart
+      quickSuggestShowOnboardingDialogAfterNRestarts: 1,
     },
-    onboardingDialogChoice: "accept",
+    callback: async () => {
+      let prefPromise = TestUtils.waitForPrefChange(
+        "browser.urlbar.quicksuggest.showedOnboardingDialog",
+        value => value === true
+      ).then(() => info("Saw pref change"));
+
+      // Simulate 2 restarts. this function is only called by BrowserGlue
+      // on startup, the first restart would be where MR1 was shown then
+      // we will show onboarding the 2nd restart after that.
+      info("Simulating first restart");
+      await QuickSuggest.maybeShowOnboardingDialog();
+
+      info("Simulating second restart");
+      const dialogPromise = BrowserTestUtils.promiseAlertDialogOpen(
+        null,
+        QuickSuggest.ONBOARDING_URI,
+        { isSubDialog: true }
+      );
+      const maybeShowPromise = QuickSuggest.maybeShowOnboardingDialog();
+      const win = await dialogPromise;
+      if (win.document.readyState != "complete") {
+        await BrowserTestUtils.waitForEvent(win, "load");
+      }
+      // Close dialog.
+      EventUtils.synthesizeKey("KEY_Escape");
+
+      info("Waiting for maybeShowPromise and pref change");
+      await Promise.all([maybeShowPromise, prefPromise]);
+    },
+  });
+});
+
+add_task(async function nimbus_skip_onboarding_dialog() {
+  UrlbarPrefs.clear("quicksuggest.shouldShowOnboardingDialog");
+  UrlbarPrefs.clear("quicksuggest.showedOnboardingDialog");
+  UrlbarPrefs.clear("quicksuggest.seenRestarts", 0);
+
+  await QuickSuggestTestUtils.withExperiment({
+    valueOverrides: {
+      quickSuggestScenario: "online",
+      quickSuggestShouldShowOnboardingDialog: false,
+    },
+    callback: async () => {
+      // Simulate 3 restarts.
+      for (let i = 0; i < 3; i++) {
+        info(`Simulating restart ${i + 1}`);
+        await QuickSuggest.maybeShowOnboardingDialog();
+      }
+      Assert.ok(
+        !Services.prefs.getBoolPref(
+          "browser.urlbar.quicksuggest.showedOnboardingDialog",
+          false
+        ),
+        "The showed onboarding dialog pref should not be set"
+      );
+    },
+  });
+});
+
+add_task(async function nimbus_exposure_event() {
+  const testData = [
+    {
+      experimentType: "modal",
+      expectedRecorded: true,
+    },
+    {
+      experimentType: "best-match",
+      expectedRecorded: false,
+    },
+    {
+      expectedRecorded: false,
+    },
+  ];
+
+  for (const { experimentType, expectedRecorded } of testData) {
+    info(`Nimbus exposure event test for type:[${experimentType}]`);
+    UrlbarPrefs.clear("quicksuggest.shouldShowOnboardingDialog");
+    UrlbarPrefs.clear("quicksuggest.showedOnboardingDialog");
+    UrlbarPrefs.clear("quicksuggest.seenRestarts", 0);
+
+    await QuickSuggestTestUtils.clearExposureEvent();
+
+    await QuickSuggestTestUtils.withExperiment({
+      valueOverrides: {
+        quickSuggestScenario: "online",
+        experimentType,
+      },
+      callback: async () => {
+        info("Calling showOnboardingDialog");
+        const { maybeShowPromise } = await showOnboardingDialog();
+        EventUtils.synthesizeKey("KEY_Escape");
+        await maybeShowPromise;
+
+        info("Check the event");
+        await QuickSuggestTestUtils.assertExposureEvent(expectedRecorded);
+      },
+    });
+  }
+});
+
+const LOGO_TYPE = {
+  FIREFOX: 1,
+  MAGGLASS: 2,
+  ANIMATION_MAGGLASS: 3,
+};
+
+const VARIATION_TEST_DATA = [
+  {
+    name: "A",
+    introductionSection: {
+      logoType: LOGO_TYPE.ANIMATION_MAGGLASS,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-1",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+      defaultFocusOrder: [
+        "onboardingNext",
+        "onboardingClose",
+        "onboardingDialog",
+        "onboardingNext",
+      ],
+      actions: ["onboardingClose", "onboardingNext"],
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.MAGGLASS,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-1",
+        "main-description": "firefox-suggest-onboarding-main-description-1",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-1",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-1",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+      defaultFocusOrder: [
+        "onboardingNext",
+        "onboardingAccept",
+        "onboardingLearnMore",
+        "onboardingReject",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingAccept",
+      ],
+      acceptFocusOrder: [
+        "onboardingAccept",
+        "onboardingLearnMore",
+        "onboardingSubmit",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingAccept",
+      ],
+      rejectFocusOrder: [
+        "onboardingReject",
+        "onboardingSubmit",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingLearnMore",
+        "onboardingReject",
+      ],
+      actions: [
+        "onboardingAccept",
+        "onboardingReject",
+        "onboardingSkipLink",
+        "onboardingLearnMore",
+      ],
+    },
+  },
+  {
+    // We don't need to test the focus order and actions because the layout of
+    // variation B-H is as same as A.
+    name: "B",
+    introductionSection: {
+      logoType: LOGO_TYPE.ANIMATION_MAGGLASS,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-2",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.MAGGLASS,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-2",
+        "main-description": "firefox-suggest-onboarding-main-description-2",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-1",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-1",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "C",
+    introductionSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-3",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-3",
+        "main-description": "firefox-suggest-onboarding-main-description-3",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-1",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-1",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "D",
+    introductionSection: {
+      logoType: LOGO_TYPE.ANIMATION_MAGGLASS,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-4",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.MAGGLASS,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-4",
+        "main-description": "firefox-suggest-onboarding-main-description-4",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-2",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-2",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "E",
+    introductionSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-5",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-5",
+        "main-description": "firefox-suggest-onboarding-main-description-5",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-2",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-2",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "F",
+    introductionSection: {
+      logoType: LOGO_TYPE.ANIMATION_MAGGLASS,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-2",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-6",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.MAGGLASS,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-6",
+        "main-description": "firefox-suggest-onboarding-main-description-6",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-2",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-2",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "G",
+    introductionSection: {
+      logoType: LOGO_TYPE.ANIMATION_MAGGLASS,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-7",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.MAGGLASS,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-7",
+        "main-description": "firefox-suggest-onboarding-main-description-7",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-2",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-2",
+      },
+      visibility: {
+        "#main-privacy-first": true,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "H",
+    introductionSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-1",
+        "introduction-title": "firefox-suggest-onboarding-introduction-title-2",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": false,
+        ".description-section": false,
+        ".pager": true,
+      },
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-8",
+        "main-description": "firefox-suggest-onboarding-main-description-8",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-1",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-1",
+      },
+      visibility: {
+        "#main-privacy-first": false,
+        ".description-section #onboardingLearnMore": false,
+        ".accept #onboardingLearnMore": true,
+        ".pager": true,
+      },
+    },
+  },
+  {
+    name: "100-A",
+    introductionSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        onboardingNext: "firefox-suggest-onboarding-introduction-next-button-3",
+        "introduction-title": "firefox-suggest-onboarding-main-title-9",
+      },
+      visibility: {
+        "#onboardingLearnMoreOnIntroduction": true,
+        ".description-section": true,
+        ".pager": true,
+      },
+      defaultFocusOrder: [
+        "onboardingNext",
+        "onboardingLearnMoreOnIntroduction",
+        "onboardingClose",
+        "onboardingDialog",
+        "onboardingNext",
+      ],
+      actions: [
+        "onboardingClose",
+        "onboardingNext",
+        "onboardingLearnMoreOnIntroduction",
+      ],
+    },
+    mainSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-9",
+        "main-description": "firefox-suggest-onboarding-main-description-9",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label-2",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-3",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label-2",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-3",
+      },
+      visibility: {
+        "#main-privacy-first": true,
+        ".description-section #onboardingLearnMore": true,
+        ".accept #onboardingLearnMore": false,
+        ".pager": false,
+      },
+      defaultFocusOrder: [
+        "onboardingNext",
+        "onboardingLearnMore",
+        "onboardingAccept",
+        "onboardingReject",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingLearnMore",
+      ],
+      acceptFocusOrder: [
+        "onboardingAccept",
+        "onboardingSubmit",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingLearnMore",
+        "onboardingAccept",
+      ],
+      rejectFocusOrder: [
+        "onboardingReject",
+        "onboardingSubmit",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingLearnMore",
+        "onboardingReject",
+      ],
+      actions: [
+        "onboardingAccept",
+        "onboardingReject",
+        "onboardingSkipLink",
+        "onboardingLearnMore",
+      ],
+    },
+  },
+  {
+    name: "100-B",
+    mainSection: {
+      logoType: LOGO_TYPE.FIREFOX,
+      l10n: {
+        "main-title": "firefox-suggest-onboarding-main-title-9",
+        "main-description": "firefox-suggest-onboarding-main-description-9",
+        "main-accept-option-label":
+          "firefox-suggest-onboarding-main-accept-option-label-2",
+        "main-accept-option-description":
+          "firefox-suggest-onboarding-main-accept-option-description-3",
+        "main-reject-option-label":
+          "firefox-suggest-onboarding-main-reject-option-label-2",
+        "main-reject-option-description":
+          "firefox-suggest-onboarding-main-reject-option-description-3",
+      },
+      visibility: {
+        "#main-privacy-first": true,
+        ".description-section #onboardingLearnMore": true,
+        ".accept #onboardingLearnMore": false,
+        ".pager": false,
+      },
+      // Layout of 100-B is same as 100-A, but since there is no the introduction
+      // pane, only the default focus order on the main pane is a bit diffrence.
+      defaultFocusOrder: [
+        "onboardingLearnMore",
+        "onboardingAccept",
+        "onboardingReject",
+        "onboardingSkipLink",
+        "onboardingDialog",
+        "onboardingLearnMore",
+      ],
+    },
+  },
+];
+
+/**
+ * This test checks for differences due to variations in logo type, l10n text,
+ * element visibility, order of focus, actions, etc. The designation is on
+ * VARIATION_TEST_DATA. The items that can be specified are below.
+ *
+ * name: Specify the variation name.
+ *
+ * The following items are specified for each section.
+ * (introductionSection, mainSection).
+ *
+ * logoType:
+ *   Specify the expected logo type. Please refer to LOGO_TYPE about the type.
+ *
+ * l10n:
+ *   Specify the expected l10n id applied to elements.
+ *
+ * visibility:
+ *   Specify the expected visibility of elements. The way to specify the element
+ *   is using selector.
+ *
+ * defaultFocusOrder:
+ *   Specify the expected focus order right after the section is appeared. The
+ *   way to specify the element is using id.
+ *
+ * acceptFocusOrder:
+ *   Specify the expected focus order after selecting accept option.
+ *
+ * rejectFocusOrder:
+ *   Specify the expected focus order after selecting reject option.
+ *
+ * actions:
+ *   Specify the action we want to verify such as clicking the  close button. The
+ *   available actions are below.
+ * - onboardingClose:
+ *     Action of the close button “x” by mouse/keyboard.
+ * - onboardingNext:
+ *     Action of the next button that transits from the introduction section to
+ *     the main section by mouse/keyboard.
+ * - onboardingAccept:
+ *      Action of the submit button by mouse/keyboard after selecting accept
+ *      option by mouse/keyboard.
+ * - onboardingReject:
+ *      Action of the submit button by mouse/keyboard after selecting reject
+ *      option by mouse/keyboard.
+ * - onboardingSkipLink:
+ *      Action of the skip link by mouse/keyboard.
+ * - onboardingLearnMore:
+ *      Action of the learn more link by mouse/keyboard.
+ * - onboardingLearnMoreOnIntroduction:
+ *      Action of the learn more link on the introduction section by
+ *      mouse/keyboard.
+ */
+add_task(async function variation_test() {
+  for (const variation of VARIATION_TEST_DATA) {
+    info(`Test for variation [${variation.name}]`);
+
+    info("Do layout test");
+    await doLayoutTest(variation);
+
+    for (const action of variation.introductionSection?.actions || []) {
+      info(
+        `${action} test on the introduction section for variation [${variation.name}]`
+      );
+      await this[action](variation);
+    }
+
+    for (const action of variation.mainSection?.actions || []) {
+      info(
+        `${action} test on the main section for variation [${variation.name}]`
+      );
+      await this[action](variation, !!variation.introductionSection);
+    }
+  }
+});
+
+async function doLayoutTest(variation) {
+  UrlbarPrefs.clear("quicksuggest.shouldShowOnboardingDialog");
+  UrlbarPrefs.clear("quicksuggest.showedOnboardingDialog");
+  UrlbarPrefs.clear("quicksuggest.seenRestarts", 0);
+
+  await QuickSuggestTestUtils.withExperiment({
+    valueOverrides: {
+      quickSuggestScenario: "online",
+      quickSuggestOnboardingDialogVariation: variation.name,
+    },
+    callback: async () => {
+      info("Calling showOnboardingDialog");
+      const { win, maybeShowPromise } = await showOnboardingDialog();
+
+      const introductionSection = win.document.getElementById(
+        "introduction-section"
+      );
+      const mainSection = win.document.getElementById("main-section");
+
+      if (variation.introductionSection) {
+        info("Check the section visibility");
+        Assert.ok(BrowserTestUtils.is_visible(introductionSection));
+        Assert.ok(BrowserTestUtils.is_hidden(mainSection));
+
+        info("Check the introduction section");
+        await assertSection(introductionSection, variation.introductionSection);
+
+        info("Transition to the main section");
+        win.document.getElementById("onboardingNext").click();
+        await BrowserTestUtils.waitForCondition(
+          () =>
+            BrowserTestUtils.is_hidden(introductionSection) &&
+            BrowserTestUtils.is_visible(mainSection)
+        );
+      } else {
+        info("Check the section visibility");
+        Assert.ok(BrowserTestUtils.is_hidden(introductionSection));
+        Assert.ok(BrowserTestUtils.is_visible(mainSection));
+      }
+
+      info("Check the main section");
+      await assertSection(mainSection, variation.mainSection);
+
+      info("Close the dialog");
+      EventUtils.synthesizeKey("KEY_Escape", {}, win);
+      await maybeShowPromise;
+    },
+  });
+}
+
+async function assertSection(sectionElement, expectedSection) {
+  info("Check the logo");
+  assertLogo(sectionElement, expectedSection.logoType);
+
+  info("Check the l10n");
+  assertL10N(sectionElement, expectedSection.l10n);
+
+  info("Check the visibility");
+  assertVisibility(sectionElement, expectedSection.visibility);
+
+  if (!gCanTabMoveFocus) {
+    Assert.ok(true, "Tab key can't move focus, skipping test for focus order");
+    return;
+  }
+
+  if (expectedSection.defaultFocusOrder) {
+    info("Check the default focus order");
+    assertFocusOrder(sectionElement, expectedSection.defaultFocusOrder);
+  }
+
+  if (expectedSection.acceptFocusOrder) {
+    info("Check the focus order after selecting accept option");
+    sectionElement.querySelector("#onboardingAccept").focus();
+    EventUtils.synthesizeKey("VK_SPACE", {}, sectionElement.ownerGlobal);
+    assertFocusOrder(sectionElement, expectedSection.acceptFocusOrder);
+  }
+
+  if (expectedSection.rejectFocusOrder) {
+    info("Check the focus order after selecting reject option");
+    sectionElement.querySelector("#onboardingReject").focus();
+    EventUtils.synthesizeKey("VK_SPACE", {}, sectionElement.ownerGlobal);
+    assertFocusOrder(sectionElement, expectedSection.rejectFocusOrder);
+  }
+}
+
+function assertLogo(sectionElement, expectedLogoType) {
+  let expectedLogoImage;
+  switch (expectedLogoType) {
+    case LOGO_TYPE.FIREFOX: {
+      expectedLogoImage = 'url("chrome://branding/content/about-logo.svg")';
+      break;
+    }
+    case LOGO_TYPE.MAGGLASS: {
+      expectedLogoImage =
+        'url("chrome://browser/content/urlbar/quicksuggestOnboarding_magglass.svg")';
+      break;
+    }
+    case LOGO_TYPE.ANIMATION_MAGGLASS: {
+      const mediaQuery = sectionElement.ownerGlobal.matchMedia(
+        "(prefers-reduced-motion: no-preference)"
+      );
+      expectedLogoImage = mediaQuery.matches
+        ? 'url("chrome://browser/content/urlbar/quicksuggestOnboarding_magglass_animation.svg")'
+        : 'url("chrome://browser/content/urlbar/quicksuggestOnboarding_magglass.svg")';
+      break;
+    }
+    default: {
+      Assert.ok(false, `Unexpected image type ${expectedLogoType}`);
+      break;
+    }
+  }
+
+  const logo = sectionElement.querySelector(".logo");
+  Assert.ok(BrowserTestUtils.is_visible(logo));
+  const logoImage =
+    sectionElement.ownerGlobal.getComputedStyle(logo).backgroundImage;
+  Assert.equal(logoImage, expectedLogoImage);
+}
+
+function assertL10N(sectionElement, expectedL10N) {
+  for (const [id, l10n] of Object.entries(expectedL10N)) {
+    const element = sectionElement.querySelector("#" + id);
+    Assert.equal(element.getAttribute("data-l10n-id"), l10n);
+  }
+}
+
+function assertVisibility(sectionElement, expectedVisibility) {
+  for (const [selector, visibility] of Object.entries(expectedVisibility)) {
+    const element = sectionElement.querySelector(selector);
+    if (visibility) {
+      Assert.ok(BrowserTestUtils.is_visible(element));
+    } else {
+      if (!element) {
+        Assert.ok(true);
+        return;
+      }
+      Assert.ok(BrowserTestUtils.is_hidden(element));
+    }
+  }
+}
+
+function assertFocusOrder(sectionElement, expectedFocusOrder) {
+  const win = sectionElement.ownerGlobal;
+
+  // Check initial active element.
+  Assert.equal(win.document.activeElement.id, expectedFocusOrder[0]);
+
+  for (const next of expectedFocusOrder.slice(1)) {
+    EventUtils.synthesizeKey("KEY_Tab", {}, win);
+    Assert.equal(win.document.activeElement.id, next);
+  }
+}
+
+async function onboardingClose(variation) {
+  await doActionTest({
+    callback: async (win, userAction, maybeShowPromise) => {
+      info("Check the status of the close button");
+      const closeButton = win.document.getElementById("onboardingClose");
+      Assert.ok(BrowserTestUtils.is_visible(closeButton));
+      Assert.equal(closeButton.getAttribute("title"), "Close");
+
+      info("Commit the close button");
+      userAction(closeButton);
+
+      info("Waiting for maybeShowOnboardingDialog to finish");
+      await maybeShowPromise;
+    },
+    variation,
+    onboardingDialogVersion: JSON.stringify({
+      version: 1,
+      variation: variation.name.toLowerCase(),
+    }),
+    onboardingDialogChoice: "close_1",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "enable_toggled",
-        object: "enabled",
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
       },
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "sponsored_toggled",
-        object: "enabled",
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "opt_in_dialog",
+        object: "close_1",
+      },
+    ],
+  });
+}
+
+async function onboardingNext(variation) {
+  await doActionTest({
+    callback: async (win, userAction, maybeShowPromise) => {
+      info("Check the status of the next button");
+      const nextButton = win.document.getElementById("onboardingNext");
+      Assert.ok(BrowserTestUtils.is_visible(nextButton));
+
+      info("Commit the next button");
+      userAction(nextButton);
+
+      const introductionSection = win.document.getElementById(
+        "introduction-section"
+      );
+      const mainSection = win.document.getElementById("main-section");
+      await BrowserTestUtils.waitForCondition(
+        () =>
+          BrowserTestUtils.is_hidden(introductionSection) &&
+          BrowserTestUtils.is_visible(mainSection),
+        "Wait for the transition"
+      );
+
+      info("Exit");
+      EventUtils.synthesizeKey("KEY_Escape", {}, win);
+
+      info("Waiting for maybeShowOnboardingDialog to finish");
+      await maybeShowPromise;
+    },
+    variation,
+    onboardingDialogVersion: JSON.stringify({
+      version: 1,
+      variation: variation.name.toLowerCase(),
+    }),
+    onboardingDialogChoice: "dismiss_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
+    telemetryEvents: [
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
       },
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "opt_in_dialog",
+        object: "dismiss_2",
+      },
+    ],
+  });
+}
+
+async function onboardingAccept(variation, skipIntroduction) {
+  await doActionTest({
+    callback: async (win, userAction, maybeShowPromise) => {
+      info("Check the status of the accept option and submit button");
+      const acceptOption = win.document.getElementById("onboardingAccept");
+      const submitButton = win.document.getElementById("onboardingSubmit");
+      Assert.ok(acceptOption);
+      Assert.ok(submitButton.disabled);
+
+      info("Select the accept option");
+      userAction(acceptOption);
+
+      info("Commit the submit button");
+      Assert.ok(!submitButton.disabled);
+      userAction(submitButton);
+
+      info("Waiting for maybeShowOnboardingDialog to finish");
+      await maybeShowPromise;
+    },
+    variation,
+    skipIntroduction,
+    onboardingDialogVersion: JSON.stringify({
+      version: 1,
+      variation: variation.name.toLowerCase(),
+    }),
+    onboardingDialogChoice: "accept_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.onboardingDialogVersion": JSON.stringify({ version: 1 }),
+      "quicksuggest.dataCollection.enabled": true,
+    },
+    telemetryEvents: [
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "data_collect_toggled",
         object: "enabled",
       },
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "accept",
+        object: "accept_2",
       },
     ],
   });
-});
+}
 
-// Tests tabbing through the dialog and pressing enter.
-// Tab key count: 1
-// Expected focused element: settings button
-add_task(async function focus_settings() {
-  await doFocusTest({
-    tabKeyRepeat: 1,
-    expectedFocusID: "onboardingSettingsButton",
-    expectOptIn: false,
-    callback: async () => {
-      // about:preferences will load in the current tab since it's about:blank.
-      let loadPromise = BrowserTestUtils.browserLoaded(
-        gBrowser.selectedBrowser
-      ).then(() => info("Saw load"));
+async function onboardingReject(variation, skipIntroduction) {
+  await doActionTest({
+    callback: async (win, userAction, maybeShowPromise) => {
+      info("Check the status of the reject option and submit button");
+      const rejectOption = win.document.getElementById("onboardingReject");
+      const submitButton = win.document.getElementById("onboardingSubmit");
+      Assert.ok(rejectOption);
+      Assert.ok(submitButton.disabled);
 
-      EventUtils.synthesizeKey("KEY_Enter");
+      info("Select the reject option");
+      userAction(rejectOption);
 
-      info("Waiting for load");
-      await loadPromise;
+      info("Commit the submit button");
+      Assert.ok(!submitButton.disabled);
+      userAction(submitButton);
 
-      Assert.equal(
-        gBrowser.currentURI.spec,
-        "about:preferences#privacy",
-        "Current tab is about:preferences#privacy"
-      );
+      info("Waiting for maybeShowOnboardingDialog to finish");
+      await maybeShowPromise;
     },
-    onboardingDialogChoice: "settings",
+    variation,
+    skipIntroduction,
+    onboardingDialogVersion: JSON.stringify({
+      version: 1,
+      variation: variation.name.toLowerCase(),
+    }),
+    onboardingDialogChoice: "reject_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "opt_in_dialog",
-        object: "settings",
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
       },
-    ],
-  });
-});
-
-// Tests tabbing through the dialog and pressing enter.
-// Tab key count: 2
-// Expected focused element: learn more link
-add_task(async function focus_learnMore() {
-  await doFocusTest({
-    tabKeyRepeat: 2,
-    expectedFocusID: "onboardingLearnMore",
-    expectOptIn: false,
-    callback: async () => {
-      let loadPromise = BrowserTestUtils.waitForNewTab(
-        gBrowser,
-        QuickSuggestTestUtils.LEARN_MORE_URL
-      ).then(tab => {
-        info("Saw new tab");
-        return tab;
-      });
-
-      EventUtils.synthesizeKey("KEY_Enter");
-
-      info("Waiting for new tab");
-      let tab = await loadPromise;
-
-      Assert.equal(gBrowser.selectedTab, tab, "Current tab is the new tab");
-      Assert.equal(
-        gBrowser.currentURI.spec,
-        QuickSuggestTestUtils.LEARN_MORE_URL,
-        "Current tab is the support page"
-      );
-      BrowserTestUtils.removeTab(tab);
-    },
-    onboardingDialogChoice: "learn_more",
-    telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "learn_more",
+        object: "reject_2",
       },
     ],
   });
-});
+}
 
-// Tests tabbing through the dialog and pressing enter.
-// Tab key count: 3
-// Expected focused element: not now link
-add_task(async function focus_notNow() {
-  await doFocusTest({
-    tabKeyRepeat: 3,
-    expectedFocusID: "onboardingNotNow",
-    expectOptIn: false,
-    callback: async () => {
-      let tabCount = gBrowser.tabs.length;
-      EventUtils.synthesizeKey("KEY_Enter");
+async function onboardingSkipLink(variation, skipIntroduction) {
+  await doActionTest({
+    callback: async (win, userAction, maybeShowPromise) => {
+      info("Check the status of the skip link");
+      const skipLink = win.document.getElementById("onboardingSkipLink");
+      Assert.ok(BrowserTestUtils.is_visible(skipLink));
+
+      info("Commit the skip link");
+      const tabCount = gBrowser.tabs.length;
+      userAction(skipLink);
+
+      info("Waiting for maybeShowOnboardingDialog to finish");
+      await maybeShowPromise;
+
+      info("Check the current tab status");
       Assert.equal(
         gBrowser.currentURI.spec,
         "about:blank",
@@ -466,196 +1235,309 @@ add_task(async function focus_notNow() {
       );
       Assert.equal(gBrowser.tabs.length, tabCount, "No news tabs were opened");
     },
-    onboardingDialogChoice: "not_now_link",
-    telemetryEvents: [
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "opt_in_dialog",
-        object: "not_now_link",
-      },
-    ],
-  });
-});
-
-// Tests tabbing through the dialog and pressing enter.
-// Tab key count: 4
-// Expected focused element: accept button (wraps around)
-add_task(async function focus_accept_wraparound() {
-  await doFocusTest({
-    tabKeyRepeat: 4,
-    expectedFocusID: "onboardingAcceptButton",
-    expectOptIn: true,
-    callback: async () => {
-      EventUtils.synthesizeKey("KEY_Enter");
+    variation,
+    skipIntroduction,
+    onboardingDialogVersion: JSON.stringify({
+      version: 1,
+      variation: variation.name.toLowerCase(),
+    }),
+    onboardingDialogChoice: "not_now_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
     },
-    onboardingDialogChoice: "accept",
     telemetryEvents: [
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "enable_toggled",
-        object: "enabled",
-      },
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-        method: "sponsored_toggled",
-        object: "enabled",
-      },
-      {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "data_collect_toggled",
-        object: "enabled",
+        object: "disabled",
       },
       {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
         method: "opt_in_dialog",
-        object: "accept",
+        object: "not_now_2",
       },
     ],
   });
-});
+}
+
+async function onboardingLearnMore(variation, skipIntroduction) {
+  await doLearnMoreTest(
+    variation,
+    skipIntroduction,
+    "onboardingLearnMore",
+    "learn_more_2"
+  );
+}
+
+async function onboardingLearnMoreOnIntroduction(variation, skipIntroduction) {
+  await doLearnMoreTest(
+    variation,
+    skipIntroduction,
+    "onboardingLearnMoreOnIntroduction",
+    "learn_more_1"
+  );
+}
+
+async function doLearnMoreTest(variation, skipIntroduction, target, telemetry) {
+  await doActionTest({
+    callback: async (win, userAction, maybeShowPromise) => {
+      info("Check the status of the learn more link");
+      const learnMoreLink = win.document.getElementById(target);
+      Assert.ok(BrowserTestUtils.is_visible(learnMoreLink));
+
+      info("Commit the learn more link");
+      const loadPromise = BrowserTestUtils.waitForNewTab(
+        gBrowser,
+        QuickSuggest.HELP_URL
+      ).then(tab => {
+        info("Saw new tab");
+        return tab;
+      });
+      userAction(learnMoreLink);
+
+      info("Waiting for maybeShowOnboardingDialog to finish");
+      await maybeShowPromise;
+
+      info("Waiting for new tab");
+      let tab = await loadPromise;
+
+      info("Check the current tab status");
+      Assert.equal(gBrowser.selectedTab, tab, "Current tab is the new tab");
+      Assert.equal(
+        gBrowser.currentURI.spec,
+        QuickSuggest.HELP_URL,
+        "Current tab is the support page"
+      );
+      BrowserTestUtils.removeTab(tab);
+    },
+    variation,
+    skipIntroduction,
+    onboardingDialogChoice: telemetry,
+    onboardingDialogVersion: JSON.stringify({
+      version: 1,
+      variation: variation.name.toLowerCase(),
+    }),
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
+    telemetryEvents: [
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
+      },
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "opt_in_dialog",
+        object: telemetry,
+      },
+    ],
+  });
+}
+
+async function doActionTest({
+  variation,
+  skipIntroduction,
+  callback,
+  onboardingDialogVersion,
+  onboardingDialogChoice,
+  expectedUserBranchPrefs,
+  telemetryEvents,
+}) {
+  const userClick = target => {
+    info("Click on the target");
+    target.click();
+  };
+  const userEnter = target => {
+    target.focus();
+    if (target.type === "radio") {
+      info("Space on the target");
+      EventUtils.synthesizeKey("VK_SPACE", {}, target.ownerGlobal);
+    } else {
+      info("Enter on the target");
+      EventUtils.synthesizeKey("KEY_Enter", {}, target.ownerGlobal);
+    }
+  };
+
+  for (const userAction of [userClick, userEnter]) {
+    UrlbarPrefs.clear("quicksuggest.shouldShowOnboardingDialog");
+    UrlbarPrefs.clear("quicksuggest.showedOnboardingDialog");
+    UrlbarPrefs.clear("quicksuggest.seenRestarts", 0);
+
+    await QuickSuggestTestUtils.withExperiment({
+      valueOverrides: {
+        quickSuggestScenario: "online",
+        quickSuggestOnboardingDialogVariation: variation.name,
+      },
+      callback: async () => {
+        await doDialogTest({
+          callback: async () => {
+            info("Calling showOnboardingDialog");
+            const { win, maybeShowPromise } = await showOnboardingDialog({
+              skipIntroduction,
+            });
+
+            await callback(win, userAction, maybeShowPromise);
+          },
+          onboardingDialogVersion,
+          onboardingDialogChoice,
+          expectedUserBranchPrefs,
+          telemetryEvents,
+        });
+      },
+    });
+  }
+}
 
 async function doDialogTest({
-  expectOptIn,
+  callback,
+  onboardingDialogVersion,
   onboardingDialogChoice,
   telemetryEvents,
-  callback,
+  expectedUserBranchPrefs,
 }) {
+  setDialogPrereqPrefs();
+
+  // Set initial prefs on the default branch.
+  let initialDefaultBranch = OFFLINE_DEFAULT_PREFS;
+  let originalDefaultBranch = {};
+  for (let [name, value] of Object.entries(initialDefaultBranch)) {
+    originalDefaultBranch = gDefaultBranch.getBoolPref(name);
+    gDefaultBranch.setBoolPref(name, value);
+    gUserBranch.clearUserPref(name);
+  }
+
+  // Setting the prefs just now triggered telemetry events, so clear them
+  // before calling the callback.
+  Services.telemetry.clearEvents();
+
+  // Call the callback, which should trigger the dialog and interact with it.
   await BrowserTestUtils.withNewTab("about:blank", async () => {
-    // Set all the required prefs for showing the onboarding dialog.
-    await SpecialPowers.pushPrefEnv({
-      set: [
-        ["browser.urlbar.suggest.quicksuggest.nonsponsored", false],
-        ["browser.urlbar.suggest.quicksuggest.sponsored", false],
-        ["browser.urlbar.quicksuggest.dataCollection.enabled", false],
-        ["browser.urlbar.quicksuggest.enabled", true],
-        ["browser.urlbar.quicksuggest.shouldShowOnboardingDialog", true],
-        ["browser.urlbar.quicksuggest.showedOnboardingDialog", false],
-        ["browser.urlbar.quicksuggest.showOnboardingDialogAfterNRestarts", 0],
-      ],
-    });
-
-    // Setting the prefs just now triggered telemetry events, so clear them
-    // before calling the callback.
-    Services.telemetry.clearEvents();
-
     await callback();
-
-    Assert.equal(
-      UrlbarPrefs.get("suggest.quicksuggest.nonsponsored"),
-      expectOptIn,
-      "Main pref enabled status"
-    );
-    Assert.equal(
-      UrlbarPrefs.get("suggest.quicksuggest.sponsored"),
-      expectOptIn,
-      "Sponsored pref enabled status"
-    );
-    Assert.equal(
-      UrlbarPrefs.get("quicksuggest.dataCollection.enabled"),
-      expectOptIn,
-      "Data collection pref enabled status"
-    );
-
-    if (onboardingDialogChoice) {
-      Assert.equal(
-        UrlbarPrefs.get("quicksuggest.onboardingDialogChoice"),
-        onboardingDialogChoice,
-        "onboardingDialogChoice"
-      );
-      Assert.equal(
-        TelemetryEnvironment.currentEnvironment.settings.userPrefs[
-          "browser.urlbar.quicksuggest.onboardingDialogChoice"
-        ],
-        onboardingDialogChoice,
-        "onboardingDialogChoice is correct in TelemetryEnvironment"
-      );
-    }
-
-    if (telemetryEvents) {
-      // Even with the `clearEvents` call above, events related to remote
-      // settings can occur in TV tests during the callback, so pass a filter
-      // arg to make sure we get only the events we're interested in.
-      TelemetryTestUtils.assertEvents(telemetryEvents, {
-        category: QuickSuggestTestUtils.TELEMETRY_EVENT_CATEGORY,
-      });
-    }
-
-    await SpecialPowers.popPrefEnv();
   });
-}
 
-// Whether the tab key can move the focus. On macOS with full keyboard access
-// disabled (which is default), this will be false. See `canTabMoveFocus`.
-let gCanTabMoveFocus;
+  // Now check all pref values on the default and user branches.
+  for (let [name, value] of Object.entries(initialDefaultBranch)) {
+    Assert.equal(
+      gDefaultBranch.getBoolPref(name),
+      value,
+      "Default-branch value for pref did not change after modal: " + name
+    );
 
-async function doFocusTest({
-  tabKeyRepeat,
-  expectedFocusID,
-  expectOptIn,
-  onboardingDialogChoice,
-  telemetryEvents,
-  callback,
-}) {
-  if (gCanTabMoveFocus === undefined) {
-    gCanTabMoveFocus = await canTabMoveFocus();
+    let effectiveValue;
+    if (name in expectedUserBranchPrefs) {
+      effectiveValue = expectedUserBranchPrefs[name];
+      Assert.equal(
+        gUserBranch.getBoolPref(name),
+        effectiveValue,
+        "User-branch value for pref has expected value: " + name
+      );
+    } else {
+      effectiveValue = value;
+      Assert.ok(
+        !gUserBranch.prefHasUserValue(name),
+        "User-branch value for pref does not exist: " + name
+      );
+    }
+
+    // For good measure, check the value returned by UrlbarPrefs.
+    Assert.equal(
+      UrlbarPrefs.get(name),
+      effectiveValue,
+      "Effective value for pref is correct: " + name
+    );
   }
-  if (!gCanTabMoveFocus && tabKeyRepeat) {
-    Assert.ok(true, "Tab key can't move focus, skipping test");
-    return;
-  }
 
-  await doDialogTest({
-    expectOptIn,
+  Assert.equal(
+    UrlbarPrefs.get("quicksuggest.onboardingDialogVersion"),
+    onboardingDialogVersion,
+    "onboardingDialogVersion"
+  );
+  Assert.equal(
+    UrlbarPrefs.get("quicksuggest.onboardingDialogChoice"),
     onboardingDialogChoice,
-    telemetryEvents,
-    callback: async () => {
-      let dialogPromise = BrowserTestUtils.promiseAlertDialogOpen(
-        null,
-        ONBOARDING_URI,
-        { isSubDialog: true }
-      );
+    "onboardingDialogChoice"
+  );
+  Assert.equal(
+    TelemetryEnvironment.currentEnvironment.settings.userPrefs[
+      "browser.urlbar.quicksuggest.onboardingDialogChoice"
+    ],
+    onboardingDialogChoice,
+    "onboardingDialogChoice is correct in TelemetryEnvironment"
+  );
 
-      let maybeShowPromise = UrlbarQuickSuggest.maybeShowOnboardingDialog();
+  QuickSuggestTestUtils.assertEvents(telemetryEvents);
 
-      let win = await dialogPromise;
-      if (win.document.readyState != "complete") {
-        await BrowserTestUtils.waitForEvent(win, "load");
-      }
+  Assert.ok(
+    UrlbarPrefs.get("quicksuggest.showedOnboardingDialog"),
+    "quicksuggest.showedOnboardingDialog is true after showing dialog"
+  );
 
-      let doc = win.document;
-
-      Assert.equal(
-        doc.activeElement.id,
-        gCanTabMoveFocus
-          ? "onboardingAcceptButton"
-          : "quicksuggestOnboardingDialogWindow",
-        "Accept button is focused initially"
-      );
-
-      if (tabKeyRepeat) {
-        EventUtils.synthesizeKey("KEY_Tab", { repeat: tabKeyRepeat });
-      }
-
-      if (!gCanTabMoveFocus) {
-        expectedFocusID = "quicksuggestOnboardingDialogWindow";
-      }
-      Assert.equal(
-        doc.activeElement.id,
-        expectedFocusID,
-        "Expected element is focused: " + expectedFocusID
-      );
-
-      await callback();
-      await maybeShowPromise;
-    },
-  });
+  // Clean up.
+  for (let [name, value] of Object.entries(originalDefaultBranch)) {
+    gDefaultBranch.setBoolPref(name, value);
+  }
+  for (let name of Object.keys(expectedUserBranchPrefs)) {
+    gUserBranch.clearUserPref(name);
+  }
 }
 
-async function openDialog(button = undefined) {
-  await BrowserTestUtils.promiseAlertDialog(button, ONBOARDING_URI, {
-    isSubDialog: true,
-  });
-  info("Saw dialog");
+/**
+ * Show onbaording dialog.
+ *
+ * @param {object} [options]
+ *   The object options.
+ * @param {boolean} [options.skipIntroduction]
+ *   If true, return dialog with skipping the introduction section.
+ * @returns {{ window, maybeShowPromise: Promise }}
+ *   win: window object of the dialog.
+ *   maybeShowPromise: Promise of QuickSuggest.maybeShowOnboardingDialog().
+ */
+async function showOnboardingDialog({ skipIntroduction } = {}) {
+  const dialogPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    null,
+    QuickSuggest.ONBOARDING_URI,
+    { isSubDialog: true }
+  );
+
+  const maybeShowPromise = QuickSuggest.maybeShowOnboardingDialog();
+
+  const win = await dialogPromise;
+  if (win.document.readyState != "complete") {
+    await BrowserTestUtils.waitForEvent(win, "load");
+  }
+
+  // Wait until all listers on onboarding dialog are ready.
+  await window._quicksuggestOnboardingReady;
+
+  if (!skipIntroduction) {
+    return { win, maybeShowPromise };
+  }
+
+  // Trigger the transition by pressing Enter on the Next button.
+  EventUtils.synthesizeKey("KEY_Enter");
+
+  const introductionSection = win.document.getElementById(
+    "introduction-section"
+  );
+  const mainSection = win.document.getElementById("main-section");
+
+  await BrowserTestUtils.waitForCondition(
+    () =>
+      BrowserTestUtils.is_hidden(introductionSection) &&
+      BrowserTestUtils.is_visible(mainSection)
+  );
+
+  return { win, maybeShowPromise };
+}
+
+/**
+ * Sets all the required prefs for showing the onboarding dialog except for the
+ * prefs that are set when the dialog is accepted.
+ */
+function setDialogPrereqPrefs() {
+  UrlbarPrefs.set("quicksuggest.shouldShowOnboardingDialog", true);
+  UrlbarPrefs.set("quicksuggest.showedOnboardingDialog", false);
 }
 
 /**
@@ -685,30 +1567,39 @@ async function canTabMoveFocus() {
 
   let canMove = false;
   await doDialogTest({
-    expectOptIn: false,
     callback: async () => {
-      let dialogPromise = BrowserTestUtils.promiseAlertDialogOpen(
-        null,
-        ONBOARDING_URI,
-        { isSubDialog: true }
-      );
-
-      let maybeShowPromise = UrlbarQuickSuggest.maybeShowOnboardingDialog();
-
-      let win = await dialogPromise;
-      if (win.document.readyState != "complete") {
-        await BrowserTestUtils.waitForEvent(win, "load");
-      }
+      const { win, maybeShowPromise } = await showOnboardingDialog({
+        skipIntroduction: true,
+      });
 
       let doc = win.document;
-      let { activeElement } = doc;
+      doc.getElementById("onboardingAccept").focus();
       EventUtils.synthesizeKey("KEY_Tab");
 
-      canMove = activeElement != doc.activeElement;
+      // Whether or not the focus can move to the link.
+      canMove = doc.activeElement.id === "onboardingLearnMore";
 
       EventUtils.synthesizeKey("KEY_Escape");
       await maybeShowPromise;
     },
+    onboardingDialogVersion: JSON.stringify({ version: 1 }),
+    onboardingDialogChoice: "dismiss_2",
+    expectedUserBranchPrefs: {
+      "quicksuggest.dataCollection.enabled": false,
+    },
+    telemetryEvents: [
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "data_collect_toggled",
+        object: "disabled",
+      },
+      {
+        category: QuickSuggest.TELEMETRY_EVENT_CATEGORY,
+        method: "opt_in_dialog",
+        object: "dismiss_2",
+      },
+    ],
   });
+
   return canMove;
 }

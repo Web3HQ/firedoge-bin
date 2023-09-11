@@ -64,11 +64,11 @@ class TextureData;
 class GPUVideoTextureData;
 class TextureClient;
 class ITextureClientRecycleAllocator;
+class SharedSurfaceTextureData;
 #ifdef GFX_DEBUG_TRACK_CLIENTS_IN_POOL
 class TextureClientPool;
 #endif
 class TextureForwarder;
-class KeepAlive;
 
 /**
  * TextureClient is the abstraction that allows us to share data between the
@@ -95,6 +95,9 @@ enum TextureAllocationFlags {
   // The texture is going to be updated using UpdateFromSurface and needs to
   // support that call.
   ALLOC_UPDATE_FROM_SURFACE = 1 << 7,
+
+  // Do not use an accelerated texture type.
+  ALLOC_DO_NOT_ACCELERATE = 1 << 8,
 };
 
 enum class BackendSelector { Content, Canvas };
@@ -363,7 +366,7 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
       const gfx::IntSize& aCbCrSize, uint32_t aCbCrStride,
       StereoMode aStereoMode, gfx::ColorDepth aColorDepth,
       gfx::YUVColorSpace aYUVColorSpace, gfx::ColorRange aColorRange,
-      TextureFlags aTextureFlags);
+      gfx::ChromaSubsampling aSubsampling, TextureFlags aTextureFlags);
 
   // Creates and allocates a TextureClient (can be accessed through raw
   // pointers).
@@ -795,20 +798,6 @@ class MOZ_RAII TextureClientAutoLock {
   bool mChecked;
 #endif
   bool mSucceeded;
-};
-
-class KeepAlive {
- public:
-  virtual ~KeepAlive() = default;
-};
-
-template <typename T>
-class TKeepAlive : public KeepAlive {
- public:
-  explicit TKeepAlive(T* aData) : mData(aData) {}
-
- protected:
-  RefPtr<T> mData;
 };
 
 /// Convenience function to set the content of ycbcr texture.

@@ -43,18 +43,20 @@ static void PopulateRegsFromContext(Registers& aRegs, CONTEXT* aContext) {
   aRegs.mPC = reinterpret_cast<Address>(aContext->Rip);
   aRegs.mSP = reinterpret_cast<Address>(aContext->Rsp);
   aRegs.mFP = reinterpret_cast<Address>(aContext->Rbp);
+  aRegs.mLR = 0;
 #elif defined(GP_ARCH_x86)
   aRegs.mPC = reinterpret_cast<Address>(aContext->Eip);
   aRegs.mSP = reinterpret_cast<Address>(aContext->Esp);
   aRegs.mFP = reinterpret_cast<Address>(aContext->Ebp);
+  aRegs.mLR = 0;
 #elif defined(GP_ARCH_arm64)
   aRegs.mPC = reinterpret_cast<Address>(aContext->Pc);
   aRegs.mSP = reinterpret_cast<Address>(aContext->Sp);
   aRegs.mFP = reinterpret_cast<Address>(aContext->Fp);
+  aRegs.mLR = reinterpret_cast<Address>(aContext->Lr);
 #else
 #  error "bad arch"
 #endif
-  aRegs.mLR = 0;
 }
 
 // Gets a real (i.e. not pseudo) handle for the current thread, with the
@@ -99,13 +101,85 @@ void Sampler::Disable(PSLockRef aLock) {}
 
 static void StreamMetaPlatformSampleUnits(PSLockRef aLock,
                                           SpliceableJSONWriter& aWriter) {
-  aWriter.StringProperty("threadCPUDelta", "variable CPU cycles");
+  static const Span<const char> units =
+      (GetCycleTimeFrequencyMHz() != 0) ? MakeStringSpan("ns")
+                                        : MakeStringSpan("variable CPU cycles");
+  aWriter.StringProperty("threadCPUDelta", units);
+}
+
+/* static */
+uint64_t RunningTimes::ConvertRawToJson(uint64_t aRawValue) {
+  static const uint64_t cycleTimeFrequencyMHz = GetCycleTimeFrequencyMHz();
+  if (cycleTimeFrequencyMHz == 0u) {
+    return aRawValue;
+  }
+
+  constexpr uint64_t GHZ_PER_MHZ = 1'000u;
+  // To get ns, we need to divide cycles by a frequency in GHz, i.e.:
+  // cycles / (f_MHz / GHZ_PER_MHZ). To avoid losing the integer precision of
+  // f_MHz, this is computed as (cycles * GHZ_PER_MHZ) / f_MHz.
+  // Adding GHZ_PER_MHZ/2 to (cycles * GHZ_PER_MHZ) will round to nearest when
+  // the result of the division is truncated.
+  return (aRawValue * GHZ_PER_MHZ + (GHZ_PER_MHZ / 2u)) / cycleTimeFrequencyMHz;
+}
+
+static inline uint64_t ToNanoSeconds(const FILETIME& aFileTime) {
+  // FILETIME values are 100-nanoseconds units, converting
+  ULARGE_INTEGER usec = {{aFileTime.dwLowDateTime, aFileTime.dwHighDateTime}};
+  return usec.QuadPart * 100;
+}
+
+namespace mozilla::profiler {
+bool GetCpuTimeSinceThreadStartInNs(
+    uint64_t* aResult, const mozilla::profiler::PlatformData& aPlatformData) {
+  const HANDLE profiledThread = aPlatformData.ProfiledThread();
+  int frequencyInMHz = GetCycleTimeFrequencyMHz();
+  if (frequencyInMHz) {
+    uint64_t cpuCycleCount;
+    if (!QueryThreadCycleTime(profiledThread, &cpuCycleCount)) {
+      return false;
+    }
+
+    constexpr uint64_t USEC_PER_NSEC = 1000L;
+    *aResult = cpuCycleCount * USEC_PER_NSEC / frequencyInMHz;
+    return true;
+  }
+
+  FILETIME createTime, exitTime, kernelTime, userTime;
+  if (!GetThreadTimes(profiledThread, &createTime, &exitTime, &kernelTime,
+                      &userTime)) {
+    return false;
+  }
+
+  *aResult = ToNanoSeconds(kernelTime) + ToNanoSeconds(userTime);
+  return true;
+}
+}  // namespace mozilla::profiler
+
+static RunningTimes GetProcessRunningTimesDiff(
+    PSLockRef aLock, RunningTimes& aPreviousRunningTimesToBeUpdated) {
+  AUTO_PROFILER_STATS(GetProcessRunningTimes);
+
+  static const HANDLE processHandle = GetCurrentProcess();
+
+  RunningTimes newRunningTimes;
+  {
+    AUTO_PROFILER_STATS(GetProcessRunningTimes_QueryProcessCycleTime);
+    if (ULONG64 cycles; QueryProcessCycleTime(processHandle, &cycles) != 0) {
+      newRunningTimes.SetThreadCPUDelta(cycles);
+    }
+    newRunningTimes.SetPostMeasurementTimeStamp(TimeStamp::Now());
+  };
+
+  const RunningTimes diff = newRunningTimes - aPreviousRunningTimesToBeUpdated;
+  aPreviousRunningTimesToBeUpdated = newRunningTimes;
+  return diff;
 }
 
 static RunningTimes GetThreadRunningTimesDiff(
     PSLockRef aLock,
     ThreadRegistration::UnlockedRWForLockedProfiler& aThreadData) {
-  AUTO_PROFILER_STATS(GetRunningTimes);
+  AUTO_PROFILER_STATS(GetThreadRunningTimes);
 
   const mozilla::profiler::PlatformData& platformData =
       aThreadData.PlatformDataCRef();
@@ -113,7 +187,7 @@ static RunningTimes GetThreadRunningTimesDiff(
 
   const RunningTimes newRunningTimes = GetRunningTimesWithTightTimestamp(
       [profiledThread](RunningTimes& aRunningTimes) {
-        AUTO_PROFILER_STATS(GetRunningTimes_QueryThreadCycleTime);
+        AUTO_PROFILER_STATS(GetThreadRunningTimes_QueryThreadCycleTime);
         if (ULONG64 cycles;
             QueryThreadCycleTime(profiledThread, &cycles) != 0) {
           aRunningTimes.ResetThreadCPUDelta(cycles);
@@ -401,11 +475,10 @@ void SamplerThread::Stop(PSLockRef aLock) {
 static void PlatformInit(PSLockRef aLock) {}
 
 #if defined(HAVE_NATIVE_UNWIND)
-void Registers::SyncPopulate() {
-  CONTEXT context;
-  RtlCaptureContext(&context);
-  PopulateRegsFromContext(*this, &context);
-}
+#  define REGISTERS_SYNC_POPULATE(regs) \
+    CONTEXT context;                    \
+    RtlCaptureContext(&context);        \
+    PopulateRegsFromContext(regs, &context);
 #endif
 
 #if defined(GP_PLAT_amd64_windows)

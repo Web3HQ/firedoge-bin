@@ -8,9 +8,11 @@ const {
   FrontClassWithSpec,
   types,
   registerFront,
-} = require("devtools/shared/protocol.js");
-const { walkerSpec } = require("devtools/shared/specs/walker");
-const { safeAsyncMethod } = require("devtools/shared/async-utils");
+} = require("resource://devtools/shared/protocol.js");
+const { walkerSpec } = require("resource://devtools/shared/specs/walker.js");
+const {
+  safeAsyncMethod,
+} = require("resource://devtools/shared/async-utils.js");
 
 /**
  * Client side of the DOM walker.
@@ -133,7 +135,7 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
     // mimicking what the server will do here.
     const actorID = node.actorID;
     this._releaseFront(node, !!options.force);
-    return super.releaseNode({ actorID: actorID });
+    return super.releaseNode({ actorID });
   }
 
   async findInspectingNode() {
@@ -214,10 +216,7 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
 
       const emittedMutation = Object.assign(change, { target: targetFront });
 
-      if (
-        change.type === "childList" ||
-        change.type === "nativeAnonymousChildList"
-      ) {
+      if (change.type === "childList") {
         // Update the ownership tree according to the mutation record.
         const addedFronts = [];
         const removedFronts = [];
@@ -285,8 +284,7 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
       if (
         change.type === "inlineTextChild" ||
         change.type === "childList" ||
-        change.type === "shadowRootAttached" ||
-        change.type === "nativeAnonymousChildList"
+        change.type === "shadowRootAttached"
       ) {
         if (change.inlineTextChild) {
           targetFront.inlineTextChild = types
@@ -328,8 +326,8 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
     const previousSibling = await this.previousSibling(node);
     const nextSibling = await super.removeNode(node);
     return {
-      previousSibling: previousSibling,
-      nextSibling: nextSibling,
+      previousSibling,
+      nextSibling,
     };
   }
 
@@ -338,6 +336,27 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
       return super.children(node, options);
     }
     const target = await node.connectToFrame();
+
+    // We had several issues in the past where `connectToFrame` was returning the same
+    // target as the owner document one, which led to the inspector being broken.
+    // Ultimately, we shouldn't get to this point (fix should happen in connectToFrame or
+    // on the server, e.g. for Bug 1752342), but at least this will serve as a safe guard
+    // so we don't freeze/crash the inspector.
+    if (
+      target == this.targetFront &&
+      Services.prefs.getBoolPref(
+        "devtools.testing.bypass-walker-children-iframe-guard",
+        false
+      ) !== true
+    ) {
+      console.warn("connectToFrame returned an unexpected target");
+      return {
+        nodes: [],
+        hasFirst: true,
+        hasLast: true,
+      };
+    }
+
     const walker = (await target.getFront("inspector")).walker;
 
     // Finally retrieve the NodeFront of the remote frame's document
@@ -418,7 +437,11 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
     }
 
     this._isPicking = true;
-    return super.pick(doFocus);
+
+    return super.pick(
+      doFocus,
+      this.targetFront.commands.descriptorFront.isLocalTab
+    );
   }
 
   /**

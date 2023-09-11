@@ -16,6 +16,7 @@
 #include "nsIIDNService.h"
 #include "mozilla/Logging.h"
 #include "nsIURLParser.h"
+#include "nsPrintfCString.h"
 #include "nsNetCID.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/ipc/URIUtils.h"
@@ -35,7 +36,7 @@
 //
 // setenv MOZ_LOG nsStandardURL:5
 //
-static LazyLogModule gStandardURLLog("nsStandardURL");
+static mozilla::LazyLogModule gStandardURLLog("nsStandardURL");
 
 // The Chromium code defines its own LOG macro which we don't want
 #undef LOG
@@ -49,7 +50,6 @@ namespace mozilla {
 namespace net {
 
 static NS_DEFINE_CID(kThisImplCID, NS_THIS_STANDARDURL_IMPL_CID);
-static NS_DEFINE_CID(kStandardURLCID, NS_STANDARDURL_CID);
 
 // This will always be initialized and destroyed on the main thread, but
 // can be safely used on other threads.
@@ -68,6 +68,7 @@ constexpr bool TestForInvalidHostCharacters(char c) {
   // Testing for these:
   // CONTROL_CHARACTERS " #/:?@[\\]*<>|\"";
   return (c > 0 && c < 32) ||  // The control characters are [1, 31]
+         c == 0x7F ||          // // DEL (delete)
          c == ' ' || c == '#' || c == '/' || c == ':' || c == '?' || c == '@' ||
          c == '[' || c == '\\' || c == ']' || c == '*' || c == '<' ||
          c == '^' ||
@@ -198,7 +199,7 @@ const nsACString& nsStandardURL::nsSegmentEncoder::EncodeSegment(
 //----------------------------------------------------------------------------
 
 #ifdef DEBUG_DUMP_URLS_AT_SHUTDOWN
-static StaticMutex gAllURLsMutex;
+static StaticMutex gAllURLsMutex MOZ_UNANNOTATED;
 static LinkedList<nsStandardURL> gAllURLs;
 #endif
 
@@ -276,7 +277,7 @@ bool nsStandardURL::IsValid() {
 void nsStandardURL::SanityCheck() {
   if (!IsValid()) {
     nsPrintfCString msg(
-        "mLen:%X, mScheme (%X,%X), mAuthority (%X,%X), mUsername (%X,%X), "
+        "mLen:%zX, mScheme (%X,%X), mAuthority (%X,%X), mUsername (%X,%X), "
         "mPassword (%X,%X), mHost (%X,%X), mPath (%X,%X), mFilepath (%X,%X), "
         "mDirectory (%X,%X), mBasename (%X,%X), mExtension (%X,%X), mQuery "
         "(%X,%X), mRef (%X,%X)",
@@ -309,8 +310,6 @@ nsStandardURL::~nsStandardURL() {
     }
   }
 #endif
-
-  SanityCheck();
 }
 
 #ifdef DEBUG_DUMP_URLS_AT_SHUTDOWN
@@ -424,8 +423,10 @@ inline int32_t ValidateIPv4Number(const nsACString& host, int32_t bases[4],
   for (int32_t i = 0; i < length; i++) {
     char current = host[i];
     if (current == '.') {
-      if (!lastWasNumber) {  // A dot should not follow an X or a dot, or be
-                             // first
+      // A dot should not follow a dot, or be first - it can follow an x though.
+      if (!(lastWasNumber ||
+            (i >= 2 && (host[i - 1] == 'X' || host[i - 1] == 'x') &&
+             host[i - 2] == '0'))) {
         return -1;
       }
 
@@ -603,6 +604,12 @@ nsresult nsStandardURL::NormalizeIPv4(const nsACString& host,
     ipv4 += number << (8 * (3 - i));
   }
 
+  // A special case for ipv4 URL like "127." should have the same result as
+  // "127".
+  if (dotCount == 1 && dotIndex[0] == length - 1) {
+    ipv4 = (ipv4 & 0xff000000) >> 24;
+  }
+
   uint8_t ipSegments[4];
   NetworkEndian::writeUint32(ipSegments, ipv4);
   result = nsPrintfCString("%d.%d.%d.%d", ipSegments[0], ipSegments[1],
@@ -617,16 +624,6 @@ nsresult nsStandardURL::NormalizeIDN(const nsCString& host, nsCString& result) {
 
   if (!gIDN) {
     return NS_ERROR_UNEXPECTED;
-  }
-
-  // If the input is ASCII, and not ACE encoded, then there's no processing
-  // needed. This is needed because we want to allow ascii labels longer than
-  // 64 characters for some schemes.
-  bool isACE = false;
-  if (IsAscii(host) && NS_SUCCEEDED(gIDN->IsACE(host, &isACE)) && !isACE) {
-    mCheckedIfHostA = true;
-    result = host;
-    return NS_OK;
   }
 
   // Even if it's already ACE, we must still call ConvertUTF8toACE in order
@@ -1734,7 +1731,9 @@ nsresult nsStandardURL::SetSpecWithEncoding(const nsACString& input,
 }
 
 nsresult nsStandardURL::SetScheme(const nsACString& input) {
-  const nsPromiseFlatCString& scheme = PromiseFlatCString(input);
+  // Strip tabs, newlines, carriage returns from input
+  nsAutoCString scheme(input);
+  scheme.StripTaggedASCII(ASCIIMask::MaskCRLFTab());
 
   LOG(("nsStandardURL::SetScheme [scheme=%s]\n", scheme.get()));
 
@@ -1773,6 +1772,17 @@ nsresult nsStandardURL::SetScheme(const nsACString& input) {
   // XXX the string code unfortunately doesn't provide a ToLowerCase
   //     that operates on a substring.
   net_ToLowerCase((char*)mSpec.get(), mScheme.mLen);
+
+  // If the scheme changes the default port also changes.
+  if (Scheme() == "http"_ns || Scheme() == "ws"_ns) {
+    mDefaultPort = 80;
+  } else if (Scheme() == "https"_ns || Scheme() == "wss"_ns) {
+    mDefaultPort = 443;
+  }
+  if (mPort == mDefaultPort) {
+    MOZ_ALWAYS_SUCCEEDS(SetPort(-1));
+  }
+
   return NS_OK;
 }
 
@@ -2101,7 +2111,8 @@ nsresult nsStandardURL::SetHostPort(const nsACString& aValue) {
 }
 
 nsresult nsStandardURL::SetHost(const nsACString& input) {
-  const nsPromiseFlatCString& hostname = PromiseFlatCString(input);
+  nsAutoCString hostname(input);
+  hostname.StripTaggedASCII(ASCIIMask::MaskCRLFTab());
 
   nsACString::const_iterator start, end;
   hostname.BeginReading(start);
@@ -2109,10 +2120,9 @@ nsresult nsStandardURL::SetHost(const nsACString& input) {
 
   FindHostLimit(start, end);
 
-  const nsCString unescapedHost(Substring(start, end));
   // Do percent decoding on the the input.
   nsAutoCString flat;
-  NS_UnescapeURL(unescapedHost.BeginReading(), unescapedHost.Length(),
+  NS_UnescapeURL(hostname.BeginReading(), end - start,
                  esc_AlwaysCopy | esc_Host, flat);
   const char* host = flat.get();
 
@@ -2861,6 +2871,12 @@ nsStandardURL::GetQuery(nsACString& result) {
   return NS_OK;
 }
 
+NS_IMETHODIMP
+nsStandardURL::GetHasQuery(bool* result) {
+  *result = (mQuery.mLen >= 0);
+  return NS_OK;
+}
+
 // result may contain unescaped UTF-8 characters
 NS_IMETHODIMP
 nsStandardURL::GetRef(nsACString& result) {
@@ -2903,8 +2919,9 @@ nsStandardURL::GetFileExtension(nsACString& result) {
 }
 
 nsresult nsStandardURL::SetFilePath(const nsACString& input) {
-  const nsPromiseFlatCString& flat = PromiseFlatCString(input);
-  const char* filepath = flat.get();
+  nsAutoCString str(input);
+  str.StripTaggedASCII(ASCIIMask::MaskCRLFTab());
+  const char* filepath = str.get();
 
   LOG(("nsStandardURL::SetFilePath [filepath=%s]\n", filepath));
   auto onExitGuard = MakeScopeExit([&] { SanityCheck(); });
@@ -2912,16 +2929,16 @@ nsresult nsStandardURL::SetFilePath(const nsACString& input) {
   // if there isn't a filepath, then there can't be anything
   // after the path either.  this url is likely uninitialized.
   if (mFilepath.mLen < 0) {
-    return SetPathQueryRef(flat);
+    return SetPathQueryRef(str);
   }
 
-  if (filepath && *filepath) {
+  if (!str.IsEmpty()) {
     nsAutoCString spec;
     uint32_t dirPos, basePos, extPos;
     int32_t dirLen, baseLen, extLen;
     nsresult rv;
 
-    rv = mParser->ParseFilePath(filepath, flat.Length(), &dirPos, &dirLen,
+    rv = mParser->ParseFilePath(filepath, str.Length(), &dirPos, &dirLen,
                                 &basePos, &baseLen, &extPos, &extLen);
     if (NS_FAILED(rv)) {
       return rv;
@@ -3017,7 +3034,7 @@ nsresult nsStandardURL::SetQueryWithEncoding(const nsACString& input,
 
   InvalidateCache();
 
-  if (!query || !*query) {
+  if (flat.IsEmpty()) {
     // remove existing query
     if (mQuery.mLen >= 0) {
       // remove query and leading '?'
@@ -3032,8 +3049,7 @@ nsresult nsStandardURL::SetQueryWithEncoding(const nsACString& input,
 
   // filter out unexpected chars "\r\n\t" if necessary
   nsAutoCString filteredURI(flat);
-  const ASCIIMaskArray& mask = ASCIIMask::MaskCRLFTab();
-  filteredURI.StripTaggedASCII(mask);
+  filteredURI.StripTaggedASCII(ASCIIMask::MaskCRLFTab());
 
   query = filteredURI.get();
   int32_t queryLen = filteredURI.Length();
@@ -3095,7 +3111,7 @@ nsresult nsStandardURL::SetRef(const nsACString& input) {
 
   InvalidateCache();
 
-  if (!ref || !*ref) {
+  if (input.IsEmpty()) {
     // remove existing ref
     if (mRef.mLen >= 0) {
       // remove ref and leading '#'
@@ -3109,8 +3125,7 @@ nsresult nsStandardURL::SetRef(const nsACString& input) {
 
   // filter out unexpected chars "\r\n\t" if necessary
   nsAutoCString filteredURI(flat);
-  const ASCIIMaskArray& mask = ASCIIMask::MaskCRLFTab();
-  filteredURI.StripTaggedASCII(mask);
+  filteredURI.StripTaggedASCII(ASCIIMask::MaskCRLFTab());
 
   ref = filteredURI.get();
   int32_t refLen = filteredURI.Length();
@@ -3891,4 +3906,17 @@ size_t nsStandardURL::SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const {
 // For unit tests.  Including nsStandardURL.h seems to cause problems
 nsresult Test_NormalizeIPv4(const nsACString& host, nsCString& result) {
   return mozilla::net::nsStandardURL::NormalizeIPv4(host, result);
+}
+
+// For unit tests.  Including nsStandardURL.h seems to cause problems
+nsresult Test_ParseIPv4Number(const nsACString& input, int32_t base,
+                              uint32_t& number, uint32_t maxNumber) {
+  return mozilla::net::ParseIPv4Number(input, base, number, maxNumber);
+}
+
+int32_t Test_ValidateIPv4Number(const nsACString& host, int32_t bases[4],
+                                int32_t dotIndex[3], bool& onlyBase10,
+                                int32_t& length) {
+  return mozilla::net::ValidateIPv4Number(host, bases, dotIndex, onlyBase10,
+                                          length);
 }

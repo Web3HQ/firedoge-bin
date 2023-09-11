@@ -134,16 +134,16 @@ class EventTarget : public nsISupports, public nsWrapperCache {
   virtual bool IsInnerWindow() const { return false; }
   virtual bool IsOuterWindow() const { return false; }
   virtual bool IsRootWindow() const { return false; }
-  nsPIDOMWindowInner* GetAsWindowInner();
-  const nsPIDOMWindowInner* GetAsWindowInner() const;
-  nsPIDOMWindowOuter* GetAsWindowOuter();
-  const nsPIDOMWindowOuter* GetAsWindowOuter() const;
+  nsPIDOMWindowInner* GetAsInnerWindow();
+  const nsPIDOMWindowInner* GetAsInnerWindow() const;
+  nsPIDOMWindowOuter* GetAsOuterWindow();
+  const nsPIDOMWindowOuter* GetAsOuterWindow() const;
   inline nsPIWindowRoot* GetAsWindowRoot();
   inline const nsPIWindowRoot* GetAsWindowRoot() const;
-  nsPIDOMWindowInner* AsWindowInner();
-  const nsPIDOMWindowInner* AsWindowInner() const;
-  nsPIDOMWindowOuter* AsWindowOuter();
-  const nsPIDOMWindowOuter* AsWindowOuter() const;
+  nsPIDOMWindowInner* AsInnerWindow();
+  const nsPIDOMWindowInner* AsInnerWindow() const;
+  nsPIDOMWindowOuter* AsOuterWindow();
+  const nsPIDOMWindowOuter* AsOuterWindow() const;
   inline nsPIWindowRoot* AsWindowRoot();
   inline const nsPIWindowRoot* AsWindowRoot() const;
 
@@ -166,20 +166,25 @@ class EventTarget : public nsISupports, public nsWrapperCache {
   /**
    * The most general DispatchEvent method.  This is the one the bindings call.
    */
-  virtual bool DispatchEvent(Event& aEvent, CallerType aCallerType,
-                             ErrorResult& aRv) = 0;
+  // TODO: Convert this to MOZ_CAN_RUN_SCRIPT (bug 1415230)
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual bool DispatchEvent(Event& aEvent,
+                                                         CallerType aCallerType,
+                                                         ErrorResult& aRv) = 0;
 
   /**
    * A version of DispatchEvent you can use if you really don't care whether it
    * succeeds or not and whether default is prevented or not.
    */
-  void DispatchEvent(Event& aEvent);
+  // TODO: Convert this to MOZ_CAN_RUN_SCRIPT (bug 1415230)
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY void DispatchEvent(Event& aEvent);
 
   /**
    * A version of DispatchEvent you can use if you really don't care whether
    * default is prevented or not.
    */
-  void DispatchEvent(Event& aEvent, ErrorResult& aRv);
+  // TODO: Convert this to MOZ_CAN_RUN_SCRIPT (bug 1415230)
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY void DispatchEvent(Event& aEvent,
+                                                 ErrorResult& aRv);
 
   nsIGlobalObject* GetParentObject() const { return GetOwnerGlobal(); }
 
@@ -255,6 +260,26 @@ class EventTarget : public nsISupports, public nsWrapperCache {
    * @note Only EventDispatcher should call this method.
    */
   virtual void GetEventTargetParent(EventChainPreVisitor& aVisitor) = 0;
+
+  /**
+   * Called on the activation target during dispatch of activation events.
+   * https://dom.spec.whatwg.org/#eventtarget-legacy-pre-activation-behavior
+   */
+  virtual void LegacyPreActivationBehavior(EventChainVisitor& aVisitor) {}
+
+  /**
+   * Called on the activation target during dispatch of activation events.
+   * https://dom.spec.whatwg.org/#eventtarget-activation-behavior
+   */
+  MOZ_CAN_RUN_SCRIPT
+  virtual void ActivationBehavior(EventChainPostVisitor& aVisitor) {}
+
+  /**
+   * Called on the activation target during dispatch of activation events.
+   * https://dom.spec.whatwg.org/#eventtarget-legacy-canceled-activation-behavior
+   */
+  virtual void LegacyCanceledActivationBehavior(
+      EventChainPostVisitor& aVisitor) {}
 
   /**
    * Called before the capture phase of the event flow and after event target

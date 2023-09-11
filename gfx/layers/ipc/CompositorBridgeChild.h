@@ -29,11 +29,6 @@ namespace dom {
 class BrowserChild;
 }  // namespace dom
 
-namespace webgpu {
-class PWebGPUChild;
-class WebGPUChild;
-}  // namespace webgpu
-
 namespace widget {
 class CompositorWidget;
 }  // namespace widget
@@ -87,8 +82,6 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   mozilla::ipc::IPCResult RecvNotifyFrameStats(
       nsTArray<FrameStats>&& aFrameStats);
 
-  mozilla::ipc::IPCResult RecvInvalidateLayers(const LayersId& aLayersId);
-
   mozilla::ipc::IPCResult RecvNotifyJankedAnimations(
       const LayersId& aLayersId, nsTArray<uint64_t>&& aJankedAnimations);
 
@@ -102,18 +95,19 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
 
   mozilla::ipc::IPCResult RecvParentAsyncMessages(
       nsTArray<AsyncParentMessageData>&& aMessages);
-  PTextureChild* CreateTexture(const SurfaceDescriptor& aSharedData,
-                               ReadLockDescriptor&& aReadLock,
-                               LayersBackend aLayersBackend,
-                               TextureFlags aFlags, uint64_t aSerial,
-                               wr::MaybeExternalImageId& aExternalImageId,
-                               nsISerialEventTarget* aTarget) override;
+  PTextureChild* CreateTexture(
+      const SurfaceDescriptor& aSharedData, ReadLockDescriptor&& aReadLock,
+      LayersBackend aLayersBackend, TextureFlags aFlags, uint64_t aSerial,
+      wr::MaybeExternalImageId& aExternalImageId) override;
 
   already_AddRefed<CanvasChild> GetCanvasChild() final;
 
   void EndCanvasTransaction();
 
-  RefPtr<webgpu::WebGPUChild> GetWebGPUChild();
+  /**
+   * Release resources until they are next required.
+   */
+  void ClearCachedResources();
 
   // Beware that these methods don't override their super-class equivalent
   // (which are not virtual), they just overload them. All of these Send*
@@ -134,6 +128,8 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   bool IsSameProcess() const override;
 
   bool IPCOpen() const override { return mCanSend; }
+
+  bool IsPaused() const { return mPaused; }
 
   static void ShutDown();
 
@@ -161,12 +157,8 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
 
   base::ProcessId GetParentPid() const override { return OtherPid(); }
 
-  bool AllocUnsafeShmem(size_t aSize,
-                        mozilla::ipc::SharedMemory::SharedMemoryType aShmType,
-                        mozilla::ipc::Shmem* aShmem) override;
-  bool AllocShmem(size_t aSize,
-                  mozilla::ipc::SharedMemory::SharedMemoryType aShmType,
-                  mozilla::ipc::Shmem* aShmem) override;
+  bool AllocUnsafeShmem(size_t aSize, mozilla::ipc::Shmem* aShmem) override;
+  bool AllocShmem(size_t aSize, mozilla::ipc::Shmem* aShmem) override;
   bool DeallocShmem(mozilla::ipc::Shmem& aShmem) override;
 
   PCompositorWidgetChild* AllocPCompositorWidgetChild(
@@ -183,9 +175,6 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
       const wr::PipelineId& aPipelineId, const LayoutDeviceIntSize&,
       const WindowKind&);
   bool DeallocPWebRenderBridgeChild(PWebRenderBridgeChild* aActor);
-
-  webgpu::PWebGPUChild* AllocPWebGPUChild();
-  bool DeallocPWebGPUChild(webgpu::PWebGPUChild* aActor);
 
   wr::MaybeExternalImageId GetNextExternalImageId() override;
 
@@ -205,9 +194,8 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
 
   void ActorDestroy(ActorDestroyReason aWhy) override;
 
-  mozilla::ipc::IPCResult RecvObserveLayersUpdate(
-      const LayersId& aLayersId, const LayersObserverEpoch& aEpoch,
-      const bool& aActive);
+  mozilla::ipc::IPCResult RecvObserveLayersUpdate(const LayersId& aLayersId,
+                                                  const bool& aActive);
 
   mozilla::ipc::IPCResult RecvCompositorOptionsChanged(
       const LayersId& aLayersId, const CompositorOptions& aNewOptions);
@@ -233,9 +221,11 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   // False until the actor is destroyed.
   bool mActorDestroyed;
 
+  bool mPaused;
+
   /**
    * Transaction id of ShadowLayerForwarder.
-   * It is incrementaed by UpdateFwdTransactionId() in each BeginTransaction()
+   * It is incremented by UpdateFwdTransactionId() in each BeginTransaction()
    * call.
    */
   uint64_t mFwdTransactionId;
@@ -259,27 +249,7 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   // is only accessed on the main thread.
   nsTArray<RefPtr<TextureClient>> mTextureClientsForAsyncPaint;
 
-  // Off-Main-Thread Painting state. This covers access to the OMTP-related
-  // state below.
-  Monitor mPaintLock;
-
-  // Contains the number of asynchronous paints that were queued since the
-  // beginning of the last async transaction, and the time stamp of when
-  // that was
-  size_t mTotalAsyncPaints;
-  TimeStamp mAsyncTransactionBegin;
-
-  // True if this CompositorBridge is currently delaying its messages until the
-  // paint thread completes. This is R/W on both the main and paint threads, and
-  // must be accessed within the paint lock.
-  bool mIsDelayingForAsyncPaints;
-
-  uintptr_t mSlowFlushCount;
-  uintptr_t mTotalFlushCount;
-
   RefPtr<CanvasChild> mCanvasChild;
-
-  RefPtr<webgpu::WebGPUChild> mWebGPUChild;
 };
 
 }  // namespace layers

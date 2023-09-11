@@ -21,14 +21,13 @@ void BackgroundDataBridgeChild::ActorDestroy(ActorDestroyReason aWhy) {
 }
 
 mozilla::ipc::IPCResult BackgroundDataBridgeChild::RecvOnTransportAndData(
-    const uint64_t& offset, const uint32_t& count,
-    const nsDependentCSubstring& data) {
+    const uint64_t& offset, const uint32_t& count, const nsACString& data) {
   if (!mBgChild) {
     return IPC_OK();
   }
 
   if (mBgChild->ChannelClosed()) {
-    Unused << Send__delete__(this);
+    Close();
     return IPC_OK();
   }
 
@@ -45,7 +44,7 @@ mozilla::ipc::IPCResult BackgroundDataBridgeChild::RecvOnStopRequest(
   }
 
   if (mBgChild->ChannelClosed()) {
-    Unused << Send__delete__(this);
+    Close();
     return IPC_OK();
   }
 

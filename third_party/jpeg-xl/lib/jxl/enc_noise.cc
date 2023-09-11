@@ -6,7 +6,6 @@
 #include "lib/jxl/enc_noise.h"
 
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 #include <algorithm>
@@ -16,9 +15,10 @@
 #include "lib/jxl/base/compiler_specific.h"
 #include "lib/jxl/chroma_from_luma.h"
 #include "lib/jxl/convolve.h"
+#include "lib/jxl/enc_aux_out.h"
+#include "lib/jxl/enc_optimize.h"
 #include "lib/jxl/image_ops.h"
 #include "lib/jxl/opsin_params.h"
-#include "lib/jxl/optimize.h"
 
 namespace jxl {
 namespace {
@@ -73,12 +73,6 @@ class NoiseHistogram {
   void Increment(const float x) { bins[Index(x)] += 1; }
   int Get(const float x) const { return bins[Index(x)]; }
   int Bin(const size_t bin) const { return bins[bin]; }
-
-  void Print() const {
-    for (unsigned int bin : bins) {
-      printf("%d\n", bin);
-    }
-  }
 
   int Mode() const {
     size_t max_idx = 0;
@@ -373,7 +367,7 @@ void EncodeNoise(const NoiseParams& noise_params, BitWriter* writer,
   for (float i : noise_params.lut) {
     EncodeFloatParam(i, kNoisePrecision, writer);
   }
-  ReclaimAndCharge(writer, &allotment, layer, aux_out);
+  allotment.ReclaimAndCharge(writer, layer, aux_out);
 }
 
 }  // namespace jxl

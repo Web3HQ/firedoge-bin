@@ -8,6 +8,7 @@
 #define nsBidiPresUtils_h___
 
 #include "gfxContext.h"
+#include "mozilla/intl/BidiClass.h"
 #include "mozilla/intl/BidiEmbeddingLevel.h"
 #include "nsBidiUtils.h"
 #include "nsHashKeys.h"
@@ -184,9 +185,8 @@ class nsBidiPresUtils {
      *
      * @param aXOffset The offset of the left side of the substring to be drawn
      *  from the beginning of the overall string passed to ProcessText.
-     * @param aWidth The width returned by GetWidth.
      */
-    virtual void DrawText(nscoord aXOffset, nscoord aWidth) = 0;
+    virtual void DrawText(nscoord aXOffset) = 0;
   };
 
   /**
@@ -223,7 +223,7 @@ class nsBidiPresUtils {
    */
   static nsresult FormatUnicodeText(nsPresContext* aPresContext,
                                     char16_t* aText, int32_t& aTextLength,
-                                    nsCharType aCharType);
+                                    mozilla::intl::BidiClass aBidiClass);
 
   /**
    * Reorder plain text using the Unicode Bidi algorithm and send it to
@@ -380,7 +380,7 @@ class nsBidiPresUtils {
                               BidiProcessor& aprocessor, Mode aMode,
                               nsBidiPositionResolve* aPosResolve,
                               int32_t aPosResolveCount, nscoord* aWidth,
-                              mozilla::intl::Bidi* aBidiEngine);
+                              mozilla::intl::Bidi& aBidiEngine);
 
   /**
    * Use style attributes to determine the base paragraph level to pass to the
@@ -407,6 +407,18 @@ class nsBidiPresUtils {
       nscoord aY,                         // DRAW only
       nsBidiPositionResolve* aPosResolve, /* may be null */
       int32_t aPosResolveCount, nscoord* aWidth /* may be null */);
+
+  /**
+   * Simplified form of ProcessText body, used when aText is a single Unicode
+   * character (one UTF-16 codepoint, or a surrogate pair), or a run that is
+   * known to have no bidi content.
+   */
+  static void ProcessSimpleRun(const char16_t* aText, size_t aLength,
+                               mozilla::intl::BidiEmbeddingLevel aBaseLevel,
+                               nsPresContext* aPresContext,
+                               BidiProcessor& aprocessor, Mode aMode,
+                               nsBidiPositionResolve* aPosResolve,
+                               int32_t aPosResolveCount, nscoord* aWidth);
 
   /**
    * Traverse the child frames of the block element and:
@@ -562,11 +574,12 @@ class nsBidiPresUtils {
    */
   static void RemoveBidiContinuation(BidiParagraphData* aBpd, nsIFrame* aFrame,
                                      int32_t aFirstIndex, int32_t aLastIndex);
-  static void CalculateCharType(mozilla::intl::Bidi* aBidiEngine,
-                                const char16_t* aText, int32_t& aOffset,
-                                int32_t aCharTypeLimit, int32_t& aRunLimit,
-                                int32_t& aRunLength, int32_t& aRunCount,
-                                uint8_t& aCharType, uint8_t& aPrevCharType);
+
+  static void CalculateBidiClass(const char16_t* aText, int32_t& aOffset,
+                                 int32_t aBidiClassLimit, int32_t& aRunLimit,
+                                 int32_t& aRunLength, int32_t& aRunCount,
+                                 mozilla::intl::BidiClass& aBidiClass,
+                                 mozilla::intl::BidiClass& aPrevBidiClass);
 
   static void StripBidiControlCharacters(char16_t* aText, int32_t& aTextLength);
 };

@@ -9,6 +9,7 @@
 #define mozilla_net_HttpBackgroundChannelChild_h
 
 #include "mozilla/net/PHttpBackgroundChannelChild.h"
+#include "mozilla/ipc/Endpoint.h"
 #include "nsIRunnable.h"
 #include "nsTArray.h"
 
@@ -17,6 +18,7 @@ using mozilla::ipc::IPCResult;
 namespace mozilla {
 namespace net {
 
+class PBackgroundDataBridgeChild;
 class BackgroundDataBridgeChild;
 class HttpChannelChild;
 
@@ -61,7 +63,7 @@ class HttpBackgroundChannelChild final : public PHttpBackgroundChannelChild {
                                    const nsresult& aTransportStatus,
                                    const uint64_t& aOffset,
                                    const uint32_t& aCount,
-                                   const nsDependentCSubstring& aData,
+                                   const nsACString& aData,
                                    const bool& aDataFromSocketProcess);
 
   IPCResult RecvOnStopRequest(
@@ -84,9 +86,6 @@ class HttpBackgroundChannelChild final : public PHttpBackgroundChannelChild {
   IPCResult RecvNotifyClassificationFlags(const uint32_t& aClassificationFlags,
                                           const bool& aIsThirdParty);
 
-  IPCResult RecvNotifyFlashPluginStateChanged(
-      const nsIHttpChannel::FlashPluginState& aState);
-
   IPCResult RecvSetClassifierMatchedInfo(const ClassifierInfo& info);
 
   IPCResult RecvSetClassifierMatchedTrackingInfo(const ClassifierInfo& info);
@@ -94,9 +93,11 @@ class HttpBackgroundChannelChild final : public PHttpBackgroundChannelChild {
   IPCResult RecvAttachStreamFilter(
       Endpoint<extensions::PStreamFilterParent>&& aEndpoint);
 
+  IPCResult RecvDetachStreamFilters();
+
   void ActorDestroy(ActorDestroyReason aWhy) override;
 
-  void CreateDataBridge();
+  void CreateDataBridge(Endpoint<PBackgroundDataBridgeChild>&& aEndpoint);
 
  private:
   virtual ~HttpBackgroundChannelChild();

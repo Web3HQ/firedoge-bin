@@ -10,9 +10,11 @@
 #include <functional>
 #include "nsString.h"
 #include "nsCOMPtr.h"
+#include "nsTArray.h"
 
 class nsIEventTarget;
 class nsITimer;
+class nsIThread;
 namespace JS {
 class CallArgs;
 }  // namespace JS
@@ -28,15 +30,15 @@ class ProxyAutoConfigBase {
  public:
   virtual ~ProxyAutoConfigBase() = default;
   virtual nsresult Init(nsIThread* aPACThread) { return NS_OK; }
-  virtual nsresult ConfigurePAC(const nsCString& aPACURI,
-                                const nsCString& aPACScriptData,
+  virtual nsresult ConfigurePAC(const nsACString& aPACURI,
+                                const nsACString& aPACScriptData,
                                 bool aIncludePath, uint32_t aExtraHeapSize,
-                                nsIEventTarget* aEventTarget) = 0;
+                                nsISerialEventTarget* aEventTarget) = 0;
   virtual void SetThreadLocalIndex(uint32_t index) {}
   virtual void Shutdown() = 0;
   virtual void GC() = 0;
   virtual void GetProxyForURIWithCallback(
-      const nsCString& aTestURI, const nsCString& aTestHost,
+      const nsACString& aTestURI, const nsACString& aTestHost,
       std::function<void(nsresult aStatus, const nsACString& aResult)>&&
           aCallback) = 0;
 };
@@ -50,15 +52,15 @@ class ProxyAutoConfig : public ProxyAutoConfigBase {
   ProxyAutoConfig();
   virtual ~ProxyAutoConfig();
 
-  nsresult ConfigurePAC(const nsCString& aPACURI,
-                        const nsCString& aPACScriptData, bool aIncludePath,
+  nsresult ConfigurePAC(const nsACString& aPACURI,
+                        const nsACString& aPACScriptData, bool aIncludePath,
                         uint32_t aExtraHeapSize,
-                        nsIEventTarget* aEventTarget) override;
+                        nsISerialEventTarget* aEventTarget) override;
   void SetThreadLocalIndex(uint32_t index) override;
   void Shutdown() override;
   void GC() override;
   bool MyIPAddress(const JS::CallArgs& aArgs);
-  bool ResolveAddress(const nsCString& aHostName, NetAddr* aNetAddr,
+  bool ResolveAddress(const nsACString& aHostName, NetAddr* aNetAddr,
                       unsigned int aTimeout);
 
   /**
@@ -95,15 +97,13 @@ class ProxyAutoConfig : public ProxyAutoConfigBase {
    * @param result
    *        result string as defined above.
    */
-  nsresult GetProxyForURI(const nsCString& aTestURI, const nsCString& aTestHost,
-                          nsACString& result);
+  nsresult GetProxyForURI(const nsACString& aTestURI,
+                          const nsACString& aTestHost, nsACString& result);
 
   void GetProxyForURIWithCallback(
-      const nsCString& aTestURI, const nsCString& aTestHost,
+      const nsACString& aTestURI, const nsACString& aTestHost,
       std::function<void(nsresult aStatus, const nsACString& aResult)>&&
           aCallback) override;
-
-  bool WaitingForDNSResolve() const { return mWaitingForDNSResolve; }
 
  private:
   // allow 665ms for myipaddress dns queries. That's 95th percentile.
@@ -113,7 +113,7 @@ class ProxyAutoConfig : public ProxyAutoConfigBase {
   nsresult SetupJS();
 
   bool SrcAddress(const NetAddr* remoteAddress, nsCString& localAddress);
-  bool MyIPAddressTryHost(const nsCString& hostName, unsigned int timeout,
+  bool MyIPAddressTryHost(const nsACString& hostName, unsigned int timeout,
                           const JS::CallArgs& aArgs, bool* aResult);
 
   JSContextWrapper* mJSContext{nullptr};
@@ -122,11 +122,10 @@ class ProxyAutoConfig : public ProxyAutoConfigBase {
   nsCString mConcatenatedPACData;
   nsCString mPACURI;
   bool mIncludePath{false};
-  bool mWaitingForDNSResolve{false};
   uint32_t mExtraHeapSize{0};
   nsCString mRunningHost;
   nsCOMPtr<nsITimer> mTimer;
-  nsCOMPtr<nsIEventTarget> mMainThreadEventTarget;
+  nsCOMPtr<nsISerialEventTarget> mMainThreadEventTarget;
 };
 
 class RemoteProxyAutoConfig : public ProxyAutoConfigBase {
@@ -135,14 +134,14 @@ class RemoteProxyAutoConfig : public ProxyAutoConfigBase {
   virtual ~RemoteProxyAutoConfig();
 
   nsresult Init(nsIThread* aPACThread) override;
-  nsresult ConfigurePAC(const nsCString& aPACURI,
-                        const nsCString& aPACScriptData, bool aIncludePath,
+  nsresult ConfigurePAC(const nsACString& aPACURI,
+                        const nsACString& aPACScriptData, bool aIncludePath,
                         uint32_t aExtraHeapSize,
-                        nsIEventTarget* aEventTarget) override;
+                        nsISerialEventTarget* aEventTarget) override;
   void Shutdown() override;
   void GC() override;
   void GetProxyForURIWithCallback(
-      const nsCString& aTestURI, const nsCString& aTestHost,
+      const nsACString& aTestURI, const nsACString& aTestHost,
       std::function<void(nsresult aStatus, const nsACString& aResult)>&&
           aCallback) override;
 

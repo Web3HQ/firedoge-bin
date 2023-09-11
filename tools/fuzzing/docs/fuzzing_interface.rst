@@ -63,19 +63,19 @@ Afterwards, you can run
 
 ::
 
-   $ python -m fuzzfetch -a --fuzzing --gtest -n firefox-fuzzing
+   $ python -m fuzzfetch -a --fuzzing --target gtest -n firefox-fuzzing
 
 to fetch the latest optimized build. Alternatively, we offer non-ASan debug builds
 which you can download using
 
 ::
 
-   $ python -m fuzzfetch -d --fuzzing --gtest -n firefox-fuzzing
+   $ python -m fuzzfetch -d --fuzzing --target gtest -n firefox-fuzzing
 
 In both commands, ``firefox-fuzzing`` indicates the name of the directory that
 will be created for the download.
 
-Afterwards, you can reproduce the bug using 
+Afterwards, you can reproduce the bug using
 
 ::
 
@@ -111,23 +111,26 @@ so adding
 to your ``.mozconfig`` is already sufficient for producing a fuzzing build.
 However, for improved crash handling capabilities and to detect additional errors,
 it is strongly recommended to combine libFuzzer with :ref:`AddressSanitizer <Address Sanitizer>`
-by adding
-
-::
-
-  ac_add_options --enable-address-sanitizer
-
 at least for optimized builds and bugs requiring ASan to reproduce at all
 (e.g. you are working on a bug where ASan reports a memory safety violation
 of some sort).
 
-Once your build is complete, you **must** additionally run
+Once your build is complete, if you want to run gtests, you **must** additionally run
 
 ::
 
   $ ./mach gtest dontruntests
 
 to force the gtest libxul to be built.
+
+If you get the error ``error while loading shared libraries: libxul.so: cannot
+open shared object file: No such file or directory``, you need to explicitly
+set ``LD_LIBRARY_PATH`` to your build directory ``obj-dir`` before the command
+to invoke the fuzzing. For example an IPC fuzzing invocation:
+
+::
+
+  $ LD_LIBRARY_PATH=/path/to/obj-dir/dist/bin/ MOZ_FUZZ_TESTFILE=/path/to/test.bin NYX_FUZZER="IPC_Generic" /path/to/obj-dir/dist/bin/firefox /path/to/testcase.html
 
 .. note::
 
@@ -163,7 +166,7 @@ non-determinism and loss of performance.
 
 If you are unsure if the fuzzing interface is the right approach for you or you
 require help in evaluating what could be done for your particular task, please
-don't hestitate to :ref:`contact us <Fuzzing#contact-us>`.
+don't hesitate to :ref:`contact us <Fuzzing#contact-us>`.
 
 
 Develop the fuzzing code
@@ -195,7 +198,7 @@ In order to define your fuzzing target ``MyTarget``, you only need to implement 
    At startup, the fuzzing interface calls this function **once**, so this can
    be used to perform one-time operations like initializing subsystems or parsing
    extra fuzzing options.
-   
+
    This function is the equivalent of the `LLVMFuzzerInitialize <https://llvm.org/docs/LibFuzzer.html#startup-initialization>`__
    function and has the same signature. However, with our fuzzing interface,
    it won't be resolved by its name, so it can be defined ``static`` and called

@@ -8,15 +8,14 @@
 objects and methods for parsing and serializing Talos results
 see https://wiki.mozilla.org/Buildbot/Talos/DataFormat
 """
-from __future__ import absolute_import, print_function
-
 import csv
 import json
 import os
 import re
+
 import six
 
-from talos import output, utils, filter
+from talos import filter, output, utils
 
 
 class TalosResults(object):
@@ -32,13 +31,15 @@ class TalosResults(object):
     def add_extra_option(self, extra_option):
         self.extra_options.append(extra_option)
 
+    def has_results(self):
+        return len(self.results) > 0
+
     def output(self, output_formats):
         """
         output all results to appropriate URLs
         - output_formats: a dict mapping formats to a list of URLs
         """
         try:
-
             for key, urls in output_formats.items():
                 _output = output.Output(self, Results)
                 results = _output()
@@ -375,7 +376,6 @@ class BrowserLogResults(object):
 
         # parse the timestamps
         for attr, tokens in self.time_tokens:
-
             # parse the token contents
             value, _last_token = self.get_single_token(*tokens)
 
@@ -533,8 +533,9 @@ class BrowserLogResults(object):
             # obtain the value by converting the second line in the file.
             with open(filename, "r") as contents:
                 lines = contents.read().splitlines()
-                value = float(lines[1].strip())
-                counter_results.setdefault(session_store_counter, []).append(value)
+                if len(lines) > 1:
+                    value = float(lines[1].strip())
+                    counter_results.setdefault(session_store_counter, []).append(value)
 
     def mainthread_io(self, counter_results):
         """record mainthread IO counters in counter_results dictionary"""

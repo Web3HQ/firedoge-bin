@@ -17,10 +17,9 @@ EXPORTS += [
 ]
 
 LOCAL_INCLUDES += [
+    "!/security/rlbox",
     "/dom/media",
 ]
-
-DEFINES["TRACING"] = True
 
 include("/ipc/chromium/chromium-config.mozbuild")
 

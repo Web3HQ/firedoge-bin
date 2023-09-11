@@ -6,34 +6,60 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-pub mod session;
-pub mod webtransport;
+pub(crate) mod webtransport_session;
+pub(crate) mod webtransport_streams;
 
 use crate::client_events::Http3ClientEvents;
 use crate::features::NegotiationState;
 use crate::settings::{HSettingType, HSettings};
-use crate::{Http3StreamInfo, Http3StreamType};
+use crate::{CloseType, Http3StreamInfo, Http3StreamType};
+use neqo_common::Header;
 use neqo_transport::{AppError, StreamId};
-pub use session::ExtendedConnectSession;
-use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::fmt::Debug;
-use std::rc::Rc;
+pub(crate) use webtransport_session::WebTransportSession;
 
-pub trait ExtendedConnectEvents: Debug {
-    fn session_start(&self, connect_type: ExtendedConnectType, stream_id: StreamId);
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum SessionCloseReason {
+    Error(AppError),
+    Status(u16),
+    Clean { error: u32, message: String },
+}
+
+impl From<CloseType> for SessionCloseReason {
+    fn from(close_type: CloseType) -> SessionCloseReason {
+        match close_type {
+            CloseType::ResetApp(e) | CloseType::ResetRemote(e) | CloseType::LocalError(e) => {
+                SessionCloseReason::Error(e)
+            }
+            CloseType::Done => SessionCloseReason::Clean {
+                error: 0,
+                message: String::new(),
+            },
+        }
+    }
+}
+
+pub(crate) trait ExtendedConnectEvents: Debug {
+    fn session_start(
+        &self,
+        connect_type: ExtendedConnectType,
+        stream_id: StreamId,
+        status: u16,
+        headers: Vec<Header>,
+    );
     fn session_end(
         &self,
         connect_type: ExtendedConnectType,
         stream_id: StreamId,
-        error: Option<AppError>,
+        reason: SessionCloseReason,
+        headers: Option<Vec<Header>>,
     );
     fn extended_connect_new_stream(&self, stream_info: Http3StreamInfo);
+    fn new_datagram(&self, session_id: StreamId, datagram: Vec<u8>);
 }
 
 #[derive(Debug, PartialEq, Copy, Clone, Eq)]
-pub enum ExtendedConnectType {
+pub(crate) enum ExtendedConnectType {
     WebTransport,
 }
 
@@ -42,12 +68,6 @@ impl ExtendedConnectType {
     #[allow(clippy::unused_self)] // This will change when we have more features using ExtendedConnectType.
     pub fn string(&self) -> &str {
         "webtransport"
-    }
-
-    #[must_use]
-    #[allow(clippy::unused_self)] // this will change when there is more types of the extended CONNECT.
-    pub fn setting_type(self) -> HSettingType {
-        HSettingType::EnableWebTransport
     }
 
     #[allow(clippy::unused_self)] // This will change when we have more features using ExtendedConnectType.
@@ -65,10 +85,8 @@ impl From<ExtendedConnectType> for HSettingType {
 }
 
 #[derive(Debug)]
-pub struct ExtendedConnectFeature {
-    connect_type: ExtendedConnectType,
+pub(crate) struct ExtendedConnectFeature {
     feature_negotiation: NegotiationState,
-    sessions: HashMap<StreamId, Rc<RefCell<ExtendedConnectSession>>>,
 }
 
 impl ExtendedConnectFeature {
@@ -76,28 +94,11 @@ impl ExtendedConnectFeature {
     pub fn new(connect_type: ExtendedConnectType, enable: bool) -> Self {
         Self {
             feature_negotiation: NegotiationState::new(enable, HSettingType::from(connect_type)),
-            connect_type,
-            sessions: HashMap::new(),
         }
     }
 
     pub fn set_listener(&mut self, new_listener: Http3ClientEvents) {
         self.feature_negotiation.set_listener(new_listener);
-    }
-
-    pub fn insert(&mut self, stream_id: StreamId, session: Rc<RefCell<ExtendedConnectSession>>) {
-        self.sessions.insert(stream_id, session);
-    }
-
-    pub fn get_session(
-        &mut self,
-        stream_id: StreamId,
-    ) -> Option<Rc<RefCell<ExtendedConnectSession>>> {
-        if !matches!(self.feature_negotiation, NegotiationState::Negotiated) {
-            return None;
-        }
-
-        self.sessions.get_mut(&stream_id).cloned()
     }
 
     pub fn handle_settings(&mut self, settings: &HSettings) {
@@ -108,13 +109,6 @@ impl ExtendedConnectFeature {
     pub fn enabled(&self) -> bool {
         self.feature_negotiation.enabled()
     }
-
-    pub fn remove(
-        &mut self,
-        stream_id: StreamId,
-    ) -> Option<(BTreeSet<StreamId>, BTreeSet<StreamId>)> {
-        self.sessions
-            .remove(&stream_id)
-            .and_then(|ec| ec.borrow_mut().take_sub_streams())
-    }
 }
+#[cfg(test)]
+mod tests;

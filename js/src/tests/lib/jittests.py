@@ -6,7 +6,6 @@
 
 # jit_test.py -- Python harness for JavaScript trace tests.
 
-from __future__ import print_function
 import os
 import re
 import sys
@@ -18,7 +17,7 @@ if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
 else:
     from .tasks_win import run_all_tests
 
-from .progressbar import ProgressBar, NullProgressBar
+from .progressbar import NullProgressBar, ProgressBar
 from .results import escape_cmdline
 from .structuredlog import TestLogger
 from .tempfile import TemporaryDirectory
@@ -93,7 +92,6 @@ def extend_condition(condition, value):
 
 
 class JitTest:
-
     VALGRIND_CMD = []
     paths = (d for d in os.environ["PATH"].split(os.pathsep))
     valgrinds = (os.path.join(d, "valgrind") for d in paths)
@@ -465,32 +463,15 @@ def check_output(out, err, rc, timed_out, test, options):
             return True
 
     if timed_out:
-        if (
-            os.path.normpath(test.relpath_tests).replace(os.sep, "/")
-            in options.ignore_timeouts
-        ):
+        relpath = os.path.normpath(test.relpath_tests).replace(os.sep, "/")
+        if relpath in options.ignore_timeouts:
             return True
-
-        # The shell sometimes hangs on shutdown on Windows 7 and Windows
-        # Server 2008. See bug 970063 comment 7 for a description of the
-        # problem. Until bug 956899 is fixed, ignore timeouts on these
-        # platforms (versions 6.0 and 6.1).
-        if sys.platform == "win32":
-            ver = sys.getwindowsversion()
-            if ver.major == 6 and ver.minor <= 1:
-                return True
         return False
 
     if test.expect_error:
         # The shell exits with code 3 on uncaught exceptions.
-        # Sometimes 0 is returned on Windows for unknown reasons.
-        # See bug 899697.
-        if sys.platform in ["win32", "cygwin"]:
-            if rc != 3 and rc != 0:
-                return False
-        else:
-            if rc != 3:
-                return False
+        if rc != 3:
+            return False
 
         return test.expect_error in err
 
@@ -506,7 +487,7 @@ def check_output(out, err, rc, timed_out, test, options):
         # Python 3 on Windows interprets process exit codes as unsigned
         # integers, where Python 2 used to allow signed integers. Account for
         # each possibility here.
-        if sys.platform == "win32" and rc in (3 - 2 ** 31, 3 + 2 ** 31):
+        if sys.platform == "win32" and rc in (3 - 2**31, 3 + 2**31):
             return True
 
         if sys.platform != "win32" and rc == -11:
@@ -530,12 +511,6 @@ def check_output(out, err, rc, timed_out, test, options):
         return False
 
     if rc != test.expect_status:
-        # Tests which expect a timeout check for exit code 6.
-        # Sometimes 0 is returned on Windows for unknown reasons.
-        # See bug 899697.
-        if sys.platform in ["win32", "cygwin"] and rc == 0:
-            return True
-
         # Allow a non-zero exit code if we want to allow OOM, but only if we
         # actually got OOM.
         if (
@@ -822,8 +797,9 @@ def run_tests_local(tests, num_tests, prefix, options, slog):
 
 def run_tests_remote(tests, num_tests, prefix, options, slog):
     # Setup device with everything needed to run our tests.
-    from .tasks_adb_remote import get_remote_results
     from mozdevice import ADBError, ADBTimeoutError
+
+    from .tasks_adb_remote import get_remote_results
 
     # Run all tests.
     pb = create_progressbar(num_tests, options)
@@ -834,23 +810,6 @@ def run_tests_remote(tests, num_tests, prefix, options, slog):
         print("TEST-UNEXPECTED-FAIL | jit_test.py" + " : Device error during test")
         raise
     return ok
-
-
-def platform_might_be_android():
-    try:
-        # The python package for SL4A provides an |android| module.
-        # If that module is present, we're likely in SL4A-python on
-        # device.  False positives and negatives are possible,
-        # however.
-        import android  # NOQA: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def stdio_might_be_broken():
-    return platform_might_be_android()
 
 
 if __name__ == "__main__":

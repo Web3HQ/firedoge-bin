@@ -27,41 +27,54 @@ The following documentation pages apply to all remote protocols
   CodeStyle.md
   Security.md
 
+Protocols
+=========
 
 .. _marionette-header:
 
 Marionette
-==========
+----------
 
 Marionette is used both by internal tools and testing solutions, but also by
 geckodriver to implement the `WebDriver (HTTP) specification`_. The documentation
 for Marionette can be found under `testing/marionette`_.
 
 .. _WebDriver (HTTP) specification: https://w3c.github.io/webdriver/
-.. _testing/marionette: ../testing/marionette/index.html
+.. _testing/marionette: /testing/marionette
 
 
 .. _remote-protocol-cdp-header:
 
 Remote Protocol (CDP)
-=====================
+---------------------
 
 Firefox implements a subset of the `Chrome DevTools Protocol`_ (CDP) in order to
 support third party automation tools such as `puppeteer`. The documentation for
 the remote protocol (CDP) implement can be found at `remote/cdp`_.
 
 .. _Chrome DevTools Protocol: https://chromedevtools.github.io/devtools-protocol/
-.. _remote/cdp: cdp/index.html
+.. _remote/cdp: cdp/
 
 
 .. _webdriver-bidi-header:
 
 WebDriver BiDi
-==============
+--------------
 
 `The WebDriver BiDi specification <https://w3c.github.io/webdriver-bidi>`_
 extends WebDriver HTTP to add bidirectional communication. Dedicated
 documentation will be added as the Firefox implementation makes progress.
+
+Architecture
+============
+
+Message Handler
+---------------
+
+The documentation for the framework used to build WebDriver BiDi modules can be
+found at `remote/messagehandler`_.
+
+.. _remote/messagehandler: messagehandler/
 
 
 Bugs

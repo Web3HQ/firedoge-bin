@@ -79,7 +79,8 @@ bool CompositorManagerParent::Create(
 already_AddRefed<CompositorBridgeParent>
 CompositorManagerParent::CreateSameProcessWidgetCompositorBridge(
     CSSToLayoutDeviceScale aScale, const CompositorOptions& aOptions,
-    bool aUseExternalSurfaceSize, const gfx::IntSize& aSurfaceSize) {
+    bool aUseExternalSurfaceSize, const gfx::IntSize& aSurfaceSize,
+    uint64_t aInnerWindowId) {
   MOZ_ASSERT(XRE_IsParentProcess());
   MOZ_ASSERT(NS_IsMainThread());
 
@@ -103,14 +104,12 @@ CompositorManagerParent::CreateSameProcessWidgetCompositorBridge(
     return nullptr;
   }
 
-  TimeDuration vsyncRate = gfxPlatform::GetPlatform()
-                               ->GetHardwareVsync()
-                               ->GetGlobalDisplay()
-                               .GetVsyncRate();
+  TimeDuration vsyncRate =
+      gfxPlatform::GetPlatform()->GetGlobalVsyncDispatcher()->GetVsyncRate();
 
-  RefPtr<CompositorBridgeParent> bridge =
-      new CompositorBridgeParent(sInstance, aScale, vsyncRate, aOptions,
-                                 aUseExternalSurfaceSize, aSurfaceSize);
+  RefPtr<CompositorBridgeParent> bridge = new CompositorBridgeParent(
+      sInstance, aScale, vsyncRate, aOptions, aUseExternalSurfaceSize,
+      aSurfaceSize, aInnerWindowId);
 
   sInstance->mPendingCompositorBridges.AppendElement(bridge);
   return bridge.forget();
@@ -135,10 +134,6 @@ void CompositorManagerParent::BindComplete(bool aIsRoot) {
   MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread() ||
              NS_IsMainThread());
 
-  // Add the IPDL reference to ourself, so we can't get freed until IPDL is
-  // done with us.
-  AddRef();
-
   StaticMutexAutoLock lock(sMutex);
   if (aIsRoot) {
     sInstance = this;
@@ -155,24 +150,20 @@ void CompositorManagerParent::BindComplete(bool aIsRoot) {
 void CompositorManagerParent::ActorDestroy(ActorDestroyReason aReason) {
   SharedSurfacesParent::DestroyProcess(OtherPid());
 
-  StaticMutexAutoLock lock(sMutex);
-  if (sInstance == this) {
-    sInstance = nullptr;
-  }
-}
-
-void CompositorManagerParent::ActorDealloc() {
   GetCurrentSerialEventTarget()->Dispatch(
       NewRunnableMethod("layers::CompositorManagerParent::DeferredDestroy",
                         this, &CompositorManagerParent::DeferredDestroy));
 
-#ifdef COMPOSITOR_MANAGER_PARENT_EXPLICIT_SHUTDOWN
   StaticMutexAutoLock lock(sMutex);
+  if (sInstance == this) {
+    sInstance = nullptr;
+  }
+
+#ifdef COMPOSITOR_MANAGER_PARENT_EXPLICIT_SHUTDOWN
   if (sActiveActors) {
     sActiveActors->RemoveElement(this);
   }
 #endif
-  Release();
 }
 
 void CompositorManagerParent::DeferredDestroy() {
@@ -231,7 +222,7 @@ CompositorManagerParent::AllocPCompositorBridgeParent(
       const WidgetCompositorOptions& opt = aOpt.get_WidgetCompositorOptions();
       RefPtr<CompositorBridgeParent> bridge = new CompositorBridgeParent(
           this, opt.scale(), opt.vsyncRate(), opt.options(),
-          opt.useExternalSurfaceSize(), opt.surfaceSize());
+          opt.useExternalSurfaceSize(), opt.surfaceSize(), opt.innerWindowId());
       return bridge.forget();
     }
     case CompositorBridgeOptions::TSameProcessWidgetCompositorOptions: {

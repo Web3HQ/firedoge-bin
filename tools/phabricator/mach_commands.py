@@ -2,8 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, # You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, unicode_literals
-
 import mozfile
 from mach.decorators import Command, CommandArgument
 from mach.site import MozSiteMetadata
@@ -38,11 +36,11 @@ def install_moz_phab(command_context, force=False):
         sys.exit(1)
 
     active_metadata = MozSiteMetadata.from_runtime()
-    external_python = active_metadata.external_python.python_path
+    original_python = active_metadata.original_python.python_path
     is_external_python_virtualenv = (
         subprocess.check_output(
             [
-                external_python,
+                original_python,
                 "-c",
                 "import sys; print(sys.prefix != sys.base_prefix)",
             ]
@@ -53,7 +51,7 @@ def install_moz_phab(command_context, force=False):
     # pip3 is part of Python since 3.4, however some distros choose to
     # remove core components from languages, so show a useful error message
     # if pip3 is missing.
-    has_pip = subprocess.run([external_python, "-c", "import pip"]).returncode == 0
+    has_pip = subprocess.run([original_python, "-c", "import pip"]).returncode == 0
     if not has_pip:
         command_context.log(
             logging.ERROR,
@@ -64,13 +62,14 @@ def install_moz_phab(command_context, force=False):
         )
         sys.exit(1)
 
-    command = [external_python, "-m", "pip", "install", "--upgrade", "MozPhab"]
+    command = [original_python, "-m", "pip", "install", "--upgrade", "MozPhab"]
 
     if (
         sys.platform.startswith("linux")
         or sys.platform.startswith("openbsd")
         or sys.platform.startswith("dragonfly")
         or sys.platform.startswith("freebsd")
+        or sys.platform.startswith("netbsd")
     ):
         # On all Linux and BSD distros we consider doing a user installation.
         platform_prefers_user_install = True
@@ -94,13 +93,18 @@ def install_moz_phab(command_context, force=False):
         )
         platform_prefers_user_install = True
 
+    command_env = os.environ.copy()
+
     if platform_prefers_user_install and not is_external_python_virtualenv:
         # Virtual environments don't see user packages, so only perform a user
         # installation if we're not within one.
         command.append("--user")
+        # This is needed to work around a problem on Ubuntu 23.04 and Debian 12
+        # See bug 1831442 for more details
+        command_env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
 
     command_context.log(logging.INFO, "run", {}, "Installing moz-phab")
-    subprocess.run(command)
+    subprocess.run(command, env=command_env)
 
     # There isn't an elegant way of determining the CLI location of a pip-installed package.
     # The viable mechanism used here is to:
@@ -111,7 +115,7 @@ def install_moz_phab(command_context, force=False):
     # 4. Join the two paths, and execute the script at that location
 
     info = subprocess.check_output(
-        [external_python, "-m", "pip", "show", "-f", "MozPhab"],
+        [original_python, "-m", "pip", "show", "-f", "MozPhab"],
         universal_newlines=True,
     )
     mozphab_package_location = re.compile(r"Location: (.*)").search(info).group(1)

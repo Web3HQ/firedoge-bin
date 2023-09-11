@@ -7,6 +7,7 @@
 include("/dom/media/webrtc/third_party_build/webrtc.mozbuild")
 
 DEFINES["ENABLE_SET_CUBEB_BACKEND"] = True
+DEFINES["VISIBLE_TIMEUNIT_INTERNALS"] = True
 
 LOCAL_INCLUDES += [
     "/dom/media/mediasink",
@@ -20,35 +21,42 @@ LOCAL_INCLUDES += [
 UNIFIED_SOURCES += [
     "MockCubeb.cpp",
     "MockMediaResource.cpp",
+    "TestAudioBuffer.cpp",
     "TestAudioBuffers.cpp",
     "TestAudioCallbackDriver.cpp",
     "TestAudioCompactor.cpp",
     "TestAudioDecoderInputTrack.cpp",
     "TestAudioDriftCorrection.cpp",
+    "TestAudioInputSource.cpp",
     "TestAudioMixer.cpp",
     "TestAudioPacketizer.cpp",
     "TestAudioRingBuffer.cpp",
     "TestAudioSegment.cpp",
+    "TestAudioSinkWrapper.cpp",
     "TestAudioTrackEncoder.cpp",
     "TestAudioTrackGraph.cpp",
     "TestBenchmarkStorage.cpp",
     "TestBitWriter.cpp",
     "TestBlankVideoDataCreator.cpp",
     "TestBufferReader.cpp",
+    "TestCubebInputStream.cpp",
     "TestDataMutex.cpp",
     "TestDecoderBenchmark.cpp",
+    "TestDeviceInputTrack.cpp",
     "TestDriftCompensation.cpp",
     "TestDynamicResampler.cpp",
     "TestGMPUtils.cpp",
     "TestGroupId.cpp",
     "TestIntervalSet.cpp",
     "TestKeyValueStorage.cpp",
+    "TestMediaCodecsSupport.cpp",
     "TestMediaDataDecoder.cpp",
     "TestMediaDataEncoder.cpp",
     "TestMediaEventSource.cpp",
     "TestMediaMIMETypes.cpp",
     "TestMediaQueue.cpp",
     "TestMediaSpan.cpp",
+    "TestMediaUtils.cpp",
     "TestMP3Demuxer.cpp",
     "TestMP4Demuxer.cpp",
     "TestMuxer.cpp",
@@ -58,21 +66,13 @@ UNIFIED_SOURCES += [
     "TestRust.cpp",
     "TestTimeUnit.cpp",
     "TestVideoSegment.cpp",
+    "TestVideoTrackEncoder.cpp",
     "TestVideoUtils.cpp",
     "TestVPXDecoding.cpp",
     "TestWebMBuffered.cpp",
-    "WaitFor.cpp",
+    "TestWebMWriter.cpp",
+    "YUVBufferGenerator.cpp",
 ]
-
-if CONFIG["MOZ_WEBM_ENCODER"]:
-    UNIFIED_SOURCES += [
-        "TestVideoTrackEncoder.cpp",
-        "TestWebMWriter.cpp",
-        "YUVBufferGenerator.cpp",
-    ]
-    LOCAL_INCLUDES += [
-        "/gfx/2d/",
-    ]
 
 if CONFIG["MOZ_WEBRTC"]:
     UNIFIED_SOURCES += [
@@ -94,6 +94,7 @@ if CONFIG["MOZ_WEBRTC"] and CONFIG["OS_TARGET"] != "Android":
     ]
 
 TEST_HARNESS_FILES.gtest += [
+    "../test/av1.mp4",
     "../test/gizmo-frag.mp4",
     "../test/gizmo.mp4",
     "../test/vp9cake.webm",
@@ -111,6 +112,13 @@ TEST_HARNESS_FILES.gtest += [
     "test_case_1224361.vp8.ivf",
     "test_case_1224363.vp8.ivf",
     "test_case_1224369.vp8.ivf",
+    "test_InvalidElementId.webm",
+    "test_InvalidElementSize.webm",
+    "test_InvalidLargeEBMLMaxIdLength.webm",
+    "test_InvalidLargeElementId.webm",
+    "test_InvalidSmallEBMLMaxIdLength.webm",
+    "test_ValidLargeEBMLMaxIdLength.webm",
+    "test_ValidSmallEBMLMaxSizeLength.webm",
     "test_vbri.mp3",
 ]
 
@@ -128,6 +136,7 @@ LOCAL_INCLUDES += [
     "/dom/media/platforms",
     "/dom/media/platforms/agnostic",
     "/dom/media/webrtc",
+    "/gfx/2d/",
     "/security/certverifier",
 ]
 

@@ -245,7 +245,7 @@ DeriveAppContainerSidFromAppContainerName(
 #define PROCESS_CREATION_MITIGATION_POLICY_BLOCK_NON_MICROSOFT_BINARIES_RESERVED          (0x00000003uLL << 44)
 #endif
 
-#if (_WIN32_WINNT < 0x0A00)
+#if (_WIN32_WINNT < 0x0A00) || defined(__MINGW32__)
 //
 // Define Font Disable Policy.  When enabled, this option will
 // block loading Non System Fonts.
@@ -364,16 +364,5 @@ IsUserCetAvailableInEnvironment(
 #define USER_CET_ENVIRONMENT_WIN32_PROCESS        0x00000000
 
 #endif // (_WIN32_WINNT < 0x0A00)
-
-#if defined(__MINGW32__)
-
-// winnt.h
-#define THREAD_DYNAMIC_CODE_ALLOW   1     // Opt-out of dynamic code generation.
-
-// Mingw uses an old version THREAD_INFORMATION_CLASS defined in winbase.h
-// where ThreadDynamicCodePolicy does not exist.
-#define ThreadDynamicCodePolicy static_cast<THREAD_INFORMATION_CLASS>(2)
-
-#endif // defined(__MINGW32__)
 
 #endif // _SECURITY_SANDBOX_BASE_SHIM_SDKDECLS_H_

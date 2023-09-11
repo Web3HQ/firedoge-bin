@@ -4,29 +4,23 @@
 
 "use strict";
 
-const { PromiseUtils } = ChromeUtils.import(
-  "resource://gre/modules/PromiseUtils.jsm"
+const { GMPInstallManager } = ChromeUtils.importESModule(
+  "resource://gre/modules/GMPInstallManager.sys.mjs"
 );
-const { AppConstants } = ChromeUtils.import(
-  "resource://gre/modules/AppConstants.jsm"
-);
-var GMPScope = ChromeUtils.import(
-  "resource://gre/modules/addons/GMPProvider.jsm",
-  null
+const { GMPPrefs, GMP_PLUGIN_IDS, WIDEVINE_ID } = ChromeUtils.importESModule(
+  "resource://gre/modules/GMPUtils.sys.mjs"
 );
 
 const TEST_DATE = new Date(2013, 0, 1, 12);
 
 var gMockAddons = [];
 
-for (let plugin of GMPScope.GMP_PLUGINS) {
+for (let pluginId of GMP_PLUGIN_IDS) {
   let mockAddon = Object.freeze({
-    id: plugin.id,
+    id: pluginId,
     isValid: true,
     isInstalled: false,
-    isEME: !!(
-      plugin.id == "gmp-widevinecdm" || plugin.id.indexOf("gmp-eme-") == 0
-    ),
+    isEME: pluginId == WIDEVINE_ID,
   });
   gMockAddons.push(mockAddon);
 }
@@ -34,11 +28,9 @@ for (let plugin of GMPScope.GMP_PLUGINS) {
 var gInstalledAddonId = "";
 var gInstallDeferred = null;
 var gPrefs = Services.prefs;
-var getKey = GMPScope.GMPPrefs.getPrefKey;
+var getKey = GMPPrefs.getPrefKey;
 
-function MockGMPInstallManager() {}
-
-MockGMPInstallManager.prototype = {
+const MockGMPInstallManagerPrototype = {
   checkForAddons: () =>
     Promise.resolve({
       usedFallback: true,
@@ -63,69 +55,40 @@ function openDetailsView(win, id) {
 }
 
 add_task(async function initializeState() {
-  gPrefs.setBoolPref(GMPScope.GMPPrefs.KEY_LOGGING_DUMP, true);
-  gPrefs.setIntPref(GMPScope.GMPPrefs.KEY_LOGGING_LEVEL, 0);
+  gPrefs.setBoolPref(GMPPrefs.KEY_LOGGING_DUMP, true);
+  gPrefs.setIntPref(GMPPrefs.KEY_LOGGING_LEVEL, 0);
 
-  registerCleanupFunction(async function() {
+  registerCleanupFunction(async function () {
     for (let addon of gMockAddons) {
+      gPrefs.clearUserPref(getKey(GMPPrefs.KEY_PLUGIN_ENABLED, addon.id));
+      gPrefs.clearUserPref(getKey(GMPPrefs.KEY_PLUGIN_LAST_UPDATE, addon.id));
+      gPrefs.clearUserPref(getKey(GMPPrefs.KEY_PLUGIN_AUTOUPDATE, addon.id));
+      gPrefs.clearUserPref(getKey(GMPPrefs.KEY_PLUGIN_VERSION, addon.id));
+      gPrefs.clearUserPref(getKey(GMPPrefs.KEY_PLUGIN_VISIBLE, addon.id));
       gPrefs.clearUserPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_ENABLED, addon.id)
-      );
-      gPrefs.clearUserPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_LAST_UPDATE, addon.id)
-      );
-      gPrefs.clearUserPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_AUTOUPDATE, addon.id)
-      );
-      gPrefs.clearUserPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VERSION, addon.id)
-      );
-      gPrefs.clearUserPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VISIBLE, addon.id)
-      );
-      gPrefs.clearUserPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id)
+        getKey(GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id)
       );
     }
-    gPrefs.clearUserPref(GMPScope.GMPPrefs.KEY_LOGGING_DUMP);
-    gPrefs.clearUserPref(GMPScope.GMPPrefs.KEY_LOGGING_LEVEL);
-    gPrefs.clearUserPref(GMPScope.GMPPrefs.KEY_UPDATE_LAST_CHECK);
-    gPrefs.clearUserPref(GMPScope.GMPPrefs.KEY_EME_ENABLED);
-    await GMPScope.GMPProvider.shutdown();
-    GMPScope.GMPProvider.startup();
+    gPrefs.clearUserPref(GMPPrefs.KEY_LOGGING_DUMP);
+    gPrefs.clearUserPref(GMPPrefs.KEY_LOGGING_LEVEL);
+    gPrefs.clearUserPref(GMPPrefs.KEY_UPDATE_LAST_CHECK);
+    gPrefs.clearUserPref(GMPPrefs.KEY_EME_ENABLED);
   });
 
   // Start out with plugins not being installed, disabled and automatic updates
   // disabled.
-  gPrefs.setBoolPref(GMPScope.GMPPrefs.KEY_EME_ENABLED, true);
+  gPrefs.setBoolPref(GMPPrefs.KEY_EME_ENABLED, true);
   for (let addon of gMockAddons) {
+    gPrefs.setBoolPref(getKey(GMPPrefs.KEY_PLUGIN_ENABLED, addon.id), false);
+    gPrefs.setIntPref(getKey(GMPPrefs.KEY_PLUGIN_LAST_UPDATE, addon.id), 0);
+    gPrefs.setBoolPref(getKey(GMPPrefs.KEY_PLUGIN_AUTOUPDATE, addon.id), false);
+    gPrefs.setCharPref(getKey(GMPPrefs.KEY_PLUGIN_VERSION, addon.id), "");
+    gPrefs.setBoolPref(getKey(GMPPrefs.KEY_PLUGIN_VISIBLE, addon.id), true);
     gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_ENABLED, addon.id),
-      false
-    );
-    gPrefs.setIntPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_LAST_UPDATE, addon.id),
-      0
-    );
-    gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_AUTOUPDATE, addon.id),
-      false
-    );
-    gPrefs.setCharPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VERSION, addon.id),
-      ""
-    );
-    gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VISIBLE, addon.id),
-      true
-    );
-    gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id),
+      getKey(GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id),
       true
     );
   }
-  await GMPScope.GMPProvider.shutdown();
-  GMPScope.GMPProvider.startup();
 });
 
 add_task(async function testNotInstalledDisabled() {
@@ -144,7 +107,9 @@ add_task(async function testNotInstalledDisabled() {
       "The addon name should include a disabled postfix"
     );
 
-    let cardMessage = addonCard.querySelector("message-bar.addon-card-message");
+    let cardMessage = addonCard.querySelector(
+      "moz-message-bar.addon-card-message"
+    );
     is_element_hidden(cardMessage, "Warning notification is hidden");
   }
 
@@ -167,7 +132,9 @@ add_task(async function testNotInstalledDisabledDetails() {
 
     let updatesBtn = addonCard.querySelector("[action=update-check]");
     is_element_visible(updatesBtn, "Check for Updates action is visible");
-    let cardMessage = addonCard.querySelector("message-bar.addon-card-message");
+    let cardMessage = addonCard.querySelector(
+      "moz-message-bar.addon-card-message"
+    );
     is_element_hidden(cardMessage, "Warning notification is hidden");
 
     await switchView(win, "plugin");
@@ -180,15 +147,14 @@ add_task(async function testNotInstalled() {
   let win = await loadInitialView("plugin");
 
   for (let addon of gMockAddons) {
-    gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_ENABLED, addon.id),
-      true
-    );
+    gPrefs.setBoolPref(getKey(GMPPrefs.KEY_PLUGIN_ENABLED, addon.id), true);
     let item = getAddonCard(win, addon.id);
     Assert.ok(item, "Got add-on element:" + addon.id);
 
     let warningMessageBar = await BrowserTestUtils.waitForCondition(() => {
-      return item.querySelector("message-bar.addon-card-message[type=warning]");
+      return item.querySelector(
+        "moz-message-bar.addon-card-message[type=warning]"
+      );
     }, "Wait for the addon card message to be updated");
 
     is_element_visible(warningMessageBar, "Warning notification is visible");
@@ -222,7 +188,7 @@ add_task(async function testNotInstalledDetails() {
 
     let warningMessageBar = await BrowserTestUtils.waitForCondition(() => {
       return addonCard.querySelector(
-        "message-bar.addon-card-message[type=warning]"
+        "moz-message-bar.addon-card-message[type=warning]"
       );
     }, "Wait for the addon card message to be updated");
     is_element_visible(warningMessageBar, "Warning notification is visible");
@@ -238,15 +204,12 @@ add_task(async function testInstalled() {
 
   for (let addon of gMockAddons) {
     gPrefs.setIntPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_LAST_UPDATE, addon.id),
+      getKey(GMPPrefs.KEY_PLUGIN_LAST_UPDATE, addon.id),
       TEST_DATE.getTime()
     );
-    gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_AUTOUPDATE, addon.id),
-      false
-    );
+    gPrefs.setBoolPref(getKey(GMPPrefs.KEY_PLUGIN_AUTOUPDATE, addon.id), false);
     gPrefs.setCharPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VERSION, addon.id),
+      getKey(GMPPrefs.KEY_PLUGIN_VERSION, addon.id),
       "1.2.3.4"
     );
 
@@ -292,7 +255,7 @@ add_task(async function testInstalledDetails() {
 
 add_task(async function testInstalledGlobalEmeDisabled() {
   let win = await loadInitialView("plugin");
-  gPrefs.setBoolPref(GMPScope.GMPPrefs.KEY_EME_ENABLED, false);
+  gPrefs.setBoolPref(GMPPrefs.KEY_EME_ENABLED, false);
 
   for (let addon of gMockAddons) {
     let item = getAddonCard(win, addon.id);
@@ -303,7 +266,7 @@ add_task(async function testInstalledGlobalEmeDisabled() {
     }
   }
 
-  gPrefs.setBoolPref(GMPScope.GMPPrefs.KEY_EME_ENABLED, true);
+  gPrefs.setBoolPref(GMPPrefs.KEY_EME_ENABLED, true);
   await closeView(win);
 });
 
@@ -323,11 +286,11 @@ add_task(async function testPreferencesButton() {
     for (let addon of gMockAddons) {
       let win = await loadInitialView("plugin");
       gPrefs.setCharPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VERSION, addon.id),
+        getKey(GMPPrefs.KEY_PLUGIN_VERSION, addon.id),
         preferences.version
       );
       gPrefs.setBoolPref(
-        getKey(GMPScope.GMPPrefs.KEY_PLUGIN_ENABLED, addon.id),
+        getKey(GMPPrefs.KEY_PLUGIN_ENABLED, addon.id),
         preferences.enabled
       );
 
@@ -356,15 +319,12 @@ add_task(async function testPreferencesButton() {
 });
 
 add_task(async function testUpdateButton() {
-  gPrefs.clearUserPref(GMPScope.GMPPrefs.KEY_UPDATE_LAST_CHECK);
+  gPrefs.clearUserPref(GMPPrefs.KEY_UPDATE_LAST_CHECK);
 
-  let originalInstallManager = GMPScope.GMPInstallManager;
-  Object.defineProperty(GMPScope, "GMPInstallManager", {
-    value: MockGMPInstallManager,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  // The GMPInstallManager constructor has an empty body,
+  // so replacing the prototype is safe.
+  let originalInstallManager = GMPInstallManager.prototype;
+  GMPInstallManager.prototype = MockGMPInstallManagerPrototype;
 
   let win = await loadInitialView("plugin");
 
@@ -385,39 +345,22 @@ add_task(async function testUpdateButton() {
 
     await switchView(win, "plugin");
   }
-  Object.defineProperty(GMPScope, "GMPInstallManager", {
-    value: originalInstallManager,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+
+  GMPInstallManager.prototype = originalInstallManager;
 
   await closeView(win);
 });
 
 add_task(async function testEmeSupport() {
   for (let addon of gMockAddons) {
-    gPrefs.clearUserPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id)
-    );
+    gPrefs.clearUserPref(getKey(GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id));
   }
-  await GMPScope.GMPProvider.shutdown();
-  GMPScope.GMPProvider.startup();
 
   let win = await loadInitialView("plugin");
 
   for (let addon of gMockAddons) {
     let item = getAddonCard(win, addon.id);
-    if (addon.id == GMPScope.EME_ADOBE_ID) {
-      if (AppConstants.isPlatformAndVersionAtLeast("win", "6")) {
-        Assert.ok(item, "Adobe EME supported, found add-on element.");
-      } else {
-        Assert.ok(
-          !item,
-          "Adobe EME not supported, couldn't find add-on element."
-        );
-      }
-    } else if (addon.id == GMPScope.WIDEVINE_ID) {
+    if (addon.id == WIDEVINE_ID) {
       if (
         AppConstants.isPlatformAndVersionAtLeast("win", "6") ||
         AppConstants.platform == "macosx" ||
@@ -438,15 +381,10 @@ add_task(async function testEmeSupport() {
   await closeView(win);
 
   for (let addon of gMockAddons) {
+    gPrefs.setBoolPref(getKey(GMPPrefs.KEY_PLUGIN_VISIBLE, addon.id), true);
     gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_VISIBLE, addon.id),
-      true
-    );
-    gPrefs.setBoolPref(
-      getKey(GMPScope.GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id),
+      getKey(GMPPrefs.KEY_PLUGIN_FORCE_SUPPORTED, addon.id),
       true
     );
   }
-  await GMPScope.GMPProvider.shutdown();
-  GMPScope.GMPProvider.startup();
 });

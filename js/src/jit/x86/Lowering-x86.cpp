@@ -371,11 +371,6 @@ static bool OptimizableConstantAccess(MDefinition* base,
   return true;
 }
 
-void LIRGenerator::visitWasmHeapBase(MWasmHeapBase* ins) {
-  auto* lir = new (alloc()) LWasmHeapBase(useRegisterAtStart(ins->tlsPtr()));
-  define(lir, ins);
-}
-
 void LIRGenerator::visitWasmLoad(MWasmLoad* ins) {
   MDefinition* base = ins->base();
   MOZ_ASSERT(base->type() == MIRType::Int32);
@@ -687,7 +682,7 @@ void LIRGeneratorX86::lowerWasmBuiltinDivI64(MWasmBuiltinDivI64* div) {
     LUDivOrModI64* lir = new (alloc())
         LUDivOrModI64(useInt64FixedAtStart(div->lhs(), Register64(eax, ebx)),
                       useInt64FixedAtStart(div->rhs(), Register64(ecx, edx)),
-                      useFixedAtStart(div->tls(), WasmTlsReg));
+                      useFixedAtStart(div->instance(), InstanceReg));
     defineReturn(lir, div);
     return;
   }
@@ -695,7 +690,7 @@ void LIRGeneratorX86::lowerWasmBuiltinDivI64(MWasmBuiltinDivI64* div) {
   LDivOrModI64* lir = new (alloc())
       LDivOrModI64(useInt64FixedAtStart(div->lhs(), Register64(eax, ebx)),
                    useInt64FixedAtStart(div->rhs(), Register64(ecx, edx)),
-                   useFixedAtStart(div->tls(), WasmTlsReg));
+                   useFixedAtStart(div->instance(), InstanceReg));
   defineReturn(lir, div);
 }
 
@@ -716,7 +711,7 @@ void LIRGeneratorX86::lowerWasmBuiltinModI64(MWasmBuiltinModI64* mod) {
     LUDivOrModI64* lir = new (alloc())
         LUDivOrModI64(useInt64FixedAtStart(lhs, Register64(eax, ebx)),
                       useInt64FixedAtStart(rhs, Register64(ecx, edx)),
-                      useFixedAtStart(mod->tls(), WasmTlsReg));
+                      useFixedAtStart(mod->instance(), InstanceReg));
     defineReturn(lir, mod);
     return;
   }
@@ -724,7 +719,7 @@ void LIRGeneratorX86::lowerWasmBuiltinModI64(MWasmBuiltinModI64* mod) {
   LDivOrModI64* lir = new (alloc())
       LDivOrModI64(useInt64FixedAtStart(lhs, Register64(eax, ebx)),
                    useInt64FixedAtStart(rhs, Register64(ecx, edx)),
-                   useFixedAtStart(mod->tls(), WasmTlsReg));
+                   useFixedAtStart(mod->instance(), InstanceReg));
   defineReturn(lir, mod);
 }
 
@@ -753,7 +748,7 @@ void LIRGeneratorX86::lowerBigIntMod(MBigIntMod* ins) {
 void LIRGenerator::visitSubstr(MSubstr* ins) {
   // Due to lack of registers on x86, we reuse the string register as
   // temporary. As a result we only need two temporary registers and take a
-  // bugos temporary as fifth argument.
+  // bogus temporary as fifth argument.
   LSubstr* lir = new (alloc())
       LSubstr(useRegister(ins->string()), useRegister(ins->begin()),
               useRegister(ins->length()), temp(), LDefinition::BogusTemp(),
@@ -817,4 +812,24 @@ void LIRGenerator::visitSignExtendInt64(MSignExtendInt64* ins) {
   defineInt64Fixed(lir, ins,
                    LInt64Allocation(LAllocation(AnyRegister(edx)),
                                     LAllocation(AnyRegister(eax))));
+}
+
+// On x86 we specialize the only cases where compare is {U,}Int32 and select
+// is {U,}Int32.
+bool LIRGeneratorShared::canSpecializeWasmCompareAndSelect(
+    MCompare::CompareType compTy, MIRType insTy) {
+  return insTy == MIRType::Int32 && (compTy == MCompare::Compare_Int32 ||
+                                     compTy == MCompare::Compare_UInt32);
+}
+
+void LIRGeneratorShared::lowerWasmCompareAndSelect(MWasmSelect* ins,
+                                                   MDefinition* lhs,
+                                                   MDefinition* rhs,
+                                                   MCompare::CompareType compTy,
+                                                   JSOp jsop) {
+  MOZ_ASSERT(canSpecializeWasmCompareAndSelect(compTy, ins->type()));
+  auto* lir = new (alloc()) LWasmCompareAndSelect(
+      useRegister(lhs), useAny(rhs), compTy, jsop,
+      useRegisterAtStart(ins->trueExpr()), useAny(ins->falseExpr()));
+  defineReuseInput(lir, ins, LWasmCompareAndSelect::IfTrueExprIndex);
 }

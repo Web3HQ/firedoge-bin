@@ -4,17 +4,17 @@
 
 
 import json
-import os
-from types import FunctionType
 from collections import namedtuple
+from types import FunctionType
 
+from mozilla_repo_urls import parse
 
 from taskgraph import create
 from taskgraph.config import load_graph_config
-from taskgraph.util import taskcluster, yaml, hash
 from taskgraph.parameters import Parameters
+from taskgraph.util import hash, taskcluster, yaml
 from taskgraph.util.memoize import memoize
-
+from taskgraph.util.python_path import import_sibling_modules
 
 actions = []
 callbacks = {}
@@ -67,7 +67,7 @@ def register_callback_action(
     parameters as follows:
 
     ``parameters``:
-        Decision task parameters, see ``taskgraph.parameters.Parameters``.
+        Decision task :class:`parameters <taskgraph.parameters.Parameters>`.
     ``input``:
         Input matching specified JSON schema, ``None`` if no ``schema``
         parameter is given to ``register_callback_action``.
@@ -78,55 +78,52 @@ def register_callback_action(
         for, ``None`` if no ``context`` parameters was given to
         ``register_callback_action``.
 
-    Parameters
-    ----------
-    name : str
-        An identifier for this action, used by UIs to find the action.
-    title : str
-        A human readable title for the action to be used as label on a button
-        or text on a link for triggering the action.
-    symbol : str
-        Treeherder symbol for the action callback, this is the symbol that the
-        task calling your callback will be displayed as. This is usually 1-3
-        letters abbreviating the action title.
-    description : str
-        A human readable description of the action in **markdown**.
-        This will be display as tooltip and in dialog window when the action
-        is triggered. This is a good place to describe how to use the action.
-    order : int
-        Order of the action in menus, this is relative to the ``order`` of
-        other actions declared.
-    context : list of dict
-        List of tag-sets specifying which tasks the action is can take as input.
-        If no tag-sets is specified as input the action is related to the
-        entire task-group, and won't be triggered with a given task.
+    Args:
+        name (str):
+            An identifier for this action, used by UIs to find the action.
+        title (str):
+            A human readable title for the action to be used as label on a button
+            or text on a link for triggering the action.
+        symbol (str):
+            Treeherder symbol for the action callback, this is the symbol that the
+            task calling your callback will be displayed as. This is usually 1-3
+            letters abbreviating the action title.
+        description (str):
+            A human readable description of the action in **markdown**.
+            This will be display as tooltip and in dialog window when the action
+            is triggered. This is a good place to describe how to use the action.
+        order (int):
+            Order of the action in menus, this is relative to the ``order`` of
+            other actions declared.
+        context (list of dict):
+            List of tag-sets specifying which tasks the action is can take as input.
+            If no tag-sets is specified as input the action is related to the
+            entire task-group, and won't be triggered with a given task.
 
-        Otherwise, if ``context = [{'k': 'b', 'p': 'l'}, {'k': 't'}]`` will only
-        be displayed in the context menu for tasks that has
-        ``task.tags.k == 'b' && task.tags.p = 'l'`` or ``task.tags.k = 't'``.
-        Esentially, this allows filtering on ``task.tags``.
+            Otherwise, if ``context = [{'k': 'b', 'p': 'l'}, {'k': 't'}]`` will only
+            be displayed in the context menu for tasks that has
+            ``task.tags.k == 'b' && task.tags.p = 'l'`` or ``task.tags.k = 't'``.
+            Essentially, this allows filtering on ``task.tags``.
 
-        If this is a function, it is given the decision parameters and must return
-        a value of the form described above.
-    available : function
-        An optional function that given decision parameters decides if the
-        action is available. Defaults to a function that always returns ``True``.
-    schema : dict
-        JSON schema specifying input accepted by the action.
-        This is optional and can be left ``null`` if no input is taken.
-    generic : boolean
-        Whether this is a generic action or has its own permissions.
-    cb_name : string
-        The name under which this function should be registered, defaulting to
-        `name`.  This is used to generation actionPerm for non-generic hook
-        actions, and thus appears in ci-configuration and various role and hook
-        names.  Unlike `name`, which can appear multiple times, cb_name must be
-        unique among all registered callbacks.
+            If this is a function, it is given the decision parameters and must return
+            a value of the form described above.
+        available (function):
+            An optional function that given decision parameters decides if the
+            action is available. Defaults to a function that always returns ``True``.
+        schema (dict):
+            JSON schema specifying input accepted by the action.
+            This is optional and can be left ``null`` if no input is taken.
+        generic (bool)
+            Whether this is a generic action or has its own permissions.
+        cb_name (str):
+            The name under which this function should be registered, defaulting to
+            `name`.  This is used to generation actionPerm for non-generic hook
+            actions, and thus appears in ci-configuration and various role and hook
+            names.  Unlike `name`, which can appear multiple times, cb_name must be
+            unique among all registered callbacks.
 
-    Returns
-    -------
-    function
-        To be used as decorator for the callback function.
+    Returns:
+        function: Decorator to be used for the callback function.
     """
     mem = {"registered": False}  # workaround nonlocal missing in 2.x
 
@@ -262,15 +259,14 @@ def render_actions_json(parameters, graph_config, decision_task_id):
     """
     Render JSON object for the ``public/actions.json`` artifact.
 
-    Parameters
-    ----------
-    parameters : taskgraph.parameters.Parameters
-        Decision task parameters.
+    Args:
+        parameters (:class:`~taskgraph.parameters.Parameters`):
+            Decision task parameters.
 
-    Returns
-    -------
-    dict
-        JSON object representation of the ``public/actions.json`` artifact.
+    Returns:
+        dict:
+            JSON object representation of the ``public/actions.json``
+            artifact.
     """
     assert isinstance(parameters, Parameters), "requires instance of Parameters"
     actions = []
@@ -297,24 +293,20 @@ def sanity_check_task_scope(callback, parameters, graph_config):
         if action.cb_name == callback:
             break
     else:
-        raise Exception(f"No action with cb_name {callback}")
+        raise ValueError(f"No action with cb_name {callback}")
 
     actionPerm = "generic" if action.generic else action.cb_name
 
     repo_param = "head_repository"
-    head_repository = parameters[repo_param]
-    if not head_repository.startswith(("https://hg.mozilla.org", "https://github.com")):
-        raise Exception(
-            "{} is not either https://hg.mozilla.org or https://github.com !"
-        )
-
-    expected_scope = f"assume:repo:{head_repository[8:]}:action:{actionPerm}"
+    raw_url = parameters[repo_param]
+    parsed_url = parse(raw_url)
+    expected_scope = f"assume:{parsed_url.taskcluster_role_prefix}:action:{actionPerm}"
 
     # the scope should appear literally; no need for a satisfaction check. The use of
     # get_current_scopes here calls the auth service through the Taskcluster Proxy, giving
     # the precise scopes available to this task.
     if expected_scope not in taskcluster.get_current_scopes():
-        raise Exception(f"Expected task scope {expected_scope} for this action")
+        raise ValueError(f"Expected task scope {expected_scope} for this action")
 
 
 def trigger_action_callback(
@@ -348,10 +340,7 @@ def trigger_action_callback(
 def _load(graph_config):
     # Load all modules from this folder, relying on the side-effects of register_
     # functions to populate the action registry.
-    actions_dir = os.path.dirname(__file__)
-    for f in os.listdir(actions_dir):
-        if f.endswith(".py") and f not in ("__init__.py", "registry.py", "util.py"):
-            __import__("taskgraph.actions." + f[:-3])
+    import_sibling_modules(exceptions=("util.py",))
     return callbacks, actions
 
 

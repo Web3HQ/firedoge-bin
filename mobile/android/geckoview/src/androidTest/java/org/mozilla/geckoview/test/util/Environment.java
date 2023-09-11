@@ -62,6 +62,9 @@ public class Environment {
   }
 
   public boolean isFission() {
+    // NOTE: This isn't accurate, as it doesn't take into account the default
+    // value of the pref or environment variables like
+    // `MOZ_FORCE_DISABLE_FISSION`.
     return getEnvVar("MOZ_FORCE_ENABLE_FISSION").equals("1");
   }
 
@@ -82,5 +85,9 @@ public class Environment {
 
   public long getDefaultTimeoutMillis() {
     return isDebugging() ? DEFAULT_IDE_DEBUG_TIMEOUT_MILLIS : getScaledTimeoutMillis();
+  }
+
+  public boolean isNightly() {
+    return BuildConfig.NIGHTLY_BUILD;
   }
 }

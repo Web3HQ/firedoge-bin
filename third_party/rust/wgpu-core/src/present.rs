@@ -9,17 +9,20 @@ When this texture is presented, we remove it from the device tracker as well as
 extract it from the hub.
 !*/
 
+use std::borrow::Borrow;
+
 #[cfg(feature = "trace")]
 use crate::device::trace::Action;
 use crate::{
     conv,
-    device::DeviceError,
-    hub::{Global, GlobalIdentityHandlerFactory, HalApi, Input, Token},
+    device::{DeviceError, MissingDownlevelFlags},
+    global::Global,
+    hal_api::HalApi,
+    hub::Token,
     id::{DeviceId, SurfaceId, TextureId, Valid},
+    identity::{GlobalIdentityHandlerFactory, Input},
     init_tracker::TextureInitTracker,
-    resource,
-    track::TextureSelector,
-    LifeGuard, Stored,
+    resource, track, LifeGuard, Stored,
 };
 
 use hal::{Queue as _, Surface as _};
@@ -32,7 +35,7 @@ pub const DESIRED_NUM_FRAMES: u32 = 3;
 #[derive(Debug)]
 pub(crate) struct Presentation {
     pub(crate) device_id: Stored<DeviceId>,
-    pub(crate) config: wgt::SurfaceConfiguration,
+    pub(crate) config: wgt::SurfaceConfiguration<Vec<wgt::TextureFormat>>,
     #[allow(unused)]
     pub(crate) num_frames: u32,
     pub(crate) acquired_texture: Option<Stored<TextureId>>,
@@ -45,37 +48,53 @@ impl Presentation {
 }
 
 #[derive(Clone, Debug, Error)]
+#[non_exhaustive]
 pub enum SurfaceError {
-    #[error("surface is invalid")]
+    #[error("Surface is invalid")]
     Invalid,
-    #[error("surface is not configured for presentation")]
+    #[error("Surface is not configured for presentation")]
     NotConfigured,
     #[error(transparent)]
     Device(#[from] DeviceError),
-    #[error("surface image is already acquired")]
+    #[error("Surface image is already acquired")]
     AlreadyAcquired,
-    #[error("acquired frame is still referenced")]
+    #[error("Acquired frame is still referenced")]
     StillReferenced,
 }
 
 #[derive(Clone, Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigureSurfaceError {
     #[error(transparent)]
     Device(#[from] DeviceError),
-    #[error("invalid surface")]
+    #[error("Invalid surface")]
     InvalidSurface,
+    #[error("The view format {0:?} is not compatible with texture format {1:?}, only changing srgb-ness is allowed.")]
+    InvalidViewFormat(wgt::TextureFormat, wgt::TextureFormat),
+    #[error(transparent)]
+    MissingDownlevelFlags(#[from] MissingDownlevelFlags),
     #[error("`SurfaceOutput` must be dropped before a new `Surface` is made")]
     PreviousOutputExists,
     #[error("Both `Surface` width and height must be non-zero. Wait to recreate the `Surface` until the window has non-zero area.")]
     ZeroArea,
-    #[error("surface does not support the adapter's queue family")]
+    #[error("Surface does not support the adapter's queue family")]
     UnsupportedQueueFamily,
-    #[error("requested format {requested:?} is not in list of supported formats: {available:?}")]
+    #[error("Requested format {requested:?} is not in list of supported formats: {available:?}")]
     UnsupportedFormat {
         requested: wgt::TextureFormat,
         available: Vec<wgt::TextureFormat>,
     },
-    #[error("requested usage is not supported")]
+    #[error("Requested present mode {requested:?} is not in the list of supported present modes: {available:?}")]
+    UnsupportedPresentMode {
+        requested: wgt::PresentMode,
+        available: Vec<wgt::PresentMode>,
+    },
+    #[error("Requested alpha mode {requested:?} is not in the list of supported alpha modes: {available:?}")]
+    UnsupportedAlphaMode {
+        requested: wgt::CompositeAlphaMode,
+        available: Vec<wgt::CompositeAlphaMode>,
+    },
+    #[error("Requested usage is not supported")]
     UnsupportedUsage,
 }
 
@@ -92,7 +111,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         surface_id: SurfaceId,
         texture_id_in: Input<G, TextureId>,
     ) -> Result<SurfaceOutput, SurfaceError> {
-        profiling::scope!("get_next_texture", "SwapChain");
+        profiling::scope!("SwapChain::get_next_texture");
 
         let hub = A::hub(self);
         let mut token = Token::root();
@@ -123,8 +142,33 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let _ = device;
 
         let suf = A::get_surface_mut(surface);
-        let (texture_id, status) = match unsafe { suf.raw.acquire_texture(FRAME_TIMEOUT_MS) } {
+        let (texture_id, status) = match unsafe {
+            suf.unwrap()
+                .raw
+                .acquire_texture(Some(std::time::Duration::from_millis(
+                    FRAME_TIMEOUT_MS as u64,
+                )))
+        } {
             Ok(Some(ast)) => {
+                let clear_view_desc = hal::TextureViewDescriptor {
+                    label: Some("(wgpu internal) clear surface texture view"),
+                    format: config.format,
+                    dimension: wgt::TextureViewDimension::D2,
+                    usage: hal::TextureUses::COLOR_TARGET,
+                    range: wgt::ImageSubresourceRange::default(),
+                };
+                let mut clear_views = smallvec::SmallVec::new();
+                clear_views.push(
+                    unsafe {
+                        hal::Device::create_texture_view(
+                            &device.raw,
+                            ast.texture.borrow(),
+                            &clear_view_desc,
+                        )
+                    }
+                    .map_err(DeviceError::from)?,
+                );
+
                 let present = surface.presentation.as_mut().unwrap();
                 let texture = resource::Texture {
                     inner: resource::TextureInner::Surface {
@@ -145,25 +189,38 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         format: config.format,
                         dimension: wgt::TextureDimension::D2,
                         usage: config.usage,
+                        view_formats: config.view_formats,
                     },
                     hal_usage: conv::map_texture_usage(config.usage, config.format.into()),
                     format_features: wgt::TextureFormatFeatures {
                         allowed_usages: wgt::TextureUsages::RENDER_ATTACHMENT,
-                        flags: wgt::TextureFormatFeatureFlags::empty(),
-                        filterable: false,
+                        flags: wgt::TextureFormatFeatureFlags::MULTISAMPLE_X4
+                            | wgt::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE,
                     },
                     initialization_status: TextureInitTracker::new(1, 1),
-                    full_range: TextureSelector {
+                    full_range: track::TextureSelector {
                         layers: 0..1,
-                        levels: 0..1,
+                        mips: 0..1,
                     },
                     life_guard: LifeGuard::new("<Surface>"),
+                    clear_mode: resource::TextureClearMode::RenderPass {
+                        clear_views,
+                        is_color: true,
+                    },
                 };
 
                 let ref_count = texture.life_guard.add_ref();
                 let id = fid.assign(texture, &mut token);
 
-                //suf.acquired_texture = Some(suf_texture);
+                {
+                    // register it in the device tracker as uninitialized
+                    let mut trackers = device.trackers.lock();
+                    trackers.textures.insert_single(
+                        id.0,
+                        ref_count.clone(),
+                        hal::TextureUses::UNINITIALIZED,
+                    );
+                }
 
                 if present.acquired_texture.is_some() {
                     return Err(SurfaceError::AlreadyAcquired);
@@ -204,7 +261,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         surface_id: SurfaceId,
     ) -> Result<Status, SurfaceError> {
-        profiling::scope!("present", "SwapChain");
+        profiling::scope!("SwapChain::present");
 
         let hub = A::hub(self);
         let mut token = Token::root();
@@ -235,10 +292,24 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
             // The texture ID got added to the device tracker by `submit()`,
             // and now we are moving it away.
+            log::debug!(
+                "Removing swapchain texture {:?} from the device tracker",
+                texture_id.value
+            );
             device.trackers.lock().textures.remove(texture_id.value);
 
             let (texture, _) = hub.textures.unregister(texture_id.value.0, &mut token);
             if let Some(texture) = texture {
+                if let resource::TextureClearMode::RenderPass { clear_views, .. } =
+                    texture.clear_mode
+                {
+                    for clear_view in clear_views {
+                        unsafe {
+                            hal::Device::destroy_texture_view(&device.raw, clear_view);
+                        }
+                    }
+                }
+
                 let suf = A::get_surface_mut(surface);
                 match texture.inner {
                     resource::TextureInner::Surface {
@@ -251,10 +322,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             Err(hal::SurfaceError::Lost)
                         } else if !has_work {
                             log::error!("No work has been submitted for this frame");
-                            unsafe { suf.raw.discard_texture(raw) };
+                            unsafe { suf.unwrap().raw.discard_texture(raw) };
                             Err(hal::SurfaceError::Outdated)
                         } else {
-                            unsafe { device.queue.present(&mut suf.raw, raw) }
+                            unsafe { device.queue.present(&mut suf.unwrap().raw, raw) }
                         }
                     }
                     resource::TextureInner::Native { .. } => unreachable!(),
@@ -284,7 +355,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         surface_id: SurfaceId,
     ) -> Result<(), SurfaceError> {
-        profiling::scope!("discard", "SwapChain");
+        profiling::scope!("SwapChain::discard");
 
         let hub = A::hub(self);
         let mut token = Token::root();
@@ -327,7 +398,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         has_work: _,
                     } => {
                         if surface_id == parent_id.0 {
-                            unsafe { suf.raw.discard_texture(raw) };
+                            unsafe { suf.unwrap().raw.discard_texture(raw) };
                         } else {
                             log::warn!("Surface texture is outdated");
                         }

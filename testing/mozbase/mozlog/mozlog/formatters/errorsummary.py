@@ -3,9 +3,8 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 
-from __future__ import absolute_import
-
 import json
+import os
 from collections import defaultdict
 
 from .base import BaseFormatter
@@ -22,6 +21,10 @@ class ErrorSummaryFormatter(BaseFormatter):
             }
         )
         self.line_count = 0
+        self.dump_passing_tests = False
+
+        if os.environ.get("MOZLOG_DUMP_ALL_TESTS", False):
+            self.dump_passing_tests = True
 
     def __call__(self, data):
         rv = BaseFormatter.__call__(self, data)
@@ -53,8 +56,8 @@ class ErrorSummaryFormatter(BaseFormatter):
             if ginfo["status"] is None:
                 ginfo["status"] = "SKIP"
         elif (
-            "expected" not in item
-            or item["status"] == item["expected"]
+            ("expected" not in item and item["status"] in ["OK", "PASS"])
+            or ("expected" in item and item["status"] == item["expected"])
             or item["status"] in item.get("known_intermittent", [])
         ):
             if ginfo["status"] in (None, "SKIP"):
@@ -97,8 +100,11 @@ class ErrorSummaryFormatter(BaseFormatter):
         if group:
             self._update_group_result(group, item)
 
-        if "expected" not in item:
+        if not self.dump_passing_tests and "expected" not in item:
             return
+
+        if item.get("expected", "") == "":
+            item["expected"] = item["status"]
 
         return self._output_test(item["test"], item["subtest"], item)
 
@@ -108,8 +114,11 @@ class ErrorSummaryFormatter(BaseFormatter):
             self._update_group_result(group, item)
             self.groups[group]["end"] = item["time"]
 
-        if "expected" not in item:
+        if not self.dump_passing_tests and "expected" not in item:
             return
+
+        if item.get("expected", "") == "":
+            item["expected"] = item["status"]
 
         return self._output_test(item["test"], None, item)
 
@@ -120,6 +129,12 @@ class ErrorSummaryFormatter(BaseFormatter):
         data = {"level": item["level"], "message": item["message"]}
         return self._output("log", data)
 
+    def shutdown_failure(self, item):
+        data = {"status": "FAIL", "test": item["group"], "message": item["message"]}
+        data["group"] = [g for g in self.groups if item["group"].endswith(g)][0]
+        self.groups[data["group"]]["status"] = "FAIL"
+        return self._output("log", data)
+
     def crash(self, item):
         data = {
             "test": item.get("test"),
@@ -127,6 +142,29 @@ class ErrorSummaryFormatter(BaseFormatter):
             "stackwalk_stdout": item.get("stackwalk_stdout"),
             "stackwalk_stderr": item.get("stackwalk_stderr"),
         }
+
+        if item.get("test"):
+            data["group"] = self.test_to_group.get(item["test"], "")
+            if data["group"] == "":
+                # item['test'] could be the group name, not a test name
+                if item["test"] in self.groups:
+                    data["group"] = item["test"]
+
+            # unlike test group summary, if we crash expect error unless expected
+            if (
+                (
+                    "expected" in item
+                    and "status" in item
+                    and item["status"] in item["expected"]
+                )
+                or ("expected" in item and "CRASH" == item["expected"])
+                or "status" in item
+                and item["status"] in item.get("known_intermittent", [])
+            ):
+                self.groups[data["group"]]["status"] = "PASS"
+            else:
+                self.groups[data["group"]]["status"] = "ERROR"
+
         return self._output("crash", data)
 
     def lint(self, item):

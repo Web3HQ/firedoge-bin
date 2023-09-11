@@ -1,36 +1,41 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from textwrap import dedent
 
 import mozunit
 from buildconfig import topsrcdir
+
 from mach.requirements import MachEnvRequirements
+from mach.site import PythonVirtualenv
 
 
 def _resolve_command_site_names():
-    virtualenv_names = []
-    for child in (Path(topsrcdir) / "build").iterdir():
-        if not child.name.endswith("_virtualenv_packages.txt"):
+    site_names = []
+    for child in (Path(topsrcdir) / "python" / "sites").iterdir():
+        if not child.is_file():
             continue
 
-        if child.name == "mach_virtualenv_packages.txt":
+        if child.suffix != ".txt":
             continue
 
-        virtualenv_names.append(child.name[: -len("_virtualenv_packages.txt")])
-    return virtualenv_names
+        if child.name == "mach.txt":
+            continue
+
+        site_names.append(child.stem)
+    return site_names
 
 
-def _requirement_definition_to_pip_format(virtualenv_name, cache, is_mach_or_build_env):
+def _requirement_definition_to_pip_format(site_name, cache, is_mach_or_build_env):
     """Convert from parsed requirements object to pip-consumable format"""
-    path = Path(topsrcdir) / "build" / f"{virtualenv_name}_virtualenv_packages.txt"
+    requirements_path = Path(topsrcdir) / "python" / "sites" / f"{site_name}.txt"
     requirements = MachEnvRequirements.from_requirements_definition(
-        topsrcdir, False, is_mach_or_build_env, path
+        topsrcdir, False, not is_mach_or_build_env, requirements_path
     )
 
     lines = []
@@ -40,7 +45,29 @@ def _requirement_definition_to_pip_format(virtualenv_name, cache, is_mach_or_bui
         lines.append(str(pypi.requirement))
 
     for vendored in requirements.vendored_requirements:
-        lines.append(cache.package_for_vendor_dir(Path(vendored.path)))
+        lines.append(str(cache.package_for_vendor_dir(Path(vendored.path))))
+
+    for pth in requirements.pth_requirements:
+        path = Path(pth.path)
+
+        if "third_party" not in (p.name for p in path.parents):
+            continue
+
+        for child in path.iterdir():
+            if child.name.endswith(".dist-info"):
+                raise Exception(
+                    f'In {requirements_path}, the "pth:" pointing to "{path}" has a '
+                    '".dist-info" file.\n'
+                    'Perhaps it should change to start with "vendored:" instead of '
+                    '"pth:".'
+                )
+            if child.name.endswith(".egg-info"):
+                raise Exception(
+                    f'In {requirements_path}, the "pth:" pointing to "{path}" has an '
+                    '".egg-info" file.\n'
+                    'Perhaps it should change to start with "vendored:" instead of '
+                    '"pth:".'
+                )
 
     return "\n".join(lines)
 
@@ -71,43 +98,53 @@ class PackageCache:
                     )
                 package_dir = package_dir.parent
 
-            self._cache[vendor_path] = str(package_dir)
-            return str(package_dir)
+            self._cache[vendor_path] = package_dir
+            return package_dir
 
         # Pip requires that wheels have a version number in their name, even if
         # it ignores it. We should parse out the version and put it in here
         # so that failure debugging is easier, but that's non-trivial work.
         # So, this "0" satisfies pip's naming requirement while being relatively
         # obvious that it's a placeholder.
-        output_path = str(self._storage_dir / f"{vendor_path.name}-0-py3-none-any")
-        shutil.make_archive(output_path, "zip", vendor_path)
-        whl_path = output_path + ".whl"
-        os.rename(output_path + ".zip", whl_path)
+        output_path = self._storage_dir / f"{vendor_path.name}-0-py3-none-any"
+        shutil.make_archive(str(output_path), "zip", vendor_path)
+
+        whl_path = output_path.parent / (output_path.name + ".whl")
+        (output_path.parent / (output_path.name + ".zip")).rename(whl_path)
         self._cache[vendor_path] = whl_path
+
         return whl_path
 
 
-def test_sites_compatible(tmpdir):
+def test_sites_compatible(tmpdir: str):
     command_site_names = _resolve_command_site_names()
     work_dir = Path(tmpdir)
     cache = PackageCache(work_dir)
     mach_requirements = _requirement_definition_to_pip_format("mach", cache, True)
 
     # Create virtualenv to try to install all dependencies into.
+    virtualenv = PythonVirtualenv(str(work_dir / "env"))
     subprocess.check_call(
         [
             sys.executable,
-            os.path.join(
-                topsrcdir,
-                "third_party",
-                "python",
-                "virtualenv",
-                "virtualenv.py",
-            ),
-            "--no-download",
-            str(work_dir / "env"),
+            "-m",
+            "venv",
+            "--without-pip",
+            virtualenv.prefix,
         ]
     )
+    platlib_dir = virtualenv.resolve_sysconfig_packages_path("platlib")
+    third_party = Path(topsrcdir) / "third_party" / "python"
+    with open(os.path.join(platlib_dir, "site.pth"), "w") as pthfile:
+        pthfile.write(
+            "\n".join(
+                [
+                    str(third_party / "pip"),
+                    str(third_party / "wheel"),
+                    str(third_party / "setuptools"),
+                ]
+            )
+        )
 
     for name in command_site_names:
         print(f'Checking compatibility of "{name}" site')
@@ -121,15 +158,31 @@ def test_sites_compatible(tmpdir):
 
         # Attempt to install combined set of dependencies (global Mach + current
         # command)
-        subprocess.check_call(
+        proc = subprocess.run(
             [
-                str(work_dir / "env" / "bin" / "pip"),
+                virtualenv.python_path,
+                "-m",
+                "pip",
                 "install",
                 "-r",
                 str(work_dir / "requirements.txt"),
             ],
             cwd=topsrcdir,
         )
+        if proc.returncode != 0:
+            print(
+                dedent(
+                    f"""
+                Error: The '{name}' site contains dependencies that are not
+                compatible with the 'mach' site. Check the following files for
+                any conflicting packages mentioned in the prior error message:
+
+                  python/sites/mach.txt
+                  python/sites/{name}.txt
+                        """
+                )
+            )
+            assert False
 
 
 if __name__ == "__main__":

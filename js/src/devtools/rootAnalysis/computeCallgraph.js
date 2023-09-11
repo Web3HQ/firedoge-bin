@@ -8,18 +8,38 @@
 
 loadRelativeToScript('callgraph.js');
 
-var theFunctionNameToFind;
-if (scriptArgs[0] == '--function' || scriptArgs[0] == '-f') {
-    theFunctionNameToFind = scriptArgs[1];
-    scriptArgs = scriptArgs.slice(2);
-}
+var options = parse_options([
+    {
+        name: '--verbose',
+        type: 'bool'
+    },
+    {
+        name: '--function',
+        type: 'string'
+    },
+    {
+        name: 'typeInfo_filename',
+        type: 'string',
+        default: "typeInfo.txt"
+    },
+    {
+        name: 'callgraphOut_filename',
+        type: 'string',
+        default: "rawcalls.txt"
+    },
+    {
+        name: 'batch',
+        default: 1,
+        type: 'number'
+    },
+    {
+        name: 'numBatches',
+        default: 1,
+        type: 'number'
+    },
+]);
 
-var typeInfo_filename = scriptArgs[0] || "typeInfo.txt";
-var callgraphOut_filename = scriptArgs[1] || "rawcalls.txt";
-var batch = (scriptArgs[2]|0) || 1;
-var numBatches = (scriptArgs[3]|0) || 1;
-
-var origOut = os.file.redirect(callgraphOut_filename);
+var origOut = os.file.redirect(options.callgraphOut_filename);
 
 var memoized = new Map();
 
@@ -105,7 +125,7 @@ function getAnnotations(functionName, body) {
 
 // Scan through a function body, pulling out all annotations and calls and
 // recording them in callgraph.txt.
-function processBody(functionName, body)
+function processBody(functionName, body, functionBodies)
 {
     if (!('PEdge' in body))
         return;
@@ -135,13 +155,20 @@ function processBody(functionName, body)
         // The attrs (eg ATTR_GC_SUPPRESSED) are determined by whatever RAII
         // scopes might be active, which have been computed previously for all
         // points in the body.
-        var edgeAttrs = body.attrs[edge.Index[0]] | 0;
+        const scopeAttrs = body.attrs[edge.Index[0]] | 0;
 
-        for (var callee of getCallees(edge)) {
+        for (const { callee, attrs } of getCallees(body, edge, scopeAttrs, functionBodies)) {
+            // Some function names will be synthesized by manually constructing
+            // their names. Verify that we managed to synthesize an existing function.
+            // This cannot be done later with either the callees or callers tables,
+            // because the function may be an otherwise uncalled leaf.
+            if (attrs & ATTR_SYNTHETIC) {
+                assertFunctionExists(callee.name);
+            }
+
             // Individual callees may have additional attrs. The only such
             // bit currently is that nsISupports.{AddRef,Release} are assumed
             // to never GC.
-            const attrs = edgeAttrs | callee.attrs;
             let prologue = attrs ? `/${attrs} ` : "";
             prologue += functionId(functionName) + " ";
             if (callee.kind == 'direct') {
@@ -198,9 +225,16 @@ assert(ID.nogcfunc == functionId("(nogc-function)"));
 // garbage collection
 assert(ID.gc == functionId("(GC)"));
 
-var typeInfo = loadTypeInfo(typeInfo_filename);
+var typeInfo = loadTypeInfo(options.typeInfo_filename);
 
 loadTypes("src_comp.xdb");
+
+// Arbitrary JS code must always be assumed to GC. In real code, there would
+// always be a path anyway through some arbitrary JSNative, but this route will be shorter.
+print(`D ${ID.jscode} ${ID.gc}`);
+
+// An unknown function is assumed to GC.
+print(`D ${ID.anyfunc} ${ID.gc}`);
 
 // Output call edges for all virtual methods defined anywhere, from
 // Class.methodname to what a (dynamic) instance of Class would run when
@@ -214,21 +248,6 @@ for (const [fieldkey, methods] of virtualDefinitions) {
     }
 }
 
-function ancestorClassesAndSelf(C) {
-    const ancestors = [C];
-    for (const base of (superclasses.get(C) || []))
-        ancestors.push(...ancestorClassesAndSelf(base));
-    return ancestors;
-}
-
-function isOverridable(C, field) {
-    for (const A of ancestorClassesAndSelf(C)) {
-        if (isOverridableField(C, A, field))
-            return true;
-    }
-    return false;
-}
-
 // Output call edges from C.methodname -> S.methodname for all subclasses S of
 // class C. This is for when you are calling methodname on a pointer/ref of
 // dynamic type C, so that the callgraph contains calls to all descendant
@@ -236,7 +255,7 @@ function isOverridable(C, field) {
 for (const [csu, methods] of virtualDeclarations) {
     for (const {field, dtor} of methods) {
         const caller = getId(fieldKey(csu, field));
-        if (isOverridable(csu, field.Name[0]))
+        if (virtualCanRunJS(csu, field.Name[0]))
             printOnce(`D ${caller} ${functionId("(js-code)")}`);
         if (dtor)
             printOnce(`D ${caller} ${functionId(dtor)}`);
@@ -251,18 +270,25 @@ for (const [csu, methods] of virtualDeclarations) {
 var xdb = xdbLibrary();
 xdb.open("src_body.xdb");
 
-printErr("Finished loading data structures");
+if (options.verbose) {
+    printErr("Finished loading data structures");
+}
 
 var minStream = xdb.min_data_stream();
 var maxStream = xdb.max_data_stream();
 
-if (theFunctionNameToFind) {
-    var index = xdb.lookup_key(theFunctionNameToFind);
+if (options.function) {
+    var index = xdb.lookup_key(options.function);
     if (!index) {
         printErr("Function not found");
         quit(1);
     }
     minStream = maxStream = index;
+}
+
+function assertFunctionExists(name) {
+    var data = xdb.read_entry(name);
+    assert(data.contents != 0, `synthetic function '${name}' not found!`);
 }
 
 function process(functionName, functionBodies)
@@ -276,8 +302,12 @@ function process(functionName, functionBodies)
         }
     }
 
-    for (var body of functionBodies)
-        processBody(functionName, body);
+    if (options.function) {
+        debugger;
+    }
+    for (var body of functionBodies) {
+        processBody(functionName, body, functionBodies);
+    }
 
     // Not strictly necessary, but add an edge from the synthetic "(js-code)"
     // to RunScript to allow better stacks than just randomly selecting a
@@ -390,8 +420,8 @@ function process(functionName, functionBodies)
         printOnce(`D ${functionId("(js-code)")} ${functionId(functionName)}`);
 }
 
-var start = batchStart(batch, numBatches, minStream, maxStream);
-var end = batchLast(batch, numBatches, minStream, maxStream);
+var start = batchStart(options.batch, options.numBatches, minStream, maxStream);
+var end = batchLast(options.batch, options.numBatches, minStream, maxStream);
 
 for (var nameIndex = start; nameIndex <= end; nameIndex++) {
     var name = xdb.read_key(nameIndex);

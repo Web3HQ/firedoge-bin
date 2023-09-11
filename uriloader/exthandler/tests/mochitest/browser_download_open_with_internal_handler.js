@@ -3,15 +3,13 @@
 
 "use strict";
 
-const { Downloads } = ChromeUtils.import(
-  "resource://gre/modules/Downloads.jsm"
-);
-const { DownloadIntegration } = ChromeUtils.import(
-  "resource://gre/modules/DownloadIntegration.jsm"
-);
+requestLongerTimeout(2);
 
-const { TelemetryTestUtils } = ChromeUtils.import(
-  "resource://testing-common/TelemetryTestUtils.jsm"
+const { Downloads } = ChromeUtils.importESModule(
+  "resource://gre/modules/Downloads.sys.mjs"
+);
+const { DownloadIntegration } = ChromeUtils.importESModule(
+  "resource://gre/modules/DownloadIntegration.sys.mjs"
 );
 
 const TEST_PATH = getRootDirectory(gTestPath).replace(
@@ -24,6 +22,9 @@ const HandlerSvc = Cc["@mozilla.org/uriloader/handler-service;1"].getService(
   Ci.nsIHandlerService
 );
 
+let MockFilePicker = SpecialPowers.MockFilePicker;
+MockFilePicker.init(window);
+
 function waitForAcceptButtonToGetEnabled(doc) {
   let dialog = doc.querySelector("#unknownContentType");
   let button = dialog.getButton("accept");
@@ -34,9 +35,6 @@ function waitForAcceptButtonToGetEnabled(doc) {
 }
 
 async function waitForPdfJS(browser, url) {
-  await SpecialPowers.pushPrefEnv({
-    set: [["pdfjs.eventBusDispatchToDOM", true]],
-  });
   // Runs tests after all "load" event handlers have fired off
   let loadPromise = BrowserTestUtils.waitForContentEvent(
     browser,
@@ -45,16 +43,14 @@ async function waitForPdfJS(browser, url) {
     null,
     true
   );
-  await SpecialPowers.spawn(browser, [url], contentUrl => {
-    content.location = contentUrl;
-  });
+  BrowserTestUtils.loadURIString(browser, url);
   return loadPromise;
 }
 
 /**
  * This test covers which choices are presented for downloaded files and how
- * those choices are handled. When the download improvements are enabled
- * (browser.download.improvements_to_download_panel pref) the unknown content
+ * those choices are handled. Unless a pref is enabled
+ * (browser.download.always_ask_before_handling_new_types) the unknown content
  * dialog will be skipped altogether by default when downloading.
  * To retain coverage for the non-default scenario, each task sets `alwaysAskBeforeHandling`
  * to true for the relevant mime-type and extensions.
@@ -73,29 +69,7 @@ function alwaysAskForHandlingTypes(typeExtensions, ask = true) {
   return mimeInfos;
 }
 
-function checkTelemetry(desc, expectedAction, expectedType, expectedReason) {
-  let events = Services.telemetry.snapshotEvents(
-    Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
-    true
-  );
-  events = (events.parent || []).filter(
-    e => e[1] == "downloads" && e[2] == "helpertype"
-  );
-
-  if (expectedAction == "none") {
-    is(events.length, 0, desc + " number of events");
-    return;
-  }
-
-  is(events.length, 1, desc + " number of events");
-
-  let event = events[0];
-  is(event[4], expectedAction, desc + " telemetry action");
-  is(event[5].type, expectedType, desc + " telemetry type");
-  is(event[5].reason, expectedReason, desc + " telemetry reason");
-}
-
-add_task(async function setup() {
+add_setup(async function () {
   // Remove the security delay for the dialog during the test.
   await SpecialPowers.pushPrefEnv({
     set: [
@@ -106,7 +80,7 @@ add_task(async function setup() {
   });
 
   // Restore handlers after the whole test has run
-  const registerRestoreHandler = function(type, ext) {
+  const registerRestoreHandler = function (type, ext) {
     const mimeInfo = MimeSvc.getFromTypeAndExtension(type, ext);
     const existed = HandlerSvc.exists(mimeInfo);
 
@@ -121,6 +95,7 @@ add_task(async function setup() {
   registerRestoreHandler("application/pdf", "pdf");
   registerRestoreHandler("binary/octet-stream", "pdf");
   registerRestoreHandler("application/unknown", "pdf");
+  registerRestoreHandler("image/webp", "webp");
 });
 
 /**
@@ -130,8 +105,6 @@ add_task(async function setup() {
  * is clicked from pdf.js.
  */
 add_task(async function test_check_open_with_internal_handler() {
-  Services.telemetry.clearEvents();
-
   const mimeInfosToRestore = alwaysAskForHandlingTypes({
     "application/pdf": "pdf",
     "binary/octet-stream": "pdf",
@@ -147,10 +120,12 @@ add_task(async function test_check_open_with_internal_handler() {
       await publicList.removeFinished();
     });
     let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-    let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+    let loadingTab = await BrowserTestUtils.openNewForegroundTab({
       gBrowser,
-      TEST_PATH + file
-    );
+      opening: TEST_PATH + file,
+      waitForLoad: false,
+      waitForStateStop: true,
+    });
     // Add an extra tab after the loading tab so we can test that
     // pdf.js is opened in the adjacent tab and not at the end of
     // the tab strip.
@@ -165,13 +140,6 @@ add_task(async function test_check_open_with_internal_handler() {
     let internalHandlerRadio = doc.querySelector("#handleInternally");
 
     await waitForAcceptButtonToGetEnabled(doc);
-
-    checkTelemetry(
-      "open " + file + " internal",
-      "ask",
-      file.includes("octet") ? "octetstream" : "pdf",
-      "attachment"
-    );
 
     ok(!internalHandlerRadio.hidden, "The option should be visible for PDF");
     ok(internalHandlerRadio.selected, "The option should be selected");
@@ -208,16 +176,9 @@ add_task(async function test_check_open_with_internal_handler() {
 
     let subdialogPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
     // Current tab has file: URI and TEST_PATH is http uri, so uri will be different
-    BrowserTestUtils.loadURI(newTab.linkedBrowser, TEST_PATH + file);
+    BrowserTestUtils.loadURIString(newTab.linkedBrowser, TEST_PATH + file);
     let subDialogWindow = await subdialogPromise;
     let subDoc = subDialogWindow.document;
-
-    checkTelemetry(
-      "open " + file + " internal from current tab",
-      "ask",
-      file.includes("octet") ? "octetstream" : "pdf",
-      "attachment"
-    );
 
     // Prevent racing with initialization of the dialog and make sure that
     // the final state of the dialog has the correct visibility of the internal-handler option.
@@ -229,6 +190,15 @@ add_task(async function test_check_open_with_internal_handler() {
     );
     // Cancel dialog
     subDoc.querySelector("#unknownContentType").cancelDialog();
+
+    let filepickerPromise = new Promise(resolve => {
+      MockFilePicker.showCallback = function (fp) {
+        setTimeout(() => {
+          resolve(fp.defaultString);
+        }, 0);
+        return Ci.nsIFilePicker.returnCancel;
+      };
+    });
 
     subdialogPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
     await SpecialPowers.spawn(newTab.linkedBrowser, [], async () => {
@@ -243,50 +213,8 @@ add_task(async function test_check_open_with_internal_handler() {
     info(
       "Waiting for unknown content type dialog to appear from pdf.js download button click"
     );
-    subDialogWindow = await subdialogPromise;
-    subDoc = subDialogWindow.document;
-
-    // There is no content type here, so the type will be 'other'.
-    checkTelemetry(
-      "open " + file + " internal from download button",
-      "ask",
-      "other",
-      "attachment"
-    );
-
-    // Prevent racing with initialization of the dialog and make sure that
-    // the final state of the dialog has the correct visibility of the internal-handler option.
-    await waitForAcceptButtonToGetEnabled(subDoc);
-    subInternalHandlerRadio = subDoc.querySelector("#handleInternally");
-    ok(
-      subInternalHandlerRadio.hidden,
-      "The option should be hidden when the dialog is opened from pdf.js"
-    );
-    subDoc.querySelector("#open").click();
-
-    let tabOpenListener = () => {
-      ok(
-        false,
-        "A new tab should not be opened when accepting the dialog with 'open-with-external-app' chosen"
-      );
-    };
-    gBrowser.tabContainer.addEventListener("TabOpen", tabOpenListener);
-
-    let oldLaunchFile = DownloadIntegration.launchFile;
-    let waitForLaunchFileCalled = new Promise(resolve => {
-      DownloadIntegration.launchFile = async () => {
-        ok(true, "The file should be launched with an external application");
-        resolve();
-      };
-    });
-
-    downloadFinishedPromise = promiseDownloadFinished(publicList);
-
-    info("Accepting the dialog");
-    subDoc.querySelector("#unknownContentType").acceptDialog();
-    info("Waiting until DownloadIntegration.launchFile is called");
-    await waitForLaunchFileCalled;
-    DownloadIntegration.launchFile = oldLaunchFile;
+    let filename = await filepickerPromise;
+    is(filename, file, "filename was set in filepicker");
 
     // Remove the first file (can't do this sooner or the second load fails):
     if (download?.target.exists) {
@@ -298,21 +226,10 @@ add_task(async function test_check_open_with_internal_handler() {
       }
     }
 
-    gBrowser.tabContainer.removeEventListener("TabOpen", tabOpenListener);
     BrowserTestUtils.removeTab(loadingTab);
     BrowserTestUtils.removeTab(newTab);
     BrowserTestUtils.removeTab(extraTab);
 
-    // Remove the remaining file once complete.
-    download = await downloadFinishedPromise;
-    if (download?.target.exists) {
-      try {
-        info("removing " + download.target.path);
-        await IOUtils.remove(download.target.path);
-      } catch (ex) {
-        /* ignore */
-      }
-    }
     await publicList.removeFinished();
   }
   for (let mimeInfo of mimeInfosToRestore) {
@@ -325,8 +242,6 @@ add_task(async function test_check_open_with_internal_handler() {
  * open the PDF into pdf.js
  */
 add_task(async function test_check_open_with_external_application() {
-  Services.telemetry.clearEvents();
-
   const mimeInfosToRestore = alwaysAskForHandlingTypes({
     "application/pdf": "pdf",
     "binary/octet-stream": "pdf",
@@ -342,10 +257,12 @@ add_task(async function test_check_open_with_external_application() {
       await publicList.removeFinished();
     });
     let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-    let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+    let loadingTab = await BrowserTestUtils.openNewForegroundTab({
       gBrowser,
-      TEST_PATH + file
-    );
+      opening: TEST_PATH + file,
+      waitForLoad: false,
+      waitForStateStop: true,
+    });
     let dialogWindow = await dialogWindowPromise;
     is(
       dialogWindow.location.href,
@@ -360,13 +277,6 @@ add_task(async function test_check_open_with_external_application() {
         resolve();
       };
     });
-
-    checkTelemetry(
-      "open " + file + " external",
-      "ask",
-      file.includes("octet") ? "octetstream" : "pdf",
-      "attachment"
-    );
 
     let doc = dialogWindow.document;
     await waitForAcceptButtonToGetEnabled(doc);
@@ -444,10 +354,12 @@ add_task(async function test_check_open_with_external_then_internal() {
     let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
     // Open a new tab to the PDF file which will trigger the Unknown Content Type dialog
     // and choose to open the PDF with an external application.
-    let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+    let loadingTab = await BrowserTestUtils.openNewForegroundTab({
       gBrowser,
-      TEST_PATH + file
-    );
+      opening: TEST_PATH + file,
+      waitForLoad: false,
+      waitForStateStop: true,
+    });
     let dialogWindow = await dialogWindowPromise;
     is(
       dialogWindow.location.href,
@@ -501,10 +413,12 @@ add_task(async function test_check_open_with_external_then_internal() {
     // and choose to open the PDF internally. The previously used external application should be shown as
     // the external option.
     dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-    loadingTab = await BrowserTestUtils.openNewForegroundTab(
+    loadingTab = await BrowserTestUtils.openNewForegroundTab({
       gBrowser,
-      TEST_PATH + file
-    );
+      opening: TEST_PATH + file,
+      waitForLoad: false,
+      waitForStateStop: true,
+    });
     dialogWindow = await dialogWindowPromise;
     is(
       dialogWindow.location.href,
@@ -570,24 +484,28 @@ add_task(async function test_check_open_with_external_then_internal() {
  */
 add_task(
   async function test_internal_handler_hidden_with_viewable_internally_type() {
-    Services.telemetry.clearEvents();
+    await SpecialPowers.pushPrefEnv({
+      set: [["image.webp.enabled", true]],
+    });
 
     const mimeInfosToRestore = alwaysAskForHandlingTypes({
-      "text/xml": "xml",
       "binary/octet-stream": "xml",
+      "image/webp": "webp",
     });
 
     for (let [file, checkDefault] of [
       // The default for binary/octet-stream is changed by the PDF tests above,
       // this may change given bug 1659008, so I'm just ignoring the default for now.
       ["file_xml_attachment_binary_octet_stream.xml", false],
-      ["file_xml_attachment_test.xml", true],
+      ["file_green.webp", true],
     ]) {
       let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-      let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+      let loadingTab = await BrowserTestUtils.openNewForegroundTab({
         gBrowser,
-        TEST_PATH + file
-      );
+        opening: TEST_PATH + file,
+        waitForLoad: false,
+        waitForStateStop: true,
+      });
       let dialogWindow = await dialogWindowPromise;
       is(
         dialogWindow.location.href,
@@ -601,16 +519,17 @@ add_task(
       // the final state of the dialog has the correct visibility of the internal-handler option.
       await waitForAcceptButtonToGetEnabled(doc);
 
-      checkTelemetry(
-        "open " + file + " for viewable internal type",
-        "ask",
-        file == "file_xml_attachment_test.xml" ? "other" : "octetstream",
-        "attachment"
-      );
+      let fileDesc = file.substring(file.lastIndexOf(".") + 1);
 
-      ok(!internalHandlerRadio.hidden, "The option should be visible for XML");
+      ok(
+        !internalHandlerRadio.hidden,
+        `The option should be visible for ${fileDesc}`
+      );
       if (checkDefault) {
-        ok(internalHandlerRadio.selected, "The option should be selected");
+        ok(
+          internalHandlerRadio.selected,
+          `The option should be selected for ${fileDesc}`
+        );
       }
 
       let dialog = doc.querySelector("#unknownContentType");
@@ -628,17 +547,17 @@ add_task(
  * for non-PDF, non-viewable-internally types.
  */
 add_task(async function test_internal_handler_hidden_with_other_type() {
-  Services.telemetry.clearEvents();
-
   const mimeInfosToRestore = alwaysAskForHandlingTypes({
     "text/plain": "txt",
   });
 
   let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-  let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+  let loadingTab = await BrowserTestUtils.openNewForegroundTab({
     gBrowser,
-    TEST_PATH + "file_txt_attachment_test.txt"
-  );
+    opening: TEST_PATH + "file_txt_attachment_test.txt",
+    waitForLoad: false,
+    waitForStateStop: true,
+  });
   let dialogWindow = await dialogWindowPromise;
   is(
     dialogWindow.location.href,
@@ -650,13 +569,6 @@ add_task(async function test_internal_handler_hidden_with_other_type() {
   // Prevent racing with initialization of the dialog and make sure that
   // the final state of the dialog has the correct visibility of the internal-handler option.
   await waitForAcceptButtonToGetEnabled(doc);
-
-  checkTelemetry(
-    "open file_txt_attachment_test.txt for non-viewable internal type",
-    "ask",
-    "other",
-    "attachment"
-  );
 
   let internalHandlerRadio = doc.querySelector("#handleInternally");
   ok(
@@ -689,10 +601,12 @@ add_task(async function test_internal_handler_hidden_with_pdf_pref_disabled() {
     "file_pdf_binary_octet_stream.pdf",
   ]) {
     let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-    let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+    let loadingTab = await BrowserTestUtils.openNewForegroundTab({
       gBrowser,
-      TEST_PATH + file
-    );
+      opening: TEST_PATH + file,
+      waitForLoad: false,
+      waitForStateStop: true,
+    });
     let dialogWindow = await dialogWindowPromise;
     is(
       dialogWindow.location.href,
@@ -731,10 +645,12 @@ add_task(
       set: [["browser.helperApps.showOpenOptionForViewableInternally", false]],
     });
     let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-    let loadingTab = await BrowserTestUtils.openNewForegroundTab(
+    let loadingTab = await BrowserTestUtils.openNewForegroundTab({
       gBrowser,
-      TEST_PATH + "file_xml_attachment_test.xml"
-    );
+      opening: TEST_PATH + "file_xml_attachment_test.xml",
+      waitForLoad: false,
+      waitForStateStop: true,
+    });
     let dialogWindow = await dialogWindowPromise;
     is(
       dialogWindow.location.href,
@@ -764,91 +680,136 @@ add_task(
  * This test sets the action to internal. The files should open directly without asking.
  */
 add_task(async function test_check_open_with_internal_handler_noask() {
-  Services.telemetry.clearScalars();
-  Services.telemetry.clearEvents();
-
   const mimeInfosToRestore = alwaysAskForHandlingTypes(
     {
       "application/pdf": "pdf",
       "binary/octet-stream": "pdf",
+      "application/octet-stream": "pdf",
     },
     false
   );
 
-  for (let improvements of [false, true]) {
+  // Build the matrix of tests to perform.
+  let matrix = {
+    alwaysOpenPDFInline: [false, true],
+    file: [
+      "file_pdf_application_pdf.pdf",
+      "file_pdf_binary_octet_stream.pdf",
+      "file_pdf_application_octet_stream.pdf",
+    ],
+    where: ["top", "popup", "frame"],
+  };
+  let tests = [{}];
+  for (let [key, values] of Object.entries(matrix)) {
+    tests = tests.flatMap(test =>
+      values.map(value => ({ [key]: value, ...test }))
+    );
+  }
+
+  for (let test of tests) {
+    info(`test case: ${JSON.stringify(test)}`);
+    let { alwaysOpenPDFInline, file, where } = test;
+
+    // These are the cases that can be opened inline. binary/octet-stream
+    // isn't handled by pdfjs.
+    let canHandleInline =
+      file == "file_pdf_application_pdf.pdf" ||
+      (file == "file_pdf_application_octet_stream.pdf" && where != "frame");
+
     await SpecialPowers.pushPrefEnv({
       set: [
         ["browser.helperApps.showOpenOptionForPdfJS", true],
         ["browser.helperApps.showOpenOptionForViewableInternally", true],
-        ["browser.download.improvements_to_download_panel", improvements],
+        ["browser.download.open_pdf_attachments_inline", alwaysOpenPDFInline],
       ],
     });
 
-    for (let file of [
-      "file_pdf_application_pdf.pdf",
-      "file_pdf_binary_octet_stream.pdf",
-    ]) {
-      let openPDFDirectly =
-        improvements && file == "file_pdf_application_pdf.pdf";
-      await BrowserTestUtils.withNewTab(
-        { gBrowser, url: "about:blank" },
-        async browser => {
-          let readyPromise;
-          if (improvements) {
-            if (openPDFDirectly) {
-              readyPromise = BrowserTestUtils.browserLoaded(
-                gBrowser.selectedBrowser
-              );
-            } else {
-              readyPromise = BrowserTestUtils.waitForNewTab(gBrowser);
-            }
-
-            await SpecialPowers.spawn(
-              browser,
-              [TEST_PATH + file],
-              async contentUrl => {
-                content.location = contentUrl;
-              }
-            );
-          } else {
-            let dialogWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded();
-            await SpecialPowers.spawn(
-              browser,
-              [TEST_PATH + file],
-              async contentUrl => {
-                content.location = contentUrl;
-              }
-            );
-
-            let dialogWindow = await dialogWindowPromise;
-
-            readyPromise = BrowserTestUtils.waitForNewTab(gBrowser);
-            let dialog = dialogWindow.document.querySelector(
-              "#unknownContentType"
-            );
-            dialog.getButton("accept").disabled = false;
-            dialog.acceptDialog();
-          }
-
-          await readyPromise;
-
-          let action = improvements ? "internal" : "ask";
-          checkTelemetry(
-            "open " + file + " internal",
-            openPDFDirectly ? "none" : action,
-            file.includes("octet") ? "octetstream" : "pdf",
-            "attachment"
-          );
-
-          if (!openPDFDirectly) {
-            await BrowserTestUtils.removeTab(gBrowser.selectedTab);
+    async function doNavigate(browser) {
+      await SpecialPowers.spawn(
+        browser,
+        [TEST_PATH + file, where],
+        async (contentUrl, where_) => {
+          switch (where_) {
+            case "top":
+              content.location = contentUrl;
+              break;
+            case "popup":
+              content.open(contentUrl);
+              break;
+            case "frame":
+              let frame = content.document.createElement("iframe");
+              frame.setAttribute("src", contentUrl);
+              content.document.body.appendChild(frame);
+              break;
+            default:
+              ok(false, "Unknown where value");
+              break;
           }
         }
       );
     }
+
+    // If this is true, the pdf is opened directly without downloading it.
+    // Otherwise, it must first be downloaded and optionally displayed in
+    // a tab with a file url.
+    let openPDFDirectly = alwaysOpenPDFInline && canHandleInline;
+
+    await BrowserTestUtils.withNewTab(
+      { gBrowser, url: TEST_PATH + "blank.html" },
+      async browser => {
+        let readyPromise = BrowserTestUtils.waitForNewTab(
+          gBrowser,
+          null,
+          false,
+          !openPDFDirectly
+        );
+
+        await doNavigate(browser);
+
+        await readyPromise;
+
+        is(
+          gBrowser.selectedBrowser.currentURI.scheme,
+          openPDFDirectly ? "https" : "file",
+          "Loaded PDF uri has the correct scheme"
+        );
+
+        // intentionally don't bother checking session history without ship to
+        // keep complexity down.
+        if (Services.appinfo.sessionHistoryInParent) {
+          let shistory = browser.browsingContext.sessionHistory;
+          is(shistory.count, 1, "should a single shentry");
+          is(shistory.index, 0, "should be on the first entry");
+          let shentry = shistory.getEntryAtIndex(shistory.index);
+          is(shentry.URI.spec, TEST_PATH + "blank.html");
+        }
+
+        await SpecialPowers.spawn(
+          browser,
+          [TEST_PATH + "blank.html"],
+          async blankUrl => {
+            ok(
+              !docShell.isAttemptingToNavigate,
+              "should not still be attempting to navigate"
+            );
+            is(
+              content.location.href,
+              blankUrl,
+              "original browser hasn't navigated"
+            );
+          }
+        );
+
+        await BrowserTestUtils.removeTab(gBrowser.selectedTab);
+      }
+    );
   }
 
   for (let mimeInfo of mimeInfosToRestore) {
     HandlerSvc.remove(mimeInfo);
   }
+});
+
+add_task(async () => {
+  MockFilePicker.cleanup();
 });

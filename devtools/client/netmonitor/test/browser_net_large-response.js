@@ -9,12 +9,7 @@
 
 const HTML_LONG_URL = CONTENT_TYPE_SJS + "?fmt=html-long";
 
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  // We cannot assert status text "OK" with HTTPS requests to httpd.js, instead
-  // we get "Connected"
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   const { tab, monitor } = await initNetMonitor(CUSTOM_GET_URL, {
     requestCount: 1,
   });
@@ -33,11 +28,13 @@ add_task(async function() {
   store.dispatch(Actions.batchEnable(false));
 
   let wait = waitForNetworkEvents(monitor, 1);
-  await SpecialPowers.spawn(tab.linkedBrowser, [HTML_LONG_URL], async function(
-    url
-  ) {
-    content.wrappedJSObject.performRequests(1, url);
-  });
+  await SpecialPowers.spawn(
+    tab.linkedBrowser,
+    [HTML_LONG_URL],
+    async function (url) {
+      content.wrappedJSObject.performRequests(1, url);
+    }
+  );
   await wait;
 
   const requestItem = document.querySelector(".request-list-item");
@@ -74,6 +71,17 @@ add_task(async function() {
   ok(
     getCodeMirrorValue(monitor).match(/^<p>/),
     "The text shown in the source editor is incorrect."
+  );
+
+  info("Check that search input can be displayed");
+  document.querySelector(".CodeMirror").CodeMirror.focus();
+  synthesizeKeyShortcut("CmdOrCtrl+F");
+  const searchInput = await waitFor(() =>
+    document.querySelector(".CodeMirror input[type=search]")
+  );
+  ok(
+    searchInput.ownerDocument.activeElement == searchInput,
+    "search input is focused"
   );
 
   await teardown(monitor);

@@ -7,17 +7,16 @@
  * Bug 1542172 -
  * Verifies that requests with large post data are truncated and error is displayed.
  */
-add_task(async function() {
-  // Using https-first for this test is blocked on Bug 1733420.
-  await pushPref("dom.security.https_first", false);
-
+add_task(async function () {
   const { monitor, tab } = await initNetMonitor(POST_JSON_URL, {
     requestCount: 1,
   });
 
   info("Starting test... ");
 
-  const { L10N } = require("devtools/client/netmonitor/src/utils/l10n");
+  const {
+    L10N,
+  } = require("resource://devtools/client/netmonitor/src/utils/l10n.js");
 
   const { document, store, windowRequire } = monitor.panelWin;
   const Actions = windowRequire("devtools/client/netmonitor/src/actions/index");
@@ -72,7 +71,7 @@ add_task(async function() {
 
 async function performRequestsAndWait(monitor, tab) {
   const wait = waitForNetworkEvents(monitor, 1);
-  await SpecialPowers.spawn(tab.linkedBrowser, [], async function() {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async function () {
     content.wrappedJSObject.performLargePostDataRequest();
   });
   await wait;

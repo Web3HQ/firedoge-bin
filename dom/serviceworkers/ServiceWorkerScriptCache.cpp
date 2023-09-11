@@ -8,7 +8,10 @@
 
 #include "js/Array.h"               // JS::GetArrayLength
 #include "js/PropertyAndElement.h"  // JS_GetElement
+#include "js/Utility.h"             // JS::FreePolicy
+#include "mozilla/TaskQueue.h"
 #include "mozilla/Unused.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/dom/CacheBinding.h"
 #include "mozilla/dom/cache/CacheStorage.h"
 #include "mozilla/dom/cache/Cache.h"
@@ -40,10 +43,7 @@ using mozilla::dom::cache::Cache;
 using mozilla::dom::cache::CacheStorage;
 using mozilla::ipc::PrincipalInfo;
 
-namespace mozilla {
-namespace dom {
-
-namespace serviceWorkerScriptCache {
+namespace mozilla::dom::serviceWorkerScriptCache {
 
 namespace {
 
@@ -210,11 +210,11 @@ class CompareCache final : public PromiseNativeHandler,
 
   void Abort();
 
-  virtual void ResolvedCallback(JSContext* aCx,
-                                JS::Handle<JS::Value> aValue) override;
+  virtual void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                                ErrorResult& aRv) override;
 
-  virtual void RejectedCallback(JSContext* aCx,
-                                JS::Handle<JS::Value> aValue) override;
+  virtual void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                                ErrorResult& aRv) override;
 
   const nsString& Buffer() const {
     MOZ_ASSERT(NS_IsMainThread());
@@ -265,9 +265,11 @@ class CompareManager final : public PromiseNativeHandler {
   nsresult Initialize(nsIPrincipal* aPrincipal, const nsAString& aURL,
                       const nsAString& aCacheName);
 
-  void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue) override;
+  void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                        ErrorResult& aRv) override;
 
-  void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue) override;
+  void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                        ErrorResult& aRv) override;
 
   CacheStorage* CacheStorage_() {
     MOZ_ASSERT(NS_IsMainThread());
@@ -800,7 +802,7 @@ void CompareNetwork::Abort() {
     mState = Finished;
 
     MOZ_ASSERT(mChannel);
-    mChannel->Cancel(NS_BINDING_ABORTED);
+    mChannel->CancelWithReason(NS_BINDING_ABORTED, "CompareNetwork::Abort"_ns);
     mChannel = nullptr;
 
     if (mCC) {
@@ -932,7 +934,7 @@ CompareNetwork::OnStreamComplete(nsIStreamLoader* aLoader,
       mURLList.AppendElement(channelURLSpec);
     }
 
-    char16_t* buffer = nullptr;
+    UniquePtr<char16_t[], JS::FreePolicy> buffer;
     size_t len = 0;
 
     rv = ScriptLoader::ConvertToUTF16(channel, aString, aLen, u"UTF-8"_ns,
@@ -941,7 +943,7 @@ CompareNetwork::OnStreamComplete(nsIStreamLoader* aLoader,
       return rv;
     }
 
-    mBuffer.Adopt(buffer, len);
+    mBuffer.Adopt(buffer.release(), len);
 
     rv = NS_OK;
     return NS_OK;
@@ -1002,7 +1004,7 @@ CompareNetwork::OnStreamComplete(nsIStreamLoader* aLoader,
     // (in that case the originalURL is the resolved jar URI and so we have to
     // look to the channel principal instead).
     if (channelPrincipal->SchemeIs("moz-extension")) {
-      char16_t* buffer = nullptr;
+      UniquePtr<char16_t[], JS::FreePolicy> buffer;
       size_t len = 0;
 
       rv = ScriptLoader::ConvertToUTF16(channel, aString, aLen, u"UTF-8"_ns,
@@ -1011,7 +1013,7 @@ CompareNetwork::OnStreamComplete(nsIStreamLoader* aLoader,
         return rv;
       }
 
-      mBuffer.Adopt(buffer, len);
+      mBuffer.Adopt(buffer.release(), len);
 
       return NS_OK;
     }
@@ -1097,7 +1099,7 @@ CompareNetwork::OnStreamComplete(nsIStreamLoader* aLoader,
     mURLList.AppendElement(channelURLSpec);
   }
 
-  char16_t* buffer = nullptr;
+  UniquePtr<char16_t[], JS::FreePolicy> buffer;
   size_t len = 0;
 
   rv = ScriptLoader::ConvertToUTF16(httpChannel, aString, aLen, u"UTF-8"_ns,
@@ -1106,7 +1108,7 @@ CompareNetwork::OnStreamComplete(nsIStreamLoader* aLoader,
     return rv;
   }
 
-  mBuffer.Adopt(buffer, len);
+  mBuffer.Adopt(buffer.release(), len);
 
   rv = NS_OK;
   return NS_OK;
@@ -1155,7 +1157,7 @@ void CompareCache::Abort() {
     mState = Finished;
 
     if (mPump) {
-      mPump->Cancel(NS_BINDING_ABORTED);
+      mPump->CancelWithReason(NS_BINDING_ABORTED, "CompareCache::Abort"_ns);
       mPump = nullptr;
     }
   }
@@ -1176,7 +1178,7 @@ CompareCache::OnStreamComplete(nsIStreamLoader* aLoader, nsISupports* aContext,
     return aStatus;
   }
 
-  char16_t* buffer = nullptr;
+  UniquePtr<char16_t[], JS::FreePolicy> buffer;
   size_t len = 0;
 
   nsresult rv = ScriptLoader::ConvertToUTF16(nullptr, aString, aLen,
@@ -1186,14 +1188,15 @@ CompareCache::OnStreamComplete(nsIStreamLoader* aLoader, nsISupports* aContext,
     return rv;
   }
 
-  mBuffer.Adopt(buffer, len);
+  mBuffer.Adopt(buffer.release(), len);
 
   Finish(NS_OK, true);
   return NS_OK;
 }
 
 void CompareCache::ResolvedCallback(JSContext* aCx,
-                                    JS::Handle<JS::Value> aValue) {
+                                    JS::Handle<JS::Value> aValue,
+                                    ErrorResult& aRv) {
   MOZ_ASSERT(NS_IsMainThread());
 
   switch (mState) {
@@ -1208,7 +1211,8 @@ void CompareCache::ResolvedCallback(JSContext* aCx,
 }
 
 void CompareCache::RejectedCallback(JSContext* aCx,
-                                    JS::Handle<JS::Value> aValue) {
+                                    JS::Handle<JS::Value> aValue,
+                                    ErrorResult& aRv) {
   MOZ_ASSERT(NS_IsMainThread());
 
   if (mState != Finished) {
@@ -1277,7 +1281,9 @@ void CompareCache::ManageValueResult(JSContext* aCx,
   if (rr) {
     nsCOMPtr<nsIEventTarget> sts =
         do_GetService(NS_STREAMTRANSPORTSERVICE_CONTRACTID);
-    rv = rr->RetargetDeliveryTo(sts);
+    RefPtr<TaskQueue> queue =
+        TaskQueue::Create(sts.forget(), "CompareCache STS Delivery Queue");
+    rv = rr->RetargetDeliveryTo(queue);
     if (NS_WARN_IF(NS_FAILED(rv))) {
       mPump = nullptr;
       Finish(rv, false);
@@ -1344,7 +1350,8 @@ nsresult CompareManager::Initialize(nsIPrincipal* aPrincipal,
 // 4. Put the value in the cache.
 // For this reason we have mState to know what callback we are handling.
 void CompareManager::ResolvedCallback(JSContext* aCx,
-                                      JS::Handle<JS::Value> aValue) {
+                                      JS::Handle<JS::Value> aValue,
+                                      ErrorResult& aRv) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mCallback);
 
@@ -1374,7 +1381,8 @@ void CompareManager::ResolvedCallback(JSContext* aCx,
 }
 
 void CompareManager::RejectedCallback(JSContext* aCx,
-                                      JS::Handle<JS::Value> aValue) {
+                                      JS::Handle<JS::Value> aValue,
+                                      ErrorResult& aRv) {
   MOZ_ASSERT(NS_IsMainThread());
   switch (mState) {
     case Finished:
@@ -1422,23 +1430,6 @@ void CompareManager::Cleanup() {
   }
 }
 
-class NoopPromiseHandler final : public PromiseNativeHandler {
- public:
-  NS_DECL_ISUPPORTS
-
-  NoopPromiseHandler() { AssertIsOnMainThread(); }
-
-  void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue) override {
-  }
-  void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue) override {
-  }
-
- private:
-  ~NoopPromiseHandler() { AssertIsOnMainThread(); }
-};
-
-NS_IMPL_ISUPPORTS0(NoopPromiseHandler)
-
 }  // namespace
 
 nsresult PurgeCache(nsIPrincipal* aPrincipal, const nsAString& aCacheName) {
@@ -1464,10 +1455,9 @@ nsresult PurgeCache(nsIPrincipal* aPrincipal, const nsAString& aCacheName) {
     return rv.StealNSResult();
   }
 
-  // Add a no-op promise handler to ensure that if this promise gets rejected,
+  // Set [[PromiseIsHandled]] to ensure that if this promise gets rejected,
   // we don't end up reporting a rejected promise to the console.
-  RefPtr<NoopPromiseHandler> promiseHandler = new NoopPromiseHandler();
-  promise->AppendNativeHandler(promiseHandler);
+  MOZ_ALWAYS_TRUE(promise->SetAnyPromiseIsHandled());
 
   // We don't actually care about the result of the delete operation.
   return NS_OK;
@@ -1515,7 +1505,4 @@ nsresult Compare(ServiceWorkerRegistrationInfo* aRegistration,
   return NS_OK;
 }
 
-}  // namespace serviceWorkerScriptCache
-
-}  // namespace dom
-}  // namespace mozilla
+}  // namespace mozilla::dom::serviceWorkerScriptCache

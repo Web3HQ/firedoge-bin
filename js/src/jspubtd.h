@@ -40,6 +40,10 @@ enum JSType {
   JSTYPE_BOOLEAN,   /* boolean */
   JSTYPE_SYMBOL,    /* symbol */
   JSTYPE_BIGINT,    /* BigInt */
+#ifdef ENABLE_RECORD_TUPLE
+  JSTYPE_RECORD, /* record */
+  JSTYPE_TUPLE,  /* tuple */
+#endif
   JSTYPE_LIMIT
 };
 
@@ -81,6 +85,7 @@ inline JS::Zone* GetContextZone(const JSContext* cx);
 JS_PUBLIC_API bool CurrentThreadCanAccessRuntime(const JSRuntime* rt);
 
 #ifdef DEBUG
+JS_PUBLIC_API bool CurrentThreadIsMainThread();
 JS_PUBLIC_API bool CurrentThreadIsPerformingGC();
 #endif
 

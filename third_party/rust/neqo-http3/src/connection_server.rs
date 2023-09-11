@@ -4,8 +4,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::connection::{Http3Connection, Http3State};
-use crate::hframe::HFrame;
+use crate::connection::{Http3Connection, Http3State, WebTransportSessionAcceptAction};
+use crate::frames::HFrame;
 use crate::recv_message::{RecvMessage, RecvMessageInfo};
 use crate::send_message::SendMessage;
 use crate::server_connection_events::{Http3ServerConnEvent, Http3ServerConnEvents};
@@ -14,7 +14,9 @@ use crate::{
     ReceiveOutput, Res,
 };
 use neqo_common::{event::Provider, qdebug, qinfo, qtrace, Header, MessageType, Role};
-use neqo_transport::{AppError, Connection, ConnectionEvent, StreamId, StreamType};
+use neqo_transport::{
+    AppError, Connection, ConnectionEvent, DatagramTracking, StreamId, StreamType,
+};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -38,6 +40,11 @@ impl Http3ServerHandler {
             events: Http3ServerConnEvents::default(),
             needs_processing: false,
         }
+    }
+
+    #[must_use]
+    pub fn state(&self) -> Http3State {
+        self.base_handler.state()
     }
 
     /// Supply a response for a request.
@@ -135,7 +142,7 @@ impl Http3ServerHandler {
         &mut self,
         conn: &mut Connection,
         stream_id: StreamId,
-        accept: bool,
+        accept: &WebTransportSessionAcceptAction,
     ) -> Res<()> {
         self.needs_processing = true;
         self.base_handler.webtransport_session_accept(
@@ -144,6 +151,24 @@ impl Http3ServerHandler {
             Box::new(self.events.clone()),
             accept,
         )
+    }
+
+    /// Close `WebTransport` cleanly
+    /// # Errors
+    /// `InvalidStreamId` if the stream does not exist,
+    /// `TransportStreamDoesNotExist` if the transport stream does not exist (this may happen if `process_output`
+    /// has not been called when needed, and HTTP3 layer has not picked up the info that the stream has been closed.)
+    /// `InvalidInput` if an empty buffer has been supplied.
+    pub fn webtransport_close_session(
+        &mut self,
+        conn: &mut Connection,
+        session_id: StreamId,
+        error: u32,
+        message: &str,
+    ) -> Res<()> {
+        self.needs_processing = true;
+        self.base_handler
+            .webtransport_close_session(conn, session_id, error, message)
     }
 
     pub fn webtransport_create_stream(
@@ -160,6 +185,18 @@ impl Http3ServerHandler {
             Box::new(self.events.clone()),
             Box::new(self.events.clone()),
         )
+    }
+
+    pub fn webtransport_send_datagram(
+        &mut self,
+        conn: &mut Connection,
+        session_id: StreamId,
+        buf: &[u8],
+        id: impl Into<DatagramTracking>,
+    ) -> Res<()> {
+        self.needs_processing = true;
+        self.base_handler
+            .webtransport_send_datagram(session_id, conn, buf, id)
     }
 
     /// Process HTTTP3 layer.
@@ -187,7 +224,7 @@ impl Http3ServerHandler {
             self.needs_processing = false;
             return true;
         }
-        self.base_handler.has_data_to_send() | self.events.has_events()
+        self.base_handler.has_data_to_send() || self.events.has_events()
     }
 
     // This function takes the provided result and check for an error.
@@ -204,7 +241,7 @@ impl Http3ServerHandler {
 
     fn close(&mut self, conn: &mut Connection, now: Instant, err: &Error) {
         qinfo!([self], "Connection error: {}.", err);
-        conn.close(now, err.code(), &format!("{}", err));
+        conn.close(now, err.code(), &format!("{err}"));
         self.base_handler.close(err.code());
         self.events
             .connection_state_change(self.base_handler.state());
@@ -214,7 +251,7 @@ impl Http3ServerHandler {
     fn check_connection_events(&mut self, conn: &mut Connection, now: Instant) -> Res<()> {
         qtrace!([self], "Check connection events.");
         while let Some(e) = conn.next_event() {
-            qdebug!([self], "check_connection_events - event {:?}.", e);
+            qdebug!([self], "check_connection_events - event {e:?}.");
             match e {
                 ConnectionEvent::NewStream { stream_id } => {
                     self.base_handler.add_new_stream(stream_id);
@@ -250,13 +287,13 @@ impl Http3ServerHandler {
                         s.stream_writable();
                     }
                 }
+                ConnectionEvent::Datagram(dgram) => self.base_handler.handle_datagram(&dgram),
                 ConnectionEvent::AuthenticationNeeded
                 | ConnectionEvent::EchFallbackAuthenticationNeeded { .. }
                 | ConnectionEvent::ZeroRttRejected
                 | ConnectionEvent::ResumptionToken(..) => return Err(Error::HttpInternal(4)),
                 ConnectionEvent::SendStreamComplete { .. }
                 | ConnectionEvent::SendStreamCreatable { .. }
-                | ConnectionEvent::Datagram { .. }
                 | ConnectionEvent::OutgoingDatagramOutcome { .. }
                 | ConnectionEvent::IncomingDatagramDropped => {}
             }

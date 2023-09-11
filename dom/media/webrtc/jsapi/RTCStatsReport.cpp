@@ -8,31 +8,53 @@
 #include "libwebrtcglue/SystemTime.h"
 #include "mozilla/dom/Performance.h"
 #include "nsRFPService.h"
+#include "WebrtcGlobal.h"
 
 namespace mozilla::dom {
 
-RTCStatsTimestampMaker::RTCStatsTimestampMaker()
+RTCStatsTimestampState::RTCStatsTimestampState()
     : mRandomTimelineSeed(0),
-      mStartRealtime(WebrtcSystemTimeBase()),
-      mCrossOriginIsolated(false),
+      mStartDomRealtime(WebrtcSystemTimeBase()),
+      mStartRealtime(
+          WebrtcSystemTime() -
+          webrtc::TimeDelta::Micros(
+              (TimeStamp::Now() - mStartDomRealtime).ToMicroseconds())),
+      mRTPCallerType(RTPCallerType::Normal),
       mStartWallClockRaw(
-          PerformanceService::GetOrCreate()->TimeOrigin(mStartRealtime)) {}
+          PerformanceService::GetOrCreate()->TimeOrigin(mStartDomRealtime)) {}
 
-RTCStatsTimestampMaker::RTCStatsTimestampMaker(nsPIDOMWindowInner* aWindow)
-    : mRandomTimelineSeed(
-          aWindow && aWindow->GetPerformance()
-              ? aWindow->GetPerformance()->GetRandomTimelineSeed()
-              : 0),
-      mStartRealtime(aWindow && aWindow->GetPerformance()
-                         ? aWindow->GetPerformance()->CreationTimeStamp()
-                         : WebrtcSystemTimeBase()),
-      mCrossOriginIsolated(aWindow ? aWindow->AsGlobal()->CrossOriginIsolated()
-                                   : false),
+RTCStatsTimestampState::RTCStatsTimestampState(Performance& aPerformance)
+    : mRandomTimelineSeed(aPerformance.GetRandomTimelineSeed()),
+      mStartDomRealtime(aPerformance.CreationTimeStamp()),
+      mStartRealtime(
+          WebrtcSystemTime() -
+          webrtc::TimeDelta::Micros(
+              (TimeStamp::Now() - mStartDomRealtime).ToMicroseconds())),
+      mRTPCallerType(aPerformance.GetRTPCallerType()),
       mStartWallClockRaw(
-          PerformanceService::GetOrCreate()->TimeOrigin(mStartRealtime)) {}
+          PerformanceService::GetOrCreate()->TimeOrigin(mStartDomRealtime)) {}
 
-DOMHighResTimeStamp RTCStatsTimestampMaker::ReduceRealtimePrecision(
-    webrtc::Timestamp aRealtime) const {
+TimeStamp RTCStatsTimestamp::ToMozTime() const { return mMozTime; }
+
+webrtc::Timestamp RTCStatsTimestamp::ToRealtime() const {
+  return ToDomRealtime() +
+         webrtc::TimeDelta::Micros(mState.mStartRealtime.us());
+}
+
+webrtc::Timestamp RTCStatsTimestamp::To1Jan1970() const {
+  return ToDomRealtime() + webrtc::TimeDelta::Millis(mState.mStartWallClockRaw);
+}
+
+webrtc::Timestamp RTCStatsTimestamp::ToNtp() const {
+  return To1Jan1970() + webrtc::TimeDelta::Seconds(webrtc::kNtpJan1970);
+}
+
+webrtc::Timestamp RTCStatsTimestamp::ToDomRealtime() const {
+  return webrtc::Timestamp::Micros(
+      (mMozTime - mState.mStartDomRealtime).ToMicroseconds());
+}
+
+DOMHighResTimeStamp RTCStatsTimestamp::ToDom() const {
   // webrtc-pc says to use performance.timeOrigin + performance.now(), but
   // keeping a Performance object around is difficult because it is
   // main-thread-only. So, we perform the same calculation here. Note that this
@@ -41,12 +63,11 @@ DOMHighResTimeStamp RTCStatsTimestampMaker::ReduceRealtimePrecision(
   // We are very careful to do exactly what Performance does, to avoid timestamp
   // discrepancies.
 
-  DOMHighResTimeStamp realtime = aRealtime.ms<double>();
+  DOMHighResTimeStamp realtime = ToDomRealtime().ms<double>();
   // mRandomTimelineSeed is not set in the unit-tests.
-  if (mRandomTimelineSeed) {
+  if (mState.mRandomTimelineSeed) {
     realtime = nsRFPService::ReduceTimePrecisionAsMSecs(
-        realtime, mRandomTimelineSeed,
-        /* aIsSystemPrincipal */ false, mCrossOriginIsolated);
+        realtime, mState.mRandomTimelineSeed, mState.mRTPCallerType);
   }
 
   // Ugh. Performance::TimeOrigin is not constant, which means we need to
@@ -55,46 +76,73 @@ DOMHighResTimeStamp RTCStatsTimestampMaker::ReduceRealtimePrecision(
   // https://searchfox.org/mozilla-central/rev/
   // 053826b10f838f77c27507e5efecc96e34718541/dom/performance/Performance.cpp#111-117
   DOMHighResTimeStamp start = nsRFPService::ReduceTimePrecisionAsMSecs(
-      mStartWallClockRaw, 0, /* aIsSystemPrincipal = */ false,
-      mCrossOriginIsolated);
+      mState.mStartWallClockRaw, 0, mState.mRTPCallerType);
 
   return start + realtime;
 }
 
-webrtc::Timestamp RTCStatsTimestampMaker::ConvertRealtimeTo1Jan1970(
-    webrtc::Timestamp aRealtime) const {
-  return aRealtime + webrtc::TimeDelta::Millis(mStartWallClockRaw);
+/* static */ RTCStatsTimestamp RTCStatsTimestamp::FromMozTime(
+    const RTCStatsTimestampMaker& aMaker, TimeStamp aMozTime) {
+  return RTCStatsTimestamp(aMaker.mState, aMozTime);
 }
 
-DOMHighResTimeStamp RTCStatsTimestampMaker::ConvertNtpToDomTime(
-    webrtc::Timestamp aNtpTime) const {
-  const auto realtime = aNtpTime -
-                        webrtc::TimeDelta::Seconds(webrtc::kNtpJan1970) -
-                        webrtc::TimeDelta::Millis(mStartWallClockRaw);
+/* static */ RTCStatsTimestamp RTCStatsTimestamp::FromRealtime(
+    const RTCStatsTimestampMaker& aMaker, webrtc::Timestamp aRealtime) {
+  return FromDomRealtime(
+      aMaker,
+      aRealtime - webrtc::TimeDelta::Micros(aMaker.mState.mStartRealtime.us()));
+}
+
+/* static */ RTCStatsTimestamp RTCStatsTimestamp::From1Jan1970(
+    const RTCStatsTimestampMaker& aMaker, webrtc::Timestamp a1Jan1970) {
+  const auto& state = aMaker.mState;
+  return FromDomRealtime(
+      aMaker, a1Jan1970 - webrtc::TimeDelta::Millis(state.mStartWallClockRaw));
+}
+
+/* static */ RTCStatsTimestamp RTCStatsTimestamp::FromNtp(
+    const RTCStatsTimestampMaker& aMaker, webrtc::Timestamp aNtpTime) {
+  const auto& state = aMaker.mState;
+  const auto domRealtime = aNtpTime -
+                           webrtc::TimeDelta::Seconds(webrtc::kNtpJan1970) -
+                           webrtc::TimeDelta::Millis(state.mStartWallClockRaw);
   // Ntp times exposed by libwebrtc to stats are always **rounded** to
   // milliseconds. That means they can jump up to half a millisecond into the
   // future. We compensate for that here so that things seem consistent to js.
-  return ReduceRealtimePrecision(realtime - webrtc::TimeDelta::Micros(500));
+  return FromDomRealtime(aMaker, domRealtime - webrtc::TimeDelta::Micros(500));
 }
 
-webrtc::Timestamp RTCStatsTimestampMaker::ConvertMozTimeToRealtime(
-    TimeStamp aMozTime) const {
-  return webrtc::Timestamp::Micros(
-      (aMozTime - mStartRealtime).ToMicroseconds());
+/* static */ RTCStatsTimestamp RTCStatsTimestamp::FromDomRealtime(
+    const RTCStatsTimestampMaker& aMaker, webrtc::Timestamp aDomRealtime) {
+  return RTCStatsTimestamp(aMaker.mState, aMaker.mState.mStartDomRealtime +
+                                              TimeDuration::FromMicroseconds(
+                                                  aDomRealtime.us<double>()));
 }
 
-DOMHighResTimeStamp RTCStatsTimestampMaker::GetNow() const {
-  return ReduceRealtimePrecision(GetNowRealtime());
+RTCStatsTimestamp::RTCStatsTimestamp(RTCStatsTimestampState aState,
+                                     TimeStamp aMozTime)
+    : mState(aState), mMozTime(aMozTime) {}
+
+RTCStatsTimestampMaker::RTCStatsTimestampMaker(RTCStatsTimestampState aState)
+    : mState(aState) {}
+
+/* static */
+RTCStatsTimestampMaker RTCStatsTimestampMaker::Create(
+    nsPIDOMWindowInner* aWindow /* = nullptr */) {
+  if (!aWindow) {
+    return RTCStatsTimestampMaker(RTCStatsTimestampState());
+  }
+  if (Performance* p = aWindow->GetPerformance()) {
+    return RTCStatsTimestampMaker(RTCStatsTimestampState(*p));
+  }
+  return RTCStatsTimestampMaker(RTCStatsTimestampState());
 }
 
-webrtc::Timestamp RTCStatsTimestampMaker::GetNowRealtime() const {
-  return ConvertMozTimeToRealtime(TimeStamp::Now());
+RTCStatsTimestamp RTCStatsTimestampMaker::GetNow() const {
+  return RTCStatsTimestamp::FromMozTime(*this, TimeStamp::Now());
 }
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(RTCStatsReport, mParent)
-
-NS_IMPL_CYCLE_COLLECTION_ROOT_NATIVE(RTCStatsReport, AddRef)
-NS_IMPL_CYCLE_COLLECTION_UNROOT_NATIVE(RTCStatsReport, Release)
 
 RTCStatsReport::RTCStatsReport(nsPIDOMWindowInner* aParent)
     : mParent(aParent) {}
@@ -114,20 +162,52 @@ JSObject* RTCStatsReport::WrapObject(JSContext* aCx,
 }
 
 void RTCStatsReport::Incorporate(RTCStatsCollection& aStats) {
-  SetRTCStats(aStats.mIceCandidatePairStats);
-  SetRTCStats(aStats.mIceCandidateStats);
-  SetRTCStats(aStats.mInboundRtpStreamStats);
-  SetRTCStats(aStats.mOutboundRtpStreamStats);
-  SetRTCStats(aStats.mRemoteInboundRtpStreamStats);
-  SetRTCStats(aStats.mRemoteOutboundRtpStreamStats);
-  SetRTCStats(aStats.mRtpContributingSourceStats);
-  SetRTCStats(aStats.mTrickledIceCandidateStats);
-  SetRTCStats(aStats.mDataChannelStats);
+  ForAllPublicRTCStatsCollectionMembers(
+      aStats, [&](auto... aMember) { (SetRTCStats(aMember), ...); });
 }
 
 void RTCStatsReport::Set(const nsAString& aKey, JS::Handle<JSObject*> aValue,
                          ErrorResult& aRv) {
   RTCStatsReport_Binding::MaplikeHelpers::Set(this, aKey, aValue, aRv);
+}
+
+namespace {
+template <size_t I, typename... Ts>
+bool MoveInto(std::tuple<Ts...>& aFrom, std::tuple<Ts*...>& aInto) {
+  return std::get<I>(aInto)->AppendElements(std::move(std::get<I>(aFrom)),
+                                            fallible);
+}
+
+template <size_t... Is, typename... Ts>
+bool MoveInto(std::tuple<Ts...>&& aFrom, std::tuple<Ts*...>& aInto,
+              std::index_sequence<Is...>) {
+  return (... && MoveInto<Is>(aFrom, aInto));
+}
+
+template <typename... Ts>
+bool MoveInto(std::tuple<Ts...>&& aFrom, std::tuple<Ts*...>& aInto) {
+  return MoveInto(std::move(aFrom), aInto, std::index_sequence_for<Ts...>());
+}
+}  // namespace
+
+void MergeStats(UniquePtr<RTCStatsCollection> aFromStats,
+                RTCStatsCollection* aIntoStats) {
+  auto fromTuple = ForAllRTCStatsCollectionMembers(
+      *aFromStats,
+      [&](auto&... aMember) { return std::make_tuple(std::move(aMember)...); });
+  auto intoTuple = ForAllRTCStatsCollectionMembers(
+      *aIntoStats,
+      [&](auto&... aMember) { return std::make_tuple(&aMember...); });
+  if (!MoveInto(std::move(fromTuple), intoTuple)) {
+    mozalloc_handle_oom(0);
+  }
+}
+
+void FlattenStats(nsTArray<UniquePtr<RTCStatsCollection>> aFromStats,
+                  RTCStatsCollection* aIntoStats) {
+  for (auto& stats : aFromStats) {
+    MergeStats(std::move(stats), aIntoStats);
+  }
 }
 
 }  // namespace mozilla::dom

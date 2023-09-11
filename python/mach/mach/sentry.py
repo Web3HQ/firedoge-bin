@@ -2,26 +2,27 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import
-
 import abc
 import re
-from os.path import expanduser
+from pathlib import Path
 from threading import Thread
 
 import sentry_sdk
-from mach.util import get_state_dir
-from mach.telemetry import is_telemetry_enabled
 from mozversioncontrol import (
-    get_repository_object,
     InvalidRepoPath,
     MissingUpstreamRepo,
     MissingVCSTool,
+    get_repository_object,
 )
 from six import string_types
 
-# https://sentry.prod.mozaws.net/operations/mach/
-_SENTRY_DSN = "https://8228c9aff64949c2ba4a2154dc515f55@sentry.prod.mozaws.net/525"
+from mach.telemetry import is_telemetry_enabled
+from mach.util import get_state_dir
+
+# https://sentry.io/organizations/mozilla/projects/mach/
+_SENTRY_DSN = (
+    "https://5cfe351fb3a24e8d82c751252b48722b@o1069899.ingest.sentry.io/6250014"
+)
 
 
 class ErrorReporter(object):
@@ -48,7 +49,7 @@ class NoopErrorReporter(ErrorReporter):
         return None
 
 
-def register_sentry(argv, settings, topsrcdir):
+def register_sentry(argv, settings, topsrcdir: Path):
     if not is_telemetry_enabled(settings):
         return NoopErrorReporter()
 
@@ -67,7 +68,7 @@ def register_sentry(argv, settings, topsrcdir):
     return SentryErrorReporter()
 
 
-def _process_event(sentry_event, topsrcdir):
+def _process_event(sentry_event, topsrcdir: Path):
     # Returning nothing causes the event to be dropped:
     # https://docs.sentry.io/platforms/python/configuration/filtering/#using-beforesend
     repo = _get_repository_object(topsrcdir)
@@ -113,7 +114,7 @@ def _settle_mach_module_id(sentry_event, _):
     return sentry_event
 
 
-def _patch_absolute_paths(sentry_event, topsrcdir):
+def _patch_absolute_paths(sentry_event, topsrcdir: Path):
     # As discussed here (https://bugzilla.mozilla.org/show_bug.cgi?id=1636251#c28),
     # we remove usernames from file names with a best-effort basis. The most likely
     # place for usernames to manifest in Sentry information is within absolute paths,
@@ -136,10 +137,10 @@ def _patch_absolute_paths(sentry_event, topsrcdir):
         else:
             return value
 
-    for (target_path, replacement) in (
+    for target_path, replacement in (
         (get_state_dir(), "<statedir>"),
-        (topsrcdir, "<topsrcdir>"),
-        (expanduser("~"), "~"),
+        (str(topsrcdir), "<topsrcdir>"),
+        (str(Path.home()), "~"),
     ):
         # Sentry converts "vars" to their "representations". When paths are in local
         # variables on Windows, "C:\Users\MozillaUser\Desktop" becomes
@@ -183,14 +184,14 @@ def _delete_server_name(sentry_event, _):
     return sentry_event
 
 
-def _get_repository_object(topsrcdir):
+def _get_repository_object(topsrcdir: Path):
     try:
-        return get_repository_object(topsrcdir)
+        return get_repository_object(str(topsrcdir))
     except (InvalidRepoPath, MissingVCSTool):
         return None
 
 
-def _is_unmodified_mach_core(topsrcdir):
+def _is_unmodified_mach_core(topsrcdir: Path):
     """True if mach is unmodified compared to the public tree.
 
     To avoid submitting Sentry events for errors caused by user's

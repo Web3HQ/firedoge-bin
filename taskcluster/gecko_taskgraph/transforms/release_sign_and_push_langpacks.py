@@ -5,14 +5,17 @@
 Transform the release-sign-and-push task into an actual task description.
 """
 
+from taskgraph.transforms.base import TransformSequence
+from taskgraph.util.schema import optionally_keyed_by, resolve_keyed_by
+from taskgraph.util.treeherder import inherit_treeherder_from_dep
+from voluptuous import Any, Required
 
 from gecko_taskgraph.loader.single_dep import schema
-from gecko_taskgraph.transforms.base import TransformSequence
-from gecko_taskgraph.util.attributes import copy_attributes_from_dependent_job
-from gecko_taskgraph.util.schema import resolve_keyed_by, optionally_keyed_by
-from gecko_taskgraph.util.treeherder import inherit_treeherder_from_dep
 from gecko_taskgraph.transforms.task import task_description_schema
-from voluptuous import Any, Required
+from gecko_taskgraph.util.attributes import (
+    copy_attributes_from_dependent_job,
+    release_level,
+)
 
 transforms = TransformSequence()
 
@@ -22,7 +25,6 @@ langpack_sign_push_description_schema = schema.extend(
         Required("description"): str,
         Required("worker-type"): optionally_keyed_by("release-level", str),
         Required("worker"): {
-            Required("implementation"): "push-addons",
             Required("channel"): optionally_keyed_by(
                 "project", "platform", Any("listed", "unlisted")
             ),
@@ -55,13 +57,13 @@ def resolve_keys(config, jobs):
             job,
             "worker-type",
             item_name=job["label"],
-            **{"release-level": config.params.release_level()},
+            **{"release-level": release_level(config.params["project"])},
         )
         resolve_keyed_by(
             job,
             "scopes",
             item_name=job["label"],
-            **{"release-level": config.params.release_level()},
+            **{"release-level": release_level(config.params["project"])},
         )
         resolve_keyed_by(
             job,
@@ -149,6 +151,7 @@ def make_task_worker(config, jobs):
             job, expected_kinds=("build", "shippable-l10n")
         )
 
+        job["worker"]["implementation"] = "push-addons"
         job["worker"]["upstream-artifacts"] = generate_upstream_artifacts(
             upstream_task_ref, job["attributes"]["chunk_locales"]
         )

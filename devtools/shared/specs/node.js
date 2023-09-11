@@ -8,7 +8,7 @@ const {
   RetVal,
   generateActorSpec,
   types,
-} = require("devtools/shared/protocol.js");
+} = require("resource://devtools/shared/protocol.js");
 
 types.addDictType("imageData", {
   // The image data
@@ -113,6 +113,18 @@ const nodeSpec = generateActorSpec({
       response: {
         events: RetVal("json"),
       },
+    },
+    enableEventListener: {
+      request: {
+        eventListenerInfoId: Arg(0),
+      },
+      response: {},
+    },
+    disableEventListener: {
+      request: {
+        eventListenerInfoId: Arg(0),
+      },
+      response: {},
     },
     modifyAttributes: {
       request: {

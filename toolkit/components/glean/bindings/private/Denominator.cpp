@@ -12,6 +12,8 @@
 #include "mozilla/glean/bindings/ScalarGIFFTMap.h"
 #include "mozilla/glean/fog_ffi_generated.h"
 #include "nsIClassInfoImpl.h"
+#include "nsIScriptError.h"
+#include "Common.h"
 
 namespace mozilla::glean {
 
@@ -19,7 +21,7 @@ namespace impl {
 
 void DenominatorMetric::Add(int32_t aAmount) const {
   auto scalarId = ScalarIdForMetric(mId);
-  if (scalarId) {
+  if (scalarId && aAmount >= 0) {
     Telemetry::ScalarAdd(scalarId.extract(), aAmount);
   }
   fog_denominator_add(mId, aAmount);
@@ -28,7 +30,7 @@ void DenominatorMetric::Add(int32_t aAmount) const {
 Result<Maybe<int32_t>, nsCString> DenominatorMetric::TestGetValue(
     const nsACString& aPingName) const {
   nsCString err;
-  if (fog_denominator_test_get_error(mId, &aPingName, &err)) {
+  if (fog_denominator_test_get_error(mId, &err)) {
     return Err(err);
   }
   if (!fog_denominator_test_has_value(mId, &aPingName)) {
@@ -50,7 +52,7 @@ GleanDenominator::Add(int32_t aAmount) {
 
 NS_IMETHODIMP
 GleanDenominator::TestGetValue(const nsACString& aStorageName,
-                               JS::MutableHandleValue aResult) {
+                               JS::MutableHandle<JS::Value> aResult) {
   auto result = mDenominator.TestGetValue(aStorageName);
   if (result.isErr()) {
     aResult.set(JS::UndefinedValue());
