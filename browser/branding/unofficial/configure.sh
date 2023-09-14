@@ -2,7 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-<<<<<<< HEAD
 MOZ_APP_DISPLAYNAME=Firedoge
 
 if test "$DEVELOPER_OPTIONS"; then
@@ -20,6 +19,3 @@ if test "$DEVELOPER_OPTIONS"; then
     MOZ_IGECKOBACKCHANNEL_IID="18e2488d-310f-400f-8339-0e50b513e801"
   fi
 fi
-=======
-MOZ_APP_DISPLAYNAME=Nightly
->>>>>>> 5ba0e34bf4ba990e68e28e8454347279e42510f5
