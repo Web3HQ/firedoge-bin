@@ -80,6 +80,7 @@ def split_apps(config, tests):
         "refbrow": "refbrow",
         "safari": "Saf",
         "custom-car": "CaR",
+        "cstm-car-m": "CaR",
     }
 
     for test in tests:
@@ -90,9 +91,13 @@ def split_apps(config, tests):
 
         for app in apps:
             # Ignore variants for non-Firefox or non-mobile applications.
-            if app not in ["firefox", "geckoview", "fenix", "chrome-m"] and test[
-                "attributes"
-            ].get("unittest_variant"):
+            if app not in [
+                "firefox",
+                "geckoview",
+                "fenix",
+                "chrome-m",
+                "cstm-car-m",
+            ] and test["attributes"].get("unittest_variant"):
                 continue
 
             atest = copy_task(test)
@@ -131,7 +136,8 @@ def split_raptor_subtests(config, tests):
         # test job for every subtest (i.e. split out each page-load URL into its own job)
         subtests = test["raptor"].pop("subtests", None)
         if not subtests:
-            yield test
+            if "macosx1300" not in test["test-platform"]:
+                yield test
             continue
 
         for chunk_number, subtest in enumerate(subtests):
@@ -265,12 +271,12 @@ def add_extra_options(config, tests):
 
         # Adding device name if we're on android
         test_platform = test["test-platform"]
-        if test_platform.startswith("android-hw-g5"):
-            extra_options.append("--device-name=g5")
-        elif test_platform.startswith("android-hw-a51"):
+        if test_platform.startswith("android-hw-a51"):
             extra_options.append("--device-name=a51")
         elif test_platform.startswith("android-hw-p5"):
             extra_options.append("--device-name=p5_aarch64")
+        elif test_platform.startswith("android-hw-p6"):
+            extra_options.append("--device-name=p6_aarch64")
 
         if test["raptor"].pop("run-visual-metrics", False):
             extra_options.append("--browsertime-video")

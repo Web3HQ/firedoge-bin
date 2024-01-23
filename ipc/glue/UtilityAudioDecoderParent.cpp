@@ -35,6 +35,11 @@
 #  include "gfxConfig.h"
 #endif
 
+#ifdef MOZ_WMF_CDM
+#  include "mozilla/MFCDMParent.h"
+#  include "mozilla/PMFCDM.h"
+#endif
+
 namespace mozilla::ipc {
 
 UtilityAudioDecoderParent::UtilityAudioDecoderParent()
@@ -64,6 +69,11 @@ UtilityAudioDecoderParent::~UtilityAudioDecoderParent() {
     gfx::DeviceManagerDx::Shutdown();
   }
 #endif
+#ifdef MOZ_WMF_CDM
+  if (mKind == SandboxingKind::MF_MEDIA_ENGINE_CDM) {
+    MFCDMParent::Shutdown();
+  }
+#endif
 }
 
 /* static */
@@ -81,8 +91,11 @@ void UtilityAudioDecoderParent::WMFPreloadForSandbox() {
 #if defined(MOZ_SANDBOX) && defined(XP_WIN)
   // mfplat.dll and mf.dll will be preloaded by
   // wmf::MediaFoundationInitializer::HasInitialized()
+
+#  if defined(NS_FREE_PERMANENT_DATA)
   // WMF Shutdown requires this or it will badly crash
   UtilityProcessImpl::LoadLibraryOrCrash(L"ole32.dll");
+#  endif  // defined(NS_FREE_PERMANENT_DATA)
 
   auto rv = wmf::MediaFoundationInitializer::HasInitialized();
   if (!rv) {
@@ -115,9 +128,11 @@ void UtilityAudioDecoderParent::Start(
 
 mozilla::ipc::IPCResult
 UtilityAudioDecoderParent::RecvNewContentRemoteDecoderManager(
-    Endpoint<PRemoteDecoderManagerParent>&& aEndpoint) {
+    Endpoint<PRemoteDecoderManagerParent>&& aEndpoint,
+    const ContentParentId& aParentId) {
   MOZ_ASSERT(NS_IsMainThread());
-  if (!RemoteDecoderManagerParent::CreateForContent(std::move(aEndpoint))) {
+  if (!RemoteDecoderManagerParent::CreateForContent(std::move(aEndpoint),
+                                                    aParentId)) {
     return IPC_FAIL_NO_REASON(this);
   }
   return IPC_OK();
@@ -161,6 +176,28 @@ IPCResult UtilityAudioDecoderParent::RecvUpdateVar(
     const GfxVarUpdate& aUpdate) {
   MOZ_ASSERT(mKind == SandboxingKind::MF_MEDIA_ENGINE_CDM);
   gfx::gfxVars::ApplyUpdate(aUpdate);
+  return IPC_OK();
+}
+#endif
+
+#ifdef MOZ_WMF_CDM
+IPCResult UtilityAudioDecoderParent::RecvGetKeySystemCapabilities(
+    GetKeySystemCapabilitiesResolver&& aResolver) {
+  MOZ_ASSERT(mKind == SandboxingKind::MF_MEDIA_ENGINE_CDM);
+  MFCDMParent::GetAllKeySystemsCapabilities()->Then(
+      GetCurrentSerialEventTarget(), __func__,
+      [aResolver](CopyableTArray<MFCDMCapabilitiesIPDL>&& aCapabilities) {
+        aResolver(std::move(aCapabilities));
+      },
+      [aResolver](nsresult) {
+        aResolver(CopyableTArray<MFCDMCapabilitiesIPDL>());
+      });
+  return IPC_OK();
+}
+
+IPCResult UtilityAudioDecoderParent::RecvUpdateWidevineL1Path(
+    const nsString& aPath) {
+  MFCDMParent::SetWidevineL1Path(NS_ConvertUTF16toUTF8(aPath).get());
   return IPC_OK();
 }
 #endif

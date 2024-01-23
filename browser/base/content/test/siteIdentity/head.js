@@ -46,7 +46,7 @@ function promiseTabLoadEvent(tab, url) {
   let loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser, false, handle);
 
   if (url) {
-    BrowserTestUtils.loadURIString(tab.linkedBrowser, url);
+    BrowserTestUtils.startLoadingURIString(tab.linkedBrowser, url);
   }
 
   return loaded;
@@ -167,7 +167,7 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
     // HTTP request, there should be a broken padlock shown always.
     ok(classList.contains("notSecure"), "notSecure on HTTP page");
     ok(
-      !BrowserTestUtils.is_hidden(identityIcon),
+      !BrowserTestUtils.isHidden(identityIcon),
       "information icon should be visible"
     );
 
@@ -202,7 +202,7 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
     );
 
     ok(
-      !BrowserTestUtils.is_hidden(identityIcon),
+      !BrowserTestUtils.isHidden(identityIcon),
       "information icon should be visible"
     );
     if (activeLoaded) {
@@ -377,7 +377,7 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
         doc
           .getElementById("identity-popup-securityView")
           .querySelectorAll(".identity-popup-mcb-learn-more"),
-        element => !BrowserTestUtils.is_hidden(element)
+        element => !BrowserTestUtils.isHidden(element)
       ).length,
       1,
       "The 'Learn more' link should be visible once."
@@ -397,7 +397,7 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
 
 async function loadBadCertPage(url) {
   let loaded = BrowserTestUtils.waitForErrorPage(gBrowser.selectedBrowser);
-  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, url);
+  BrowserTestUtils.startLoadingURIString(gBrowser.selectedBrowser, url);
   await loaded;
 
   await SpecialPowers.spawn(gBrowser.selectedBrowser, [], async function () {

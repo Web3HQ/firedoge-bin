@@ -63,6 +63,7 @@
 
 #include "nsAtomTable.h"
 #include "nsISupportsImpl.h"
+#include "nsLanguageAtomService.h"
 
 #include "nsSystemInfo.h"
 #include "nsMemoryReporterManager.h"
@@ -89,6 +90,9 @@
 #include "mozilla/AvailableMemoryTracker.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/CountingAllocatorBase.h"
+#ifdef MOZ_PHC
+#  include "mozilla/PHCManager.h"
+#endif
 #include "mozilla/UniquePtr.h"
 #include "mozilla/ServoStyleConsts.h"
 
@@ -163,27 +167,19 @@ class ICUReporter final : public nsIMemoryReporter,
   NS_DECL_ISUPPORTS
 
   static void* Alloc(const void*, size_t aSize) {
-#ifdef NIGHTLY_BUILD
     void* result = CountingMalloc(aSize);
     if (result == nullptr) {
       MOZ_CRASH("Ran out of memory while allocating for ICU");
     }
     return result;
-#else
-    return CountingMalloc(aSize);
-#endif
   }
 
   static void* Realloc(const void*, void* aPtr, size_t aSize) {
-#ifdef NIGHTLY_BUILD
     void* result = CountingRealloc(aPtr, aSize);
     if (result == nullptr) {
       MOZ_CRASH("Ran out of memory while reallocating for ICU");
     }
     return result;
-#else
-    return CountingRealloc(aPtr, aSize);
-#endif
   }
 
   static void Free(const void*, void* aPtr) { return CountingFree(aPtr); }
@@ -448,6 +444,12 @@ NS_InitXPCOM(nsIServiceManager** aResult, nsIFile* aBinDirectory,
     NS_ADDREF(*aResult = nsComponentManagerImpl::gComponentManager);
   }
 
+#ifdef MOZ_PHC
+  // This is the earliest possible moment we can start PHC while still being
+  // able to read prefs.
+  mozilla::InitPHCState();
+#endif
+
   // After autoreg, but before we actually instantiate any components,
   // add any services listed in the "xpcom-directory-providers" category
   // to the directory service.
@@ -633,6 +635,13 @@ nsresult ShutdownXPCOM(nsIServiceManager* aServMgr) {
       observerService->Shutdown();
     }
 
+#ifdef NS_FREE_PERMANENT_DATA
+    // In leak-checking / ASAN / etc. builds, shut down the Servo thread-pool,
+    // which will wait for all the work to be done. For other builds, we don't
+    // really want to wait on shutdown for possibly slow tasks.
+    Servo_ShutdownThreadPool();
+#endif
+
     // XPCOMShutdownFinal is the default phase for ClearOnShutdown.
     // This AdvanceShutdownPhase will thus free most ClearOnShutdown()'ed
     // smart pointers. Some destructors may fire extra main thread runnables
@@ -761,19 +770,15 @@ nsresult ShutdownXPCOM(nsIServiceManager* aServMgr) {
   nsComponentManagerImpl::gComponentManager = nullptr;
   nsCategoryManager::Destroy();
 
+  nsLanguageAtomService::Shutdown();
+
   GkRust_Shutdown();
 
 #ifdef NS_FREE_PERMANENT_DATA
-  // By the time we're shutting down, there may still be async parse tasks going
-  // on in the Servo thread-pool. This is fairly uncommon, though not
-  // impossible. CSS parsing heavily uses the atom table, so obviously it's not
-  // fine to get rid of it.
-  //
-  // In leak-checking / ASAN / etc. builds, shut down the servo thread-pool,
-  // which will wait for all the work to be done. For other builds, we don't
-  // really want to wait on shutdown for possibly slow tasks. So just leak the
-  // atom table in those.
-  Servo_ShutdownThreadPool();
+  // As we do shutdown Servo only in leak-checking builds, there may still
+  // be async parse tasks going on in the Servo thread-pool in other builds.
+  // CSS parsing heavily uses the atom table, so we can safely drop it only
+  // if Servo has been stopped, too.
   NS_ShutdownAtomTable();
 #endif
 

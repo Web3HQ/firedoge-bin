@@ -141,7 +141,9 @@ add_task(async function topSites() {
   );
 
   // There's one top sites result, the page with a lot of visits from init.
-  let resultURL = "example.com/browser_urlbarOneOffs.js/?" + (gMaxResults - 1);
+  let resultURL = UrlbarTestUtils.trimURL(
+    "http://example.com/browser_urlbarOneOffs.js/?" + (gMaxResults - 1)
+  );
   Assert.equal(UrlbarTestUtils.getResultCount(window), 1, "Result count");
 
   Assert.equal(
@@ -218,10 +220,12 @@ add_task(async function editedView() {
     assertState(
       i + 1,
       -1,
-      "example.com/browser_urlbarOneOffs.js/?" + (gMaxResults - i - 1)
+      UrlbarTestUtils.trimURL(
+        "http://example.com/browser_urlbarOneOffs.js/?" + (gMaxResults - i - 1)
+      )
     );
     Assert.ok(
-      !BrowserTestUtils.is_visible(heuristicResult.element.action),
+      !BrowserTestUtils.isVisible(heuristicResult.element.action),
       "The heuristic action should not be visible"
     );
   }
@@ -232,7 +236,7 @@ add_task(async function editedView() {
     EventUtils.synthesizeKey("KEY_ArrowDown");
     assertState(-1, i, typedValue);
     Assert.equal(
-      BrowserTestUtils.is_visible(heuristicResult.element.action),
+      BrowserTestUtils.isVisible(heuristicResult.element.action),
       !oneOffSearchButtons.selectedButton.classList.contains(
         "search-setting-button"
       ),
@@ -244,7 +248,7 @@ add_task(async function editedView() {
   EventUtils.synthesizeKey("KEY_ArrowDown");
   assertState(0, -1, typedValue);
   Assert.ok(
-    BrowserTestUtils.is_visible(heuristicResult.element.action),
+    BrowserTestUtils.isVisible(heuristicResult.element.action),
     "The heuristic action should be visible"
   );
 
@@ -254,7 +258,7 @@ add_task(async function editedView() {
     EventUtils.synthesizeKey("KEY_ArrowUp");
     assertState(-1, i, typedValue);
     Assert.equal(
-      BrowserTestUtils.is_visible(heuristicResult.element.action),
+      BrowserTestUtils.isVisible(heuristicResult.element.action),
       !oneOffSearchButtons.selectedButton.classList.contains(
         "search-setting-button"
       ),
@@ -268,10 +272,12 @@ add_task(async function editedView() {
     assertState(
       i + 1,
       -1,
-      "example.com/browser_urlbarOneOffs.js/?" + (gMaxResults - i - 1)
+      UrlbarTestUtils.trimURL(
+        "http://example.com/browser_urlbarOneOffs.js/?" + (gMaxResults - i - 1)
+      )
     );
     Assert.ok(
-      !BrowserTestUtils.is_visible(heuristicResult.element.action),
+      !BrowserTestUtils.isVisible(heuristicResult.element.action),
       "The heuristic action should not be visible"
     );
   }
@@ -280,7 +286,7 @@ add_task(async function editedView() {
   EventUtils.synthesizeKey("KEY_ArrowUp");
   assertState(0, -1, typedValue);
   Assert.ok(
-    BrowserTestUtils.is_visible(heuristicResult.element.action),
+    BrowserTestUtils.isVisible(heuristicResult.element.action),
     "The heuristic action should be visible"
   );
 

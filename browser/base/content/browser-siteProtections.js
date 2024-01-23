@@ -7,10 +7,8 @@
 ChromeUtils.defineESModuleGetters(this, {
   ContentBlockingAllowList:
     "resource://gre/modules/ContentBlockingAllowList.sys.mjs",
-});
-
-XPCOMUtils.defineLazyModuleGetters(this, {
-  ToolbarPanelHub: "resource://activity-stream/lib/ToolbarPanelHub.jsm",
+  SpecialMessageActions:
+    "resource://messaging-system/lib/SpecialMessageActions.sys.mjs",
 });
 
 XPCOMUtils.defineLazyServiceGetter(
@@ -97,6 +95,10 @@ class ProtectionCategory {
       document.getElementById(
         `protections-popup-${this._id}View-shim-allow-hint`
       )
+    );
+
+    ChromeUtils.defineLazyGetter(this, "isWindowPrivate", () =>
+      PrivateBrowsingUtils.isWindowPrivate(window)
     );
   }
 
@@ -324,19 +326,86 @@ class ProtectionCategory {
   }
 }
 
-let Fingerprinting = new ProtectionCategory(
-  "fingerprinters",
-  {
-    prefEnabled: "privacy.trackingprotection.fingerprinting.enabled",
-    reportBreakageLabel: "fingerprinting",
-  },
-  {
-    load: Ci.nsIWebProgressListener.STATE_LOADED_FINGERPRINTING_CONTENT,
-    block: Ci.nsIWebProgressListener.STATE_BLOCKED_FINGERPRINTING_CONTENT,
-    shim: Ci.nsIWebProgressListener.STATE_REPLACED_FINGERPRINTING_CONTENT,
-    allow: Ci.nsIWebProgressListener.STATE_ALLOWED_FINGERPRINTING_CONTENT,
-  }
-);
+let Fingerprinting =
+  new (class FingerprintingProtection extends ProtectionCategory {
+    constructor() {
+      super(
+        "fingerprinters",
+        {
+          prefEnabled: "privacy.trackingprotection.fingerprinting.enabled",
+          reportBreakageLabel: "fingerprinting",
+        },
+        {
+          load: Ci.nsIWebProgressListener.STATE_LOADED_FINGERPRINTING_CONTENT,
+          block: Ci.nsIWebProgressListener.STATE_BLOCKED_FINGERPRINTING_CONTENT,
+          shim: Ci.nsIWebProgressListener.STATE_REPLACED_FINGERPRINTING_CONTENT,
+          allow: Ci.nsIWebProgressListener.STATE_ALLOWED_FINGERPRINTING_CONTENT,
+        }
+      );
+
+      this.prefFPPEnabled = "privacy.fingerprintingProtection";
+      this.prefFPPEnabledInPrivateWindows =
+        "privacy.fingerprintingProtection.pbmode";
+
+      this.enabledFPB = false;
+      this.enabledFPPGlobally = false;
+      this.enabledFPPInPrivateWindows = false;
+    }
+
+    init() {
+      this.updateEnabled();
+
+      Services.prefs.addObserver(this.prefEnabled, this);
+      Services.prefs.addObserver(this.prefFPPEnabled, this);
+      Services.prefs.addObserver(this.prefFPPEnabledInPrivateWindows, this);
+    }
+
+    uninit() {
+      Services.prefs.removeObserver(this.prefEnabled, this);
+      Services.prefs.removeObserver(this.prefFPPEnabled, this);
+      Services.prefs.removeObserver(this.prefFPPEnabledInPrivateWindows, this);
+    }
+
+    updateEnabled() {
+      this.enabledFPB = Services.prefs.getBoolPref(this.prefEnabled);
+      this.enabledFPPGlobally = Services.prefs.getBoolPref(this.prefFPPEnabled);
+      this.enabledFPPInPrivateWindows = Services.prefs.getBoolPref(
+        this.prefFPPEnabledInPrivateWindows
+      );
+    }
+
+    observe() {
+      this.updateEnabled();
+      this.updateCategoryItem();
+    }
+
+    get enabled() {
+      return (
+        this.enabledFPB ||
+        this.enabledFPPGlobally ||
+        (this.isWindowPrivate && this.enabledFPPInPrivateWindows)
+      );
+    }
+
+    isBlocking(state) {
+      let blockFlag = this._flags.block;
+
+      // We only consider the suspicious fingerprinting flag if the
+      // fingerprinting protection is enabled in the context.
+      if (
+        this.enabledFPPGlobally ||
+        (this.isWindowPrivate && this.enabledFPPInPrivateWindows)
+      ) {
+        blockFlag |=
+          Ci.nsIWebProgressListener.STATE_BLOCKED_SUSPICIOUS_FINGERPRINTING;
+      }
+
+      return (state & blockFlag) != 0;
+    }
+
+    // TODO (Bug 1864914): Consider showing suspicious fingerprinting as allowed
+    // when the fingerprinting protection is disabled.
+  })();
 
 let Cryptomining = new ProtectionCategory(
   "cryptominers",
@@ -445,7 +514,7 @@ let TrackingProtection =
       return (
         this.enabledGlobally ||
         this.emailTrackingProtectionEnabledGlobally ||
-        (PrivateBrowsingUtils.isWindowPrivate(window) &&
+        (this.isWindowPrivate &&
           (this.enabledInPrivateWindows ||
             this.emailTrackingProtectionEnabledInPrivateWindows))
       );
@@ -1586,6 +1655,13 @@ var gProtectionsHandler = {
       () => this.maybeSetMilestoneCounterText()
     );
 
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "protectionsPanelMessageSeen",
+      "browser.protections_panel.infoMessage.seen",
+      false
+    );
+
     for (let blocker of Object.values(this.blockers)) {
       if (blocker.init) {
         blocker.init();
@@ -1742,7 +1818,7 @@ var gProtectionsHandler = {
 
       // Insert the info message if needed. This will be shown once and then
       // remain collapsed.
-      ToolbarPanelHub.insertProtectionPanelMessage(event);
+      this._insertProtectionsPanelInfoMessage(event);
 
       if (!event.target.hasAttribute("toast")) {
         Services.telemetry.recordEvent(
@@ -2067,7 +2143,7 @@ var gProtectionsHandler = {
       case "browser:purge-session-history":
         // We need to update the earliest recorded date if history has been
         // cleared.
-        this._hasEarliestRecord = false;
+        this._earliestRecordedDate = 0;
         this.maybeUpdateEarliestRecordedDateTooltip();
         break;
     }
@@ -2137,8 +2213,8 @@ var gProtectionsHandler = {
       document.l10n.setAttributes(
         toggle,
         isPressed
-          ? "protections-panel-etp-on-toggle"
-          : "protections-panel-etp-off-toggle",
+          ? "protections-panel-etp-toggle-on"
+          : "protections-panel-etp-toggle-off",
         { host }
       );
     }
@@ -2290,11 +2366,22 @@ var gProtectionsHandler = {
   },
 
   setTrackersBlockedCounter(trackerCount) {
-    document.l10n.setAttributes(
-      this._protectionsPopupTrackersCounterDescription,
-      "protections-footer-blocked-tracker-counter",
-      { trackerCount, date: 0 }
-    );
+    if (this._earliestRecordedDate) {
+      document.l10n.setAttributes(
+        this._protectionsPopupTrackersCounterDescription,
+        "protections-footer-blocked-tracker-counter",
+        { trackerCount, date: this._earliestRecordedDate }
+      );
+    } else {
+      document.l10n.setAttributes(
+        this._protectionsPopupTrackersCounterDescription,
+        "protections-footer-blocked-tracker-counter-no-tooltip",
+        { trackerCount }
+      );
+      this._protectionsPopupTrackersCounterDescription.removeAttribute(
+        "tooltiptext"
+      );
+    }
 
     // Show the counter if the number of tracker is not zero.
     this._protectionsPopupTrackersCounterBox.toggleAttribute(
@@ -2541,6 +2628,9 @@ var gProtectionsHandler = {
     body += `${Cryptomining.prefEnabled}: ${Services.prefs.getBoolPref(
       Cryptomining.prefEnabled
     )}\n`;
+    body += `privacy.globalprivacycontrol.enabled: ${Services.prefs.getBoolPref(
+      "privacy.globalprivacycontrol.enabled"
+    )}\n`;
     body += `\nhasException: ${this.hasException}\n`;
 
     body += "\n**Comments**\n" + commentsTextarea.value;
@@ -2588,7 +2678,7 @@ var gProtectionsHandler = {
   async maybeUpdateEarliestRecordedDateTooltip(trackerCount) {
     // If we've already updated or the popup isn't in the DOM yet, don't bother
     // doing this:
-    if (this._hasEarliestRecord || !this._protectionsPopup) {
+    if (this._earliestRecordedDate || !this._protectionsPopup) {
       return;
     }
 
@@ -2605,7 +2695,191 @@ var gProtectionsHandler = {
         "protections-footer-blocked-tracker-counter",
         { trackerCount, date }
       );
-      this._hasEarliestRecord = true;
+      this._earliestRecordedDate = date;
     }
+  },
+
+  _sendUserEventTelemetry(event, value = null, options = {}) {
+    // Only send telemetry for non private browsing windows
+    if (!PrivateBrowsingUtils.isWindowPrivate(window)) {
+      Services.telemetry.recordEvent(
+        "security.ui.protectionspopup",
+        event,
+        "protectionspopup_cfr",
+        value,
+        options
+      );
+    }
+  },
+
+  /**
+   * Dispatch the action defined in the message and user telemetry event.
+   */
+  _dispatchUserAction(message) {
+    let url;
+    try {
+      // Set platform specific path variables for SUMO articles
+      url = Services.urlFormatter.formatURL(message.content.cta_url);
+    } catch (e) {
+      console.error(e);
+      url = message.content.cta_url;
+    }
+    SpecialMessageActions.handleAction(
+      {
+        type: message.content.cta_type,
+        data: {
+          args: url,
+          where: message.content.cta_where || "tabshifted",
+        },
+      },
+      window.browser
+    );
+
+    this._sendUserEventTelemetry("click", "learn_more_link", {
+      message: message.id,
+    });
+  },
+
+  /**
+   * Attach event listener to dispatch message defined action.
+   */
+  _attachCommandListener(element, message) {
+    // Add event listener for `mouseup` not to overlap with the
+    // `mousedown` & `click` events dispatched from PanelMultiView.sys.mjs
+    // https://searchfox.org/mozilla-central/rev/7531325c8660cfa61bf71725f83501028178cbb9/browser/components/customizableui/PanelMultiView.jsm#1830-1837
+    element.addEventListener("mouseup", () => {
+      this._dispatchUserAction(message);
+    });
+    element.addEventListener("keyup", e => {
+      if (e.key === "Enter" || e.key === " ") {
+        this._dispatchUserAction(message);
+      }
+    });
+  },
+
+  /**
+   * Inserts a message into the Protections Panel. The message is visible once
+   * and afterwards set in a collapsed state. It can be shown again using the
+   * info button in the panel header.
+   */
+  _insertProtectionsPanelInfoMessage(event) {
+    // const PROTECTIONS_PANEL_INFOMSG_PREF =
+    //   "browser.protections_panel.infoMessage.seen";
+    const message = {
+      id: "PROTECTIONS_PANEL_1",
+      content: {
+        title: { string_id: "cfr-protections-panel-header" },
+        body: { string_id: "cfr-protections-panel-body" },
+        link_text: { string_id: "cfr-protections-panel-link-text" },
+        cta_url: `${Services.urlFormatter.formatURLPref(
+          "app.support.baseURL"
+        )}etp-promotions?as=u&utm_source=inproduct`,
+        cta_type: "OPEN_URL",
+      },
+    };
+
+    const doc = event.target.ownerDocument;
+    const container = doc.getElementById("messaging-system-message-container");
+    const infoButton = doc.getElementById("protections-popup-info-button");
+    const panelContainer = doc.getElementById("protections-popup");
+    const toggleMessage = () => {
+      const learnMoreLink = doc.querySelector(
+        "#messaging-system-message-container .text-link"
+      );
+      if (learnMoreLink) {
+        container.toggleAttribute("disabled");
+        infoButton.toggleAttribute("checked");
+        panelContainer.toggleAttribute("infoMessageShowing");
+        learnMoreLink.disabled = !learnMoreLink.disabled;
+      }
+      // If the message panel is opened, send impression telemetry
+      if (panelContainer.hasAttribute("infoMessageShowing")) {
+        this._sendUserEventTelemetry("open", "impression", {
+          message: message.id,
+        });
+      }
+    };
+    if (!container.childElementCount) {
+      const messageEl = this._createHeroElement(doc, message);
+      container.appendChild(messageEl);
+      infoButton.addEventListener("click", toggleMessage);
+    }
+    // Message is collapsed by default. If it was never shown before we want
+    // to expand it
+    if (
+      !this.protectionsPanelMessageSeen &&
+      container.hasAttribute("disabled")
+    ) {
+      toggleMessage(message);
+    }
+    // Save state that we displayed the message
+    if (!this.protectionsPanelMessageSeen) {
+      Services.prefs.setBoolPref(
+        "browser.protections_panel.infoMessage.seen",
+        true
+      );
+    }
+    // Collapse the message after the panel is hidden so we don't get the
+    // animation when opening the panel
+    panelContainer.addEventListener(
+      "popuphidden",
+      () => {
+        if (
+          this.protectionsPanelMessageSeen &&
+          !container.hasAttribute("disabled")
+        ) {
+          toggleMessage(message);
+        }
+      },
+      {
+        once: true,
+      }
+    );
+  },
+
+  _createElement(doc, elem, options = {}) {
+    const node = doc.createElementNS("http://www.w3.org/1999/xhtml", elem);
+    if (options.classList) {
+      node.classList.add(options.classList);
+    }
+    if (options.content) {
+      doc.l10n.setAttributes(node, options.content.string_id);
+    }
+    return node;
+  },
+
+  _createHeroElement(doc, message) {
+    const messageEl = this._createElement(doc, "div");
+    messageEl.setAttribute("id", "protections-popup-message");
+    messageEl.classList.add("whatsNew-hero-message");
+    const wrapperEl = this._createElement(doc, "div");
+    wrapperEl.classList.add("whatsNew-message-body");
+    messageEl.appendChild(wrapperEl);
+
+    wrapperEl.appendChild(
+      this._createElement(doc, "h2", {
+        classList: "whatsNew-message-title",
+        content: message.content.title,
+      })
+    );
+
+    wrapperEl.appendChild(
+      this._createElement(doc, "p", { content: message.content.body })
+    );
+
+    if (message.content.link_text) {
+      let linkEl = this._createElement(doc, "a", {
+        classList: "text-link",
+        content: message.content.link_text,
+      });
+
+      linkEl.disabled = true;
+      wrapperEl.appendChild(linkEl);
+      this._attachCommandListener(linkEl, message);
+    } else {
+      this._attachCommandListener(wrapperEl, message);
+    }
+
+    return messageEl;
   },
 };

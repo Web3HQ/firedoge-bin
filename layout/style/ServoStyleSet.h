@@ -260,12 +260,12 @@ class ServoStyleSet {
   size_t SheetCount(Origin) const;
   StyleSheet* SheetAt(Origin, size_t aIndex) const;
 
-  struct FirstPageSizeAndOrientation {
+  struct PageSizeAndOrientation {
     Maybe<StylePageSizeOrientation> orientation;
     Maybe<nsSize> size;
   };
-  // Gets the specified orientation and size used when the first page printed
-  // has the name |aFirstPageName|, based on the page-size property.
+  // Gets the default page size and orientation (the size/orientation specified
+  // by @page rules without a selector list), if any.
   //
   // If the specified size is just an orientation, then the size will be set to
   // nothing and the orientation will be set accordingly.
@@ -273,8 +273,7 @@ class ServoStyleSet {
   // to nothing.
   // Otherwise, the size will and orientation is determined by the specified
   // page size.
-  FirstPageSizeAndOrientation GetFirstPageSizeAndOrientation(
-      const nsAtom* aFirstPageName);
+  PageSizeAndOrientation GetDefaultPageSizeAndOrientation();
 
   void AppendAllNonDocumentAuthorSheets(nsTArray<StyleSheet*>& aArray) const;
 
@@ -463,6 +462,78 @@ class ServoStyleSet {
                                   nsAtom* aNewID) const;
 
   /**
+   * Maybe invalidate if a modification to an ID might require us to restyle
+   * the relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorIDDependency(
+      const dom::Element&, nsAtom* aOldID, nsAtom* aNewID,
+      const ServoElementSnapshotTable& aSnapshots);
+
+  /**
+   * Maybe invalidate if a modification to an attribute with the specified local
+   * name might require us to restyle the relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorClassDependency(
+      const dom::Element&, const ServoElementSnapshotTable& aSnapshots);
+
+  /**
+   * Maybe invalidate if a modification to an ID might require us to restyle
+   * the relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorAttributeDependency(
+      const dom::Element&, nsAtom* aAttribute,
+      const ServoElementSnapshotTable& aSnapshots);
+
+  /**
+   * Maybe invalidate if a change in event state on an element might require us
+   * to restyle the relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorStateDependency(
+      const dom::Element&, dom::ElementState,
+      const ServoElementSnapshotTable& aSnapshots);
+
+  /**
+   * Maybe invalidate if a change on an element that might be selected by :empty
+   * that might require us to restyle the relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorForEmptyDependency(const dom::Element&);
+
+  /**
+   * Maybe invalidate if a state change on an element that might be selected
+   * by a selector that can only selector first/last child, that
+   * might require us to restyle the relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorForNthEdgeDependency(const dom::Element&);
+
+  /**
+   * Maybe invalidate if a state change on an element that might be selected by
+   * :nth-* (Or :nth-like) selectors that might require us to restyle the
+   * relative selector it refers to.
+   */
+  void MaybeInvalidateRelativeSelectorForNthDependencyFromSibling(
+      const dom::Element*);
+
+  /**
+   * Maybe invalidate if a DOM element insertion might require us to restyle
+   * the relative selector to ancestors/previous siblings.
+   */
+  void MaybeInvalidateForElementInsertion(const dom::Element&);
+
+  /**
+   * Maybe invalidate if a series of nodes is appended, among which may
+   * be element(s) that might require us to restyle the relative selector
+   * to ancestors/previous siblings.
+   */
+  void MaybeInvalidateForElementAppend(const nsIContent&);
+
+  /**
+   * Maybe invalidate if a DOM element removal might require us to restyle
+   * the relative selector to ancestors/previous siblings.
+   */
+  void MaybeInvalidateForElementRemove(const dom::Element& aElement,
+                                       const nsIContent* aFollowingSibling);
+
+  /**
    * Returns true if a change in event state on an element might require
    * us to restyle the element.
    *
@@ -477,6 +548,12 @@ class ServoStyleSet {
    * us to restyle the element's siblings.
    */
   bool HasNthOfStateDependency(const dom::Element&, dom::ElementState) const;
+
+  /**
+   * Restyle this element's siblings in order to propagate any potential change
+   * in :nth-child(of) styling.
+   */
+  void RestyleSiblingsForNthOf(const dom::Element&, uint32_t) const;
 
   /**
    * Returns true if a change in document state might require us to restyle the

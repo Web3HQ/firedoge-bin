@@ -33,12 +33,14 @@ const PREF_FEATURES = [
     description: "Test feature that sets a pref on the default branch.",
     owner: "test@test.test",
     hasExposure: false,
-    isEarlyStartup: false,
     variables: {
       foo: {
         type: "string",
         description: "Test variable",
-        setPref: "nimbus.test-only.foo",
+        setPref: {
+          branch: "default",
+          pref: "nimbus.test-only.foo",
+        },
       },
     },
   }),
@@ -51,7 +53,10 @@ const PREF_FEATURES = [
       bar: {
         type: "string",
         description: "Test variable",
-        setPref: "nimbus.test-only.bar",
+        setPref: {
+          branch: "user",
+          pref: "nimbus.test-only.bar",
+        },
       },
     },
   }),
@@ -136,7 +141,6 @@ function assertExpectedPrefValues(pref, branch, expected, visible, msg) {
     }have a value ${msg}`;
   }
 
-  let prefBranch;
   switch (branch) {
     case USER:
       Assert.equal(
@@ -144,7 +148,6 @@ function assertExpectedPrefValues(pref, branch, expected, visible, msg) {
         hasBranchValue,
         hasValueMsg(hasBranchValue)
       );
-      prefBranch = Services.prefs;
       break;
 
     case DEFAULT:
@@ -153,7 +156,6 @@ function assertExpectedPrefValues(pref, branch, expected, visible, msg) {
         hasBranchValue,
         hasValueMsg(hasBranchValue)
       );
-      prefBranch = Services.prefs.getDefaultBranch(null);
       break;
 
     default:
@@ -162,7 +164,7 @@ function assertExpectedPrefValues(pref, branch, expected, visible, msg) {
 
   if (hasBranchValue) {
     Assert.equal(
-      prefBranch.getStringPref(pref),
+      PrefUtils.getPref(pref, { branch }),
       expected,
       `Expected pref "${pref} on the ${branch} branch to be ${JSON.stringify(
         expected
@@ -172,7 +174,8 @@ function assertExpectedPrefValues(pref, branch, expected, visible, msg) {
 
   if (hasVisibleValue) {
     Assert.equal(
-      Services.prefs.getStringPref(pref),
+      PrefUtils.getPref(pref, { branch: USER }) ??
+        PrefUtils.getPref(pref, { branch: DEFAULT }),
       visible,
       `Expected pref "${pref}" to be ${JSON.stringify(visible)} ${msg}`
     );
@@ -2598,17 +2601,23 @@ add_task(async function test_prefChanged_noPrefSet() {
   const featureId = "test-set-pref-2";
   const pref = "nimbus.test-only.baz";
 
-  function featureFactory(isEarlyStartup) {
+  function featureFactory(prefBranch) {
+    if (![USER, DEFAULT].includes(prefBranch)) {
+      Assert.ok(false, `invalid branch ${prefBranch}`);
+    }
+
     return new ExperimentFeature(featureId, {
       description: "Test feature that sets a pref",
       owner: "test@test.test",
       hasExposure: false,
-      isEarlyStartup,
       variables: {
         baz: {
           type: "string",
           description: "Test variable",
-          setPref: pref,
+          setPref: {
+            branch: prefBranch,
+            pref,
+          },
         },
         qux: {
           type: "string",
@@ -2625,8 +2634,8 @@ add_task(async function test_prefChanged_noPrefSet() {
     },
   };
 
-  for (const isEarlyStartup of [true, false]) {
-    const feature = featureFactory(isEarlyStartup);
+  for (const prefBranch of [USER, DEFAULT]) {
+    const feature = featureFactory(prefBranch);
     const cleanupFeature = ExperimentTestUtils.addTestFeatures(feature);
 
     const store = ExperimentFakes.store();
@@ -2739,17 +2748,23 @@ add_task(async function test_restorePrefs_manifestChanged() {
   const pref = "nimbus.test-only.baz";
 
   // Return a new object so we can modified the returned value.
-  function featureFactory(isEarlyStartup) {
+  function featureFactory(prefBranch) {
+    if (![USER, DEFAULT].includes(prefBranch)) {
+      Assert.ok(false, `invalid branch ${prefBranch}`);
+    }
+
     return new ExperimentFeature(featureId, {
       description: "Test feature that sets a pref on the default branch.",
       owner: "test@test.test",
       hasExposure: false,
-      isEarlyStartup,
       variables: {
         baz: {
           type: "string",
           description: "Test variable",
-          setPref: pref,
+          setPref: {
+            branch: prefBranch,
+            pref,
+          },
         },
         qux: {
           type: "string",
@@ -2822,7 +2837,7 @@ add_task(async function test_restorePrefs_manifestChanged() {
       /* clear = */ true
     );
 
-    const feature = featureFactory(branch === USER);
+    const feature = featureFactory(branch);
     const cleanupFeatures = ExperimentTestUtils.addTestFeatures(feature);
 
     setPrefs(pref, { defaultBranchValue, userBranchValue });
@@ -3172,4 +3187,164 @@ add_task(async function test_restorePrefs_manifestChanged() {
     Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
     /* clear = */ true
   );
+});
+
+add_task(async function test_nested_prefs_enroll_both() {
+  // See bugs 1850127 and 1850120.
+  const feature = new ExperimentFeature("test-set-pref-nested", {
+    description: "Nested prefs",
+    owner: "test@test.test",
+    hasExposure: false,
+    variables: {
+      enabled: {
+        type: "boolean",
+        description: "enable this feature",
+        setPref: {
+          branch: "default",
+          pref: "nimbus.test-only.nested",
+        },
+      },
+      setting: {
+        type: "string",
+        description: "a nested setting",
+        setPref: {
+          branch: "default",
+          pref: "nimbus.test-only.nested.setting",
+        },
+      },
+    },
+  });
+
+  const cleanupFeature = ExperimentTestUtils.addTestFeatures(feature);
+
+  async function doTest(enrollmentOrder) {
+    PrefUtils.setPref("nimbus.test-only.nested", false, { branch: DEFAULT });
+    PrefUtils.setPref("nimbus.test-only.nested.setting", "default", {
+      branch: DEFAULT,
+    });
+
+    const rollout = ExperimentFakes.recipe("nested-rollout", {
+      isRollout: true,
+      branches: [
+        {
+          ...ExperimentFakes.recipe.branches[0],
+          features: [
+            {
+              featureId: feature.featureId,
+              value: {
+                enabled: true,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const experiment = ExperimentFakes.recipe("nested-experiment", {
+      branches: [
+        {
+          ...ExperimentFakes.recipe.branches[0],
+          features: [
+            {
+              featureId: feature.featureId,
+              value: {
+                setting: "custom",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const store = ExperimentFakes.store();
+    const manager = ExperimentFakes.manager(store);
+
+    await manager.onStartup();
+    await assertEmptyStore(store);
+
+    const recipes = {
+      [ROLLOUT]: rollout,
+      [EXPERIMENT]: experiment,
+    };
+
+    for (const kind of enrollmentOrder) {
+      await manager.enroll(recipes[kind], "test");
+    }
+
+    {
+      const enrollments = store
+        .getAll()
+        .filter(e => e.active)
+        .map(e => e.slug);
+      Assert.deepEqual(
+        enrollments.sort(),
+        [experiment.slug, rollout.slug].sort(),
+        "Experiment and rollout should be enrolled"
+      );
+    }
+
+    assertExpectedPrefValues(
+      "nimbus.test-only.nested",
+      DEFAULT,
+      true,
+      true,
+      "after enrollment"
+    );
+    assertExpectedPrefValues(
+      "nimbus.test-only.nested.setting",
+      DEFAULT,
+      "custom",
+      "custom",
+      "after enrollment"
+    );
+
+    manager.unenroll(experiment.slug);
+
+    {
+      const enrollments = store
+        .getAll()
+        .filter(e => e.active)
+        .map(e => e.slug);
+      Assert.deepEqual(
+        enrollments.sort(),
+        [rollout.slug].sort(),
+        "Rollout should still be enrolled"
+      );
+    }
+
+    assertExpectedPrefValues(
+      "nimbus.test-only.nested",
+      DEFAULT,
+      true,
+      true,
+      "After experiment unenrollment"
+    );
+
+    assertExpectedPrefValues(
+      "nimbus.test-only.nested.setting",
+      DEFAULT,
+      "default",
+      "default",
+      "After experiment unenrollment"
+    );
+
+    manager.unenroll(rollout.slug);
+
+    await assertEmptyStore(store, { cleanup: true });
+  }
+
+  info(
+    "Test we can enroll in both a rollout and experiment for a feature with nested pref setting"
+  );
+  await doTest([ROLLOUT, EXPERIMENT]);
+  info(
+    "Test we can unenroll from just an experiment for a feature with nested pref setting"
+  );
+  await doTest([EXPERIMENT, ROLLOUT]);
+
+  cleanupFeature();
+  PrefUtils.setPref("nimbus.test-only.nested", null, { branch: DEFAULT });
+  PrefUtils.setPref("nimbus.test-only.nested.setting", null, {
+    branch: DEFAULT,
+  });
 });

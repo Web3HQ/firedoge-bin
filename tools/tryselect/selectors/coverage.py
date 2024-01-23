@@ -85,6 +85,7 @@ def read_test_manifests():
     support_files_map - a dict that maps from each support file to a list with
                         test files that require them it
     """
+    setup_globals()
     test_resolver = TestResolver.from_environment(cwd=here)
     file_finder = FileFinder(build.topsrcdir)
     support_files_map = collections.defaultdict(list)
@@ -354,7 +355,7 @@ def filter_tasks_by_chunks(tasks, chunks):
         platform = PLATFORM_MAP[platform]
 
         selected_task = None
-        for task in tasks:
+        for task in tasks.keys():
             if not task.startswith(platform):
                 continue
 
@@ -393,6 +394,7 @@ def run(
     dry_run=False,
     message="{msg}",
     closed_tree=False,
+    push_to_lando=False,
 ):
     setup_globals()
     download_coverage_mapping(vcs.base_ref)
@@ -404,7 +406,7 @@ def run(
         return 1
 
     tg = generate_tasks(parameters, full)
-    all_tasks = tg.tasks.keys()
+    all_tasks = tg.tasks
 
     tasks_by_chunks = filter_tasks_by_chunks(all_tasks, test_chunks)
     tasks_by_path = filter_tasks_by_paths(all_tasks, test_files)
@@ -444,4 +446,5 @@ def run(
         stage_changes=stage_changes,
         dry_run=dry_run,
         closed_tree=closed_tree,
+        push_to_lando=push_to_lando,
     )

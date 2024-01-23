@@ -26,9 +26,14 @@ add_task(async function test_translations_panel_basics() {
   const panel = document.getElementById("translations-panel");
   const label = document.getElementById(panel.getAttribute("aria-labelledby"));
   ok(label, "The a11y label for the panel can be found.");
-  ok(isVisible(label), "The a11y label for the panel is visible.");
+  assertIsVisible(true, { element: label });
 
   await clickTranslateButton();
+
+  await assertTranslationsButton(
+    { button: true, circleArrows: true, locale: false, icon: true },
+    "The icon presents the loading indicator."
+  );
 
   await openTranslationsPanel({ onOpenPanel: assertPanelLoadingView });
 

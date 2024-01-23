@@ -136,14 +136,17 @@ class alignas(16) Instance {
     return offsetof(Instance, addressOfNeedsIncrementalBarrier_);
   }
 
+  // The number of baseline scratch storage words available.
+  static constexpr size_t N_BASELINE_SCRATCH_WORDS = 4;
+
  private:
   // When compiling with tiering, the jumpTable has one entry for each
   // baseline-compiled function.
   void** jumpTable_;
 
-  // General scratch storage for the baseline compiler, which can't always use
-  // the stack for this.
-  uint32_t baselineScratch_[2];
+  // 4 words of scratch storage for the baseline compiler, which can't always
+  // use the stack for this.
+  uintptr_t baselineScratchWords_[N_BASELINE_SCRATCH_WORDS];
 
   // The class_ of WasmValueBox, this is a per-process value. We could patch
   // this into code, but the only use-sites are register restricted and cannot
@@ -193,6 +196,13 @@ class alignas(16) Instance {
 
   // Pointer that should be freed (due to padding before the Instance).
   void* allocatedBase_;
+
+  // Fields from the JS context for memory allocation, stashed on the instance
+  // so it can be accessed from JIT code.
+  const void* addressOfNurseryPosition_;
+#ifdef JS_GC_ZEAL
+  const void* addressOfGCZealModeBits_;
+#endif
 
   // The data must be the last field.  Globals for the module start here
   // and are inline in this structure.  16-byte alignment is required for SIMD
@@ -278,11 +288,11 @@ class alignas(16) Instance {
   static constexpr size_t offsetOfJumpTable() {
     return offsetof(Instance, jumpTable_);
   }
-  static constexpr size_t offsetOfBaselineScratch() {
-    return offsetof(Instance, baselineScratch_);
+  static constexpr size_t offsetOfBaselineScratchWords() {
+    return offsetof(Instance, baselineScratchWords_);
   }
-  static constexpr size_t sizeOfBaselineScratch() {
-    return sizeof(baselineScratch_);
+  static constexpr size_t sizeOfBaselineScratchWords() {
+    return sizeof(baselineScratchWords_);
   }
   static constexpr size_t offsetOfJSJitArgsRectifier() {
     return offsetof(Instance, jsJitArgsRectifier_);
@@ -300,6 +310,14 @@ class alignas(16) Instance {
   static constexpr size_t offsetInData(size_t offset) {
     return offsetOfData() + offset;
   }
+  static constexpr size_t offsetOfAddressOfNurseryPosition() {
+    return offsetof(Instance, addressOfNurseryPosition_);
+  }
+#ifdef JS_GC_ZEAL
+  static constexpr size_t offsetOfAddressOfGCZealModeBits() {
+    return offsetof(Instance, addressOfGCZealModeBits_);
+  }
+#endif
 
   JSContext* cx() const { return cx_; }
   void* debugTrapHandler() const { return debugTrapHandler_; }
@@ -534,13 +552,43 @@ class alignas(16) Instance {
                             uint32_t numElements,
                             TypeDefInstanceData* typeDefData,
                             uint32_t segIndex);
+  static int32_t arrayInitData(Instance* instance, void* array, uint32_t index,
+                               uint32_t segByteOffset, uint32_t numElements,
+                               TypeDefInstanceData* typeDefData,
+                               uint32_t segIndex);
+  static int32_t arrayInitElem(Instance* instance, void* array, uint32_t index,
+                               uint32_t segOffset, uint32_t numElements,
+                               TypeDefInstanceData* typeDefData,
+                               uint32_t segIndex);
   static int32_t arrayCopy(Instance* instance, void* dstArray,
                            uint32_t dstIndex, void* srcArray, uint32_t srcIndex,
                            uint32_t numElements, uint32_t elementSize);
+  static int32_t arrayFill(Instance* instance, void* array, uint32_t index,
+                           uint32_t numElements);
   static int32_t refTest(Instance* instance, void* refPtr,
                          const wasm::TypeDef* typeDef);
   static int32_t intrI8VecMul(Instance* instance, uint32_t dest, uint32_t src1,
                               uint32_t src2, uint32_t len, uint8_t* memBase);
+
+  static void* stringFromWTF16Array(Instance* instance, void* arrayArg,
+                                    uint32_t start, uint32_t len);
+  static int32_t stringToWTF16Array(Instance* instance, void* stringArg,
+                                    void* arrayArg, uint32_t start);
+  static void* stringFromCharCode(Instance* instance, uint32_t charCode);
+  static void* stringFromCodePoint(Instance* instance, uint32_t codePoint);
+  static int32_t stringCharCodeAt(Instance* instance, void* stringArg,
+                                  uint32_t index);
+  static int32_t stringCodePointAt(Instance* instance, void* stringArg,
+                                   uint32_t index);
+  static int32_t stringLength(Instance* instance, void* stringArg);
+  static void* stringConcatenate(Instance* instance, void* firstStringArg,
+                                 void* secondStringArg);
+  static void* stringSubstring(Instance* instance, void* stringArg,
+                               int32_t startIndex, int32_t endIndex);
+  static int32_t stringEquals(Instance* instance, void* firstStringArg,
+                              void* secondStringArg);
+  static int32_t stringCompare(Instance* instance, void* firstStringArg,
+                               void* secondStringArg);
 };
 
 bool ResultsToJSValue(JSContext* cx, ResultType type, void* registerResultLoc,

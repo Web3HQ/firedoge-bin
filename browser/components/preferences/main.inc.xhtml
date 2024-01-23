@@ -29,6 +29,20 @@
   <vbox id="startupPageBox">
     <checkbox id="browserRestoreSession"
               data-l10n-id="startup-restore-windows-and-tabs"/>
+#ifdef XP_WIN
+    <hbox id="windowsLaunchOnLoginBox" align="center" hidden="true">
+      <checkbox id="windowsLaunchOnLogin"
+                data-l10n-id="windows-launch-on-login"/>
+    </hbox>
+    <hbox id="windowsLaunchOnLoginDisabledBox" align="center" class="indent" hidden="true">
+      <hbox class="info-icon-container">
+        <html:img class="info-icon"/>
+      </hbox>
+      <html:div data-l10n-id="windows-launch-on-login-disabled">
+        <html:a id="windowsAutostartLink" class="text-link" data-l10n-name="startup-link" href="ms-settings:startupapps" target="_self" />
+      </html:div>
+    </hbox>
+#endif
   </vbox>
 
 #ifdef HAVE_SHELL_SERVICE
@@ -95,6 +109,9 @@
     <checkbox id="showTabsInTaskbar" data-l10n-id="show-tabs-in-taskbar"
               preference="browser.taskbar.previews.enable"/>
 #endif
+
+    <checkbox id="tabPreviewShowThumbnails" data-l10n-id="settings-tabs-show-image-in-preview"
+              preference="browser.tabs.cardPreview.showThumbnails" hidden="true"/>
 
     <vbox id="browserContainersbox" hidden="true">
       <hbox id="browserContainersExtensionContent"
@@ -198,7 +215,6 @@
               colors-text-header,
               colors-background,
               colors-use-system,
-              colors-underline-links,
               colors-links-header,
               colors-unvisited-links,
               colors-visited-links
@@ -529,10 +545,10 @@
                 is="highlightable-button"
                 disabled="true"/>
       </hbox>
-      <hbox id="downloading" align="start" data-l10n-id="settings-update-downloading" data-l10n-args='{"transfer":""}'>
+      <description id="downloading" data-l10n-id="settings-update-downloading" data-l10n-args='{"transfer":""}'>
         <html:img class="update-throbber" data-l10n-name="icon"/>
         <label data-l10n-name="download-status"/>
-      </hbox>
+      </description>
       <hbox id="applying" align="start">
         <html:img class="update-throbber"/>
         <label data-l10n-id="update-applying"/>
@@ -631,11 +647,6 @@
       </description>
     </hbox>
   </vbox>
-#ifdef MOZ_MAINTENANCE_SERVICE
-  <checkbox id="useService"
-            data-l10n-id="update-application-use-service"
-            preference="app.update.service.enabled"/>
-#endif
 #ifdef NIGHTLY_BUILD
   <checkbox id="showUpdatePrompts"
             data-l10n-id="update-application-suppress-prompts"
@@ -728,6 +739,9 @@
             data-l10n-id="browsing-use-full-keyboard-navigation"
             preference="accessibility.tabfocus" />
 #endif
+  <checkbox id="alwaysUnderlineLinks"
+            data-l10n-id="browsing-always-underline-links"
+            preference="layout.css.always_underline_links"/>
   <checkbox id="searchStartTyping"
             data-l10n-id="browsing-search-on-start-typing"
             preference="accessibility.typeaheadfind"/>

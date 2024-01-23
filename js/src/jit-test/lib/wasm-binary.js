@@ -45,12 +45,13 @@ const V128Code         = 0x7b;
 const AnyFuncCode      = 0x70;
 const ExternRefCode    = 0x6f;
 const EqRefCode        = 0x6d;
-const OptRefCode       = 0x6c; // (ref null $t), needs heap type immediate
-const RefCode          = 0x6b; // (ref $t), needs heap type immediate
+const OptRefCode       = 0x63; // (ref null $t), needs heap type immediate
+const RefCode          = 0x64; // (ref $t), needs heap type immediate
 const FuncCode         = 0x60;
 const StructCode       = 0x5f;
 const ArrayCode        = 0x5e;
 const VoidCode         = 0x40;
+const BadType          = 0x79; // reserved for testing
 
 // Opcodes
 const UnreachableCode  = 0x00
@@ -163,6 +164,8 @@ const definedOpcodes =
      0x10, 0x11,
      ...(wasmTailCallsEnabled() ? [0x12, 0x13] : []),
      ...(wasmFunctionReferencesEnabled() ? [0x14] : []),
+     ...(wasmTailCallsEnabled() &&
+         wasmFunctionReferencesEnabled() ? [0x15] : []),
      ...(wasmExceptionsEnabled() ? [0x18, 0x19] : []),
      0x1a, 0x1b, 0x1c,
      0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,

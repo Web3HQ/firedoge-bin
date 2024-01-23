@@ -4,7 +4,6 @@
 
 :root {
   --addon-icon-size: 32px;
-  --card-border-zap-gradient: linear-gradient(90deg, #9059FF 0%, #FF4AA2 52.08%, #FFBD4F 100%);
   --main-margin-start: 28px;
   --section-width: 664px;
   --sidebar-width: var(--in-content-sidebar-width);
@@ -192,8 +191,6 @@ message-bar-stack > * {
 /* List sections */
 
 .list-section-heading {
-  font-size: 17px;
-  font-weight: 600;
   margin-bottom: 16px;
 }
 
@@ -301,7 +298,7 @@ addon-card[expanded] .update-postponed-bar + .addon-card-message {
 
 .addon-name {
   font-size: 16px;
-  font-weight: 600;
+  font-weight: var(--font-weight-bold);
   line-height: 22px;
   margin: 0;
   margin-inline-end: 8px;
@@ -358,7 +355,7 @@ addon-card[expanded] .update-postponed-bar + .addon-card-message {
 
 .theme-enable-button {
   min-width: auto;
-  font-size: 13px;
+  font-size: var(--font-size-small);
   min-height: auto;
   height: 24px;
   margin: 0;

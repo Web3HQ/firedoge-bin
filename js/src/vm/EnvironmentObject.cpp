@@ -90,12 +90,7 @@ static T* CreateEnvironmentObject(JSContext* cx, Handle<SharedShape*> shape,
   MOZ_ASSERT(CanChangeToBackgroundAllocKind(allocKind, &T::class_));
   allocKind = gc::ForegroundToBackgroundAllocKind(allocKind);
 
-  JSObject* obj = NativeObject::create(cx, allocKind, heap, shape);
-  if (!obj) {
-    return nullptr;
-  }
-
-  return &obj->as<T>();
+  return NativeObject::create<T>(cx, allocKind, heap, shape);
 }
 
 // Helper function for simple environment objects that don't need the overloads
@@ -1017,7 +1012,6 @@ BlockLexicalEnvironmentObject* BlockLexicalEnvironmentObject::clone(
   }
 
   MOZ_ASSERT(env->shape() == copy->shape());
-
   for (uint32_t i = JSSLOT_FREE(&class_); i < copy->slotSpan(); i++) {
     copy->setSlot(i, env->getSlot(i));
   }
@@ -3366,12 +3360,7 @@ WithScope& WithEnvironmentObject::scope() const {
 }
 
 ModuleEnvironmentObject* js::GetModuleEnvironmentForScript(JSScript* script) {
-  ModuleObject* module = GetModuleObjectForScript(script);
-  if (!module) {
-    return nullptr;
-  }
-
-  return module->environment();
+  return GetModuleObjectForScript(script)->environment();
 }
 
 ModuleObject* js::GetModuleObjectForScript(JSScript* script) {
@@ -3380,7 +3369,8 @@ ModuleObject* js::GetModuleObjectForScript(JSScript* script) {
       return si.scope()->as<ModuleScope>().module();
     }
   }
-  return nullptr;
+
+  MOZ_CRASH("No module scope found for script");
 }
 
 static bool GetThisValueForDebuggerEnvironmentIterMaybeOptimizedOut(
@@ -3715,7 +3705,7 @@ static bool InitHoistedFunctionDeclarations(JSContext* cx, HandleScript script,
     }
 
     RootedFunction fun(cx, &thing.as<JSObject>().as<JSFunction>());
-    Rooted<PropertyName*> name(cx, fun->explicitName()->asPropertyName());
+    Rooted<PropertyName*> name(cx, fun->fullExplicitName()->asPropertyName());
 
     // Clone the function before exposing to script as a binding.
     JSObject* clone = Lambda(cx, fun, envChain);
@@ -4162,16 +4152,16 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
 
     buf.printf("Script ");
 
-    if (JSAtom* name = script->function()->displayAtom()) {
-      buf.putString(name);
+    if (JSAtom* name = script->function()->fullDisplayAtom()) {
+      buf.putString(cx, name);
       buf.printf(" ");
     }
 
     buf.printf("(%s:%u) has variables entrained by ", script->filename(),
                script->lineno());
 
-    if (JSAtom* name = innerScript->function()->displayAtom()) {
-      buf.putString(name);
+    if (JSAtom* name = innerScript->function()->fullDisplayAtom()) {
+      buf.putString(cx, name);
       buf.printf(" ");
     }
 
@@ -4180,10 +4170,14 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
     for (PropertyNameSet::Range r = remainingNames.all(); !r.empty();
          r.popFront()) {
       buf.printf(" ");
-      buf.putString(r.front());
+      buf.putString(cx, r.front());
     }
 
-    printf("%s\n", buf.string());
+    JS::UniqueChars str = buf.release();
+    if (!str) {
+      return false;
+    }
+    printf("%s\n", str.get());
   }
 
   RootedFunction fun(cx);

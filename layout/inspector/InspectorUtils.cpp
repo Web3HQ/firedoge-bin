@@ -16,17 +16,20 @@
 #include "nsIContentInlines.h"
 #include "nsIScrollableFrame.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/HTMLTemplateElement.h"
 #include "ChildIterator.h"
 #include "nsComputedDOMStyle.h"
 #include "mozilla/EventStateManager.h"
 #include "nsAtom.h"
+#include "nsBlockFrame.h"
 #include "nsPresContext.h"
 #include "nsRange.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/PresShellInlines.h"
 #include "mozilla/StyleSheetInlines.h"
 #include "mozilla/dom/CharacterData.h"
+#include "mozilla/dom/CSSBinding.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/CSSStyleRule.h"
 #include "mozilla/dom/Highlight.h"
@@ -258,10 +261,10 @@ void InspectorUtils::GetCSSStyleRules(GlobalObject& aGlobalObject,
     return;
   }
 
-  nsTArray<const StyleLockedStyleRule*> rawRuleList;
+  AutoTArray<const StyleLockedStyleRule*, 8> rawRuleList;
   Servo_ComputedValues_GetStyleRuleList(computedStyle, &rawRuleList);
 
-  AutoTArray<ServoStyleRuleMap*, 1> maps;
+  AutoTArray<ServoStyleRuleMap*, 8> maps;
   {
     ServoStyleSet* styleSet = presShell->StyleSet();
     ServoStyleRuleMap* map = styleSet->StyleRuleMap();
@@ -271,6 +274,14 @@ void InspectorUtils::GetCSSStyleRules(GlobalObject& aGlobalObject,
   // Now shadow DOM stuff...
   if (auto* shadow = aElement.GetShadowRoot()) {
     maps.AppendElement(&shadow->ServoStyleRuleMap());
+  }
+
+  // Now NAC:
+  for (auto* el = aElement.GetClosestNativeAnonymousSubtreeRootParentOrHost();
+       el; el = el->GetClosestNativeAnonymousSubtreeRootParentOrHost()) {
+    if (auto* shadow = el->GetShadowRoot()) {
+      maps.AppendElement(&shadow->ServoStyleRuleMap());
+    }
   }
 
   for (auto* shadow = aElement.GetContainingShadow(); shadow;
@@ -299,11 +310,17 @@ void InspectorUtils::GetCSSStyleRules(GlobalObject& aGlobalObject,
       aResult.AppendElement(rule);
     } else {
 #ifdef DEBUG
+      aElement.Dump();
+      printf_stderr("\n\n----\n\n");
+      computedStyle->DumpMatchedRules();
       nsAutoCString str;
-      fprintf(stderr, "%s\n", str.get());
       Servo_StyleRule_Debug(rawRule, &str);
+      printf_stderr("\n\n----\n\n");
+      printf_stderr("%s\n", str.get());
       MOZ_CRASH_UNSAFE_PRINTF(
-          "We should be able to map a raw rule to a rule: %s\n", str.get());
+          "We should be able to map raw rule %p to a rule in one of the %zu "
+          "maps: %s\n",
+          rawRule, maps.Length(), str.get());
 #endif
     }
   }
@@ -358,8 +375,10 @@ void InspectorUtils::GetAllStyleSheetCSSStyleRules(
 
 /* static */
 bool InspectorUtils::IsInheritedProperty(GlobalObject& aGlobalObject,
+                                         Document& aDocument,
                                          const nsACString& aPropertyName) {
-  return Servo_Property_IsInherited(&aPropertyName);
+  return Servo_Property_IsInherited(aDocument.EnsureStyleSet().RawData(),
+                                    &aPropertyName);
 }
 
 /* static */
@@ -719,6 +738,41 @@ Element* InspectorUtils::ContainingBlockOf(GlobalObject&, Element& aElement) {
   return Element::FromNodeOrNull(cb->GetContent());
 }
 
+void InspectorUtils::GetBlockLineCounts(GlobalObject& aGlobal,
+                                        Element& aElement,
+                                        Nullable<nsTArray<uint32_t>>& aResult) {
+  nsBlockFrame* block =
+      do_QueryFrame(aElement.GetPrimaryFrame(FlushType::Layout));
+  if (!block) {
+    aResult.SetNull();
+    return;
+  }
+
+  // If CSS columns were specified on the actual block element (rather than an
+  // ancestor block, GetPrimaryFrame will return its ColumnSetWrapperFrame, and
+  // we need to drill down to the actual block that contains the lines.
+  if (block->IsColumnSetWrapperFrame()) {
+    nsIFrame* firstChild = block->PrincipalChildList().FirstChild();
+    if (!firstChild->IsColumnSetFrame()) {
+      aResult.SetNull();
+      return;
+    }
+    block = do_QueryFrame(firstChild->PrincipalChildList().FirstChild());
+    if (!block || block->GetContent() != &aElement) {
+      aResult.SetNull();
+      return;
+    }
+  }
+
+  nsTArray<uint32_t> result;
+  do {
+    result.AppendElement(block->Lines().size());
+    block = static_cast<nsBlockFrame*>(block->GetNextInFlow());
+  } while (block);
+
+  aResult.SetValue(std::move(result));
+}
+
 static bool FrameHasSpecifiedSize(const nsIFrame* aFrame) {
   auto wm = aFrame->GetWritingMode();
 
@@ -815,6 +869,35 @@ void InspectorUtils::GetRegisteredCssHighlights(GlobalObject& aGlobalObject,
     if (!aActiveOnly || highlight->Size() > 0) {
       aResult.AppendElement(highlightName->GetUTF16String());
     }
+  }
+}
+
+/* static */
+void InspectorUtils::GetCSSRegisteredProperties(
+    GlobalObject& aGlobalObject, Document& aDocument,
+    nsTArray<InspectorCSSPropertyDefinition>& aResult) {
+  nsTArray<StylePropDef> result;
+
+  ServoStyleSet& styleSet = aDocument.EnsureStyleSet();
+  // Update the rules before looking up @property rules.
+  styleSet.UpdateStylistIfNeeded();
+
+  Servo_GetRegisteredCustomProperties(styleSet.RawData(), &result);
+  for (const auto& propDef : result) {
+    InspectorCSSPropertyDefinition& property = *aResult.AppendElement();
+
+    // Servo does not include the "--" prefix in the property definition name.
+    // Add it back as it's easier for DevTools to handle them _with_ "--".
+    property.mName.AssignLiteral("--");
+    property.mName.Append(nsAtomCString(propDef.name.AsAtom()));
+    property.mSyntax.Append(propDef.syntax);
+    property.mInherits = propDef.inherits;
+    if (propDef.has_initial_value) {
+      property.mInitialValue.Append(propDef.initial_value);
+    } else {
+      property.mInitialValue.SetIsVoid(true);
+    }
+    property.mFromJS = propDef.from_js;
   }
 }
 

@@ -148,16 +148,27 @@ export var TelemetryEnvironmentTesting = {
   },
 
   async spoofAttributionData() {
-    if (gIsWindows || gIsMac) {
+    if (gIsWindows) {
       lazy.AttributionCode._clearCache();
       await lazy.AttributionCode.writeAttributionFile(ATTRIBUTION_CODE);
+    } else if (gIsMac) {
+      lazy.AttributionCode._clearCache();
+      const { MacAttribution } = ChromeUtils.importESModule(
+        "resource:///modules/MacAttribution.sys.mjs"
+      );
+      await MacAttribution.setAttributionString(ATTRIBUTION_CODE);
     }
   },
 
-  cleanupAttributionData() {
-    if (gIsWindows || gIsMac) {
+  async cleanupAttributionData() {
+    if (gIsWindows) {
       lazy.AttributionCode.attributionFile.remove(false);
       lazy.AttributionCode._clearCache();
+    } else if (gIsMac) {
+      const { MacAttribution } = ChromeUtils.importESModule(
+        "resource:///modules/MacAttribution.sys.mjs"
+      );
+      await MacAttribution.delAttributionString();
     }
   },
 
@@ -605,6 +616,9 @@ export var TelemetryEnvironmentTesting = {
       }
     } else if (gIsAndroid) {
       lazy.Assert.ok(this.checkNullOrString(osData.kernelVersion));
+    } else if (gIsLinux) {
+      lazy.Assert.ok(this.checkNullOrString(osData.distro));
+      lazy.Assert.ok(this.checkNullOrString(osData.distroVersion));
     }
 
     for (let disk of EXPECTED_HDD_FIELDS) {
@@ -696,8 +710,8 @@ export var TelemetryEnvironmentTesting = {
       lazy.Assert.ok(this.checkNullOrString(data.system.appleModelId));
     }
 
-    // This feature is only available on Windows 8+
-    if (AppConstants.isPlatformAndVersionAtLeast("win", "6.2")) {
+    // This feature is only available on Windows
+    if (AppConstants.platform == "win") {
       lazy.Assert.ok(
         "sec" in data.system,
         "sec must be available under data.system"

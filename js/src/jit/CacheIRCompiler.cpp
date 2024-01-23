@@ -20,7 +20,8 @@
 #include "builtin/DataViewObject.h"
 #include "builtin/MapObject.h"
 #include "builtin/Object.h"
-#include "gc/Allocator.h"
+#include "gc/GCEnum.h"
+#include "gc/SweepingAPI.h"         // js::gc::AutoLockStoreBuffer
 #include "jit/BaselineCacheIRCompiler.h"
 #include "jit/CacheIRGenerator.h"
 #include "jit/IonCacheIRCompiler.h"
@@ -1040,32 +1041,8 @@ size_t CacheIRStubInfo::stubDataSize() const {
 }
 
 template <typename T>
-static GCPtr<T>* AsGCPtr(uintptr_t* ptr) {
-  return reinterpret_cast<GCPtr<T>*>(ptr);
-}
-
-uintptr_t CacheIRStubInfo::getStubRawWord(const uint8_t* stubData,
-                                          uint32_t offset) const {
-  MOZ_ASSERT(uintptr_t(stubData + offset) % sizeof(uintptr_t) == 0);
-  return *reinterpret_cast<const uintptr_t*>(stubData + offset);
-}
-
-uintptr_t CacheIRStubInfo::getStubRawWord(ICCacheIRStub* stub,
-                                          uint32_t offset) const {
-  uint8_t* stubData = (uint8_t*)stub + stubDataOffset_;
-  return getStubRawWord(stubData, offset);
-}
-
-int64_t CacheIRStubInfo::getStubRawInt64(const uint8_t* stubData,
-                                         uint32_t offset) const {
-  MOZ_ASSERT(uintptr_t(stubData + offset) % sizeof(int64_t) == 0);
-  return *reinterpret_cast<const int64_t*>(stubData + offset);
-}
-
-int64_t CacheIRStubInfo::getStubRawInt64(ICCacheIRStub* stub,
-                                         uint32_t offset) const {
-  uint8_t* stubData = (uint8_t*)stub + stubDataOffset_;
-  return getStubRawInt64(stubData, offset);
+static GCPtr<T>* AsGCPtr(void* ptr) {
+  return static_cast<GCPtr<T>*>(ptr);
 }
 
 void CacheIRStubInfo::replaceStubRawWord(uint8_t* stubData, uint32_t offset,
@@ -1077,36 +1054,31 @@ void CacheIRStubInfo::replaceStubRawWord(uint8_t* stubData, uint32_t offset,
   *addr = newWord;
 }
 
-template <class Stub, class T>
-GCPtr<T>& CacheIRStubInfo::getStubField(Stub* stub, uint32_t offset) const {
+template <class Stub, StubField::Type type>
+typename MapStubFieldToType<type>::WrappedType& CacheIRStubInfo::getStubField(
+    Stub* stub, uint32_t offset) const {
   uint8_t* stubData = (uint8_t*)stub + stubDataOffset_;
   MOZ_ASSERT(uintptr_t(stubData + offset) % sizeof(uintptr_t) == 0);
 
-  return *AsGCPtr<T>((uintptr_t*)(stubData + offset));
+  using WrappedType = typename MapStubFieldToType<type>::WrappedType;
+  return *reinterpret_cast<WrappedType*>(stubData + offset);
 }
 
-template GCPtr<Shape*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<GetterSetter*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<JSObject*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<JSString*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<JSFunction*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<JS::Symbol*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<BaseScript*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<JS::Value>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<jsid>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<JSClass*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
-template GCPtr<ArrayObject*>& CacheIRStubInfo::getStubField<ICCacheIRStub>(
-    ICCacheIRStub* stub, uint32_t offset) const;
+#define INSTANTIATE_GET_STUB_FIELD(Type)                                   \
+  template typename MapStubFieldToType<Type>::WrappedType&                 \
+  CacheIRStubInfo::getStubField<ICCacheIRStub, Type>(ICCacheIRStub * stub, \
+                                                     uint32_t offset) const;
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::Shape)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::WeakShape)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::WeakGetterSetter)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::JSObject)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::WeakObject)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::Symbol)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::String)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::WeakBaseScript)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::Value)
+INSTANTIATE_GET_STUB_FIELD(StubField::Type::Id)
+#undef INSTANTIATE_GET_STUB_FIELD
 
 template <class Stub, class T>
 T* CacheIRStubInfo::getPtrStubField(Stub* stub, uint32_t offset) const {
@@ -1119,73 +1091,157 @@ T* CacheIRStubInfo::getPtrStubField(Stub* stub, uint32_t offset) const {
 template gc::AllocSite* CacheIRStubInfo::getPtrStubField(ICCacheIRStub* stub,
                                                          uint32_t offset) const;
 
-template <typename T, typename V>
-static void InitGCPtr(uintptr_t* ptr, V val) {
-  AsGCPtr<T>(ptr)->init(mozilla::BitwiseCast<T>(val));
+template <StubField::Type type, typename V>
+static void InitWrappedPtr(void* ptr, V val) {
+  using RawType = typename MapStubFieldToType<type>::RawType;
+  using WrappedType = typename MapStubFieldToType<type>::WrappedType;
+  auto* wrapped = static_cast<WrappedType*>(ptr);
+  new (wrapped) WrappedType(mozilla::BitwiseCast<RawType>(val));
+}
+
+static void InitWordStubField(StubField::Type type, void* dest,
+                              uintptr_t value) {
+  MOZ_ASSERT(StubField::sizeIsWord(type));
+  MOZ_ASSERT((uintptr_t(dest) % sizeof(uintptr_t)) == 0,
+             "Unaligned stub field");
+
+  switch (type) {
+    case StubField::Type::RawInt32:
+    case StubField::Type::RawPointer:
+    case StubField::Type::AllocSite:
+      *static_cast<uintptr_t*>(dest) = value;
+      break;
+    case StubField::Type::Shape:
+      InitWrappedPtr<StubField::Type::Shape>(dest, value);
+      break;
+    case StubField::Type::WeakShape:
+      // No read barrier required to copy weak pointer.
+      InitWrappedPtr<StubField::Type::WeakShape>(dest, value);
+      break;
+    case StubField::Type::WeakGetterSetter:
+      // No read barrier required to copy weak pointer.
+      InitWrappedPtr<StubField::Type::WeakGetterSetter>(dest, value);
+      break;
+    case StubField::Type::JSObject:
+      InitWrappedPtr<StubField::Type::JSObject>(dest, value);
+      break;
+    case StubField::Type::WeakObject:
+      // No read barrier required to copy weak pointer.
+      InitWrappedPtr<StubField::Type::WeakObject>(dest, value);
+      break;
+    case StubField::Type::Symbol:
+      InitWrappedPtr<StubField::Type::Symbol>(dest, value);
+      break;
+    case StubField::Type::String:
+      InitWrappedPtr<StubField::Type::String>(dest, value);
+      break;
+    case StubField::Type::WeakBaseScript:
+      // No read barrier required to copy weak pointer.
+      InitWrappedPtr<StubField::Type::WeakBaseScript>(dest, value);
+      break;
+    case StubField::Type::JitCode:
+      InitWrappedPtr<StubField::Type::JitCode>(dest, value);
+      break;
+    case StubField::Type::Id:
+      AsGCPtr<jsid>(dest)->init(jsid::fromRawBits(value));
+      break;
+    case StubField::Type::RawInt64:
+    case StubField::Type::Double:
+    case StubField::Type::Value:
+    case StubField::Type::Limit:
+      MOZ_CRASH("Invalid type");
+  }
+}
+
+static void InitInt64StubField(StubField::Type type, void* dest,
+                               uint64_t value) {
+  MOZ_ASSERT(StubField::sizeIsInt64(type));
+  MOZ_ASSERT((uintptr_t(dest) % sizeof(uint64_t)) == 0, "Unaligned stub field");
+
+  switch (type) {
+    case StubField::Type::RawInt64:
+    case StubField::Type::Double:
+      *static_cast<uint64_t*>(dest) = value;
+      break;
+    case StubField::Type::Value:
+      AsGCPtr<Value>(dest)->init(Value::fromRawBits(value));
+      break;
+    case StubField::Type::RawInt32:
+    case StubField::Type::RawPointer:
+    case StubField::Type::AllocSite:
+    case StubField::Type::Shape:
+    case StubField::Type::WeakShape:
+    case StubField::Type::WeakGetterSetter:
+    case StubField::Type::JSObject:
+    case StubField::Type::WeakObject:
+    case StubField::Type::Symbol:
+    case StubField::Type::String:
+    case StubField::Type::WeakBaseScript:
+    case StubField::Type::JitCode:
+    case StubField::Type::Id:
+    case StubField::Type::Limit:
+      MOZ_CRASH("Invalid type");
+  }
 }
 
 void CacheIRWriter::copyStubData(uint8_t* dest) const {
   MOZ_ASSERT(!failed());
 
-  uintptr_t* destWords = reinterpret_cast<uintptr_t*>(dest);
-
   for (const StubField& field : stubFields_) {
-    MOZ_ASSERT((uintptr_t(destWords) % field.sizeInBytes()) == 0,
-               "Unaligned stub field");
-
-    switch (field.type()) {
-      case StubField::Type::RawInt32:
-      case StubField::Type::RawPointer:
-      case StubField::Type::AllocSite:
-        *destWords = field.asWord();
-        break;
-      case StubField::Type::Shape:
-        InitGCPtr<Shape*>(destWords, field.asWord());
-        break;
-      case StubField::Type::WeakShape:
-        // No read barrier required to copy weak pointer.
-        InitGCPtr<Shape*>(destWords, field.asWord());
-        break;
-      case StubField::Type::WeakGetterSetter:
-        // No read barrier required to copy weak pointer.
-        InitGCPtr<GetterSetter*>(destWords, field.asWord());
-        break;
-      case StubField::Type::JSObject:
-        InitGCPtr<JSObject*>(destWords, field.asWord());
-        break;
-      case StubField::Type::WeakObject:
-        // No read barrier required to copy weak pointer.
-        InitGCPtr<JSObject*>(destWords, field.asWord());
-        break;
-      case StubField::Type::Symbol:
-        InitGCPtr<JS::Symbol*>(destWords, field.asWord());
-        break;
-      case StubField::Type::String:
-        InitGCPtr<JSString*>(destWords, field.asWord());
-        break;
-      case StubField::Type::WeakBaseScript:
-        // No read barrier required to copy weak pointer.
-        InitGCPtr<BaseScript*>(destWords, field.asWord());
-        break;
-      case StubField::Type::JitCode:
-        InitGCPtr<JitCode*>(destWords, field.asWord());
-        break;
-      case StubField::Type::Id:
-        AsGCPtr<jsid>(destWords)->init(jsid::fromRawBits(field.asWord()));
-        break;
-      case StubField::Type::RawInt64:
-      case StubField::Type::Double:
-        *reinterpret_cast<uint64_t*>(destWords) = field.asInt64();
-        break;
-      case StubField::Type::Value:
-        AsGCPtr<Value>(destWords)->init(
-            Value::fromRawBits(uint64_t(field.asInt64())));
-        break;
-      case StubField::Type::Limit:
-        MOZ_CRASH("Invalid type");
+    if (field.sizeIsWord()) {
+      InitWordStubField(field.type(), dest, field.asWord());
+      dest += sizeof(uintptr_t);
+    } else {
+      InitInt64StubField(field.type(), dest, field.asInt64());
+      dest += sizeof(uint64_t);
     }
-    destWords += StubField::sizeInBytes(field.type()) / sizeof(uintptr_t);
   }
+}
+
+ICCacheIRStub* ICCacheIRStub::clone(JSRuntime* rt, ICStubSpace& newSpace) {
+  const CacheIRStubInfo* info = stubInfo();
+  MOZ_ASSERT(info->makesGCCalls());
+
+  size_t bytesNeeded = info->stubDataOffset() + info->stubDataSize();
+
+  AutoEnterOOMUnsafeRegion oomUnsafe;
+  void* newStubMem = newSpace.alloc(bytesNeeded);
+  if (!newStubMem) {
+    oomUnsafe.crash("ICCacheIRStub::clone");
+  }
+
+  ICCacheIRStub* newStub = new (newStubMem) ICCacheIRStub(*this);
+
+  const uint8_t* src = this->stubDataStart();
+  uint8_t* dest = newStub->stubDataStart();
+
+  // Because this can be called during sweeping when discarding JIT code, we
+  // have to lock the store buffer
+  gc::AutoLockStoreBuffer lock(rt);
+
+  uint32_t field = 0;
+  while (true) {
+    StubField::Type type = info->fieldType(field);
+    if (type == StubField::Type::Limit) {
+      break;  // Done.
+    }
+
+    if (StubField::sizeIsWord(type)) {
+      const uintptr_t* srcField = reinterpret_cast<const uintptr_t*>(src);
+      InitWordStubField(type, dest, *srcField);
+      src += sizeof(uintptr_t);
+      dest += sizeof(uintptr_t);
+    } else {
+      const uint64_t* srcField = reinterpret_cast<const uint64_t*>(src);
+      InitInt64StubField(type, dest, *srcField);
+      src += sizeof(uint64_t);
+      dest += sizeof(uint64_t);
+    }
+
+    field++;
+  }
+
+  return newStub;
 }
 
 template <typename T>
@@ -1202,89 +1258,93 @@ static inline bool ShouldTraceWeakEdgeInStub(JSTracer* trc) {
 template <typename T>
 void jit::TraceCacheIRStub(JSTracer* trc, T* stub,
                            const CacheIRStubInfo* stubInfo) {
+  using Type = StubField::Type;
+
   uint32_t field = 0;
   size_t offset = 0;
   while (true) {
-    StubField::Type fieldType = stubInfo->fieldType(field);
+    Type fieldType = stubInfo->fieldType(field);
     switch (fieldType) {
-      case StubField::Type::RawInt32:
-      case StubField::Type::RawPointer:
-      case StubField::Type::RawInt64:
-      case StubField::Type::Double:
+      case Type::RawInt32:
+      case Type::RawPointer:
+      case Type::RawInt64:
+      case Type::Double:
         break;
-      case StubField::Type::Shape: {
+      case Type::Shape: {
         // For CCW IC stubs, we can store same-zone but cross-compartment
         // shapes. Use TraceSameZoneCrossCompartmentEdge to not assert in the
         // GC. Note: CacheIRWriter::writeShapeField asserts we never store
         // cross-zone shapes.
         GCPtr<Shape*>& shapeField =
-            stubInfo->getStubField<T, Shape*>(stub, offset);
+            stubInfo->getStubField<T, Type::Shape>(stub, offset);
         TraceSameZoneCrossCompartmentEdge(trc, &shapeField, "cacheir-shape");
         break;
       }
-      case StubField::Type::WeakShape:
+      case Type::WeakShape:
         if (ShouldTraceWeakEdgeInStub<T>(trc)) {
-          GCPtr<Shape*>& shapeField =
-              stubInfo->getStubField<T, Shape*>(stub, offset);
+          WeakHeapPtr<Shape*>& shapeField =
+              stubInfo->getStubField<T, Type::WeakShape>(stub, offset);
           if (shapeField) {
             TraceSameZoneCrossCompartmentEdge(trc, &shapeField,
                                               "cacheir-weak-shape");
           }
         }
         break;
-      case StubField::Type::WeakGetterSetter:
+      case Type::WeakGetterSetter:
         if (ShouldTraceWeakEdgeInStub<T>(trc)) {
           TraceNullableEdge(
-              trc, &stubInfo->getStubField<T, GetterSetter*>(stub, offset),
+              trc,
+              &stubInfo->getStubField<T, Type::WeakGetterSetter>(stub, offset),
               "cacheir-weak-getter-setter");
         }
         break;
-      case StubField::Type::JSObject: {
-        TraceEdge(trc, &stubInfo->getStubField<T, JSObject*>(stub, offset),
+      case Type::JSObject: {
+        TraceEdge(trc, &stubInfo->getStubField<T, Type::JSObject>(stub, offset),
                   "cacheir-object");
         break;
       }
-      case StubField::Type::WeakObject:
-        if (ShouldTraceWeakEdgeInStub<T>(trc)) {
-          TraceNullableEdge(trc,
-                            &stubInfo->getStubField<T, JSObject*>(stub, offset),
-                            "cacheir-weak-object");
-        }
-        break;
-      case StubField::Type::Symbol:
-        TraceEdge(trc, &stubInfo->getStubField<T, JS::Symbol*>(stub, offset),
-                  "cacheir-symbol");
-        break;
-      case StubField::Type::String:
-        TraceEdge(trc, &stubInfo->getStubField<T, JSString*>(stub, offset),
-                  "cacheir-string");
-        break;
-      case StubField::Type::WeakBaseScript:
+      case Type::WeakObject:
         if (ShouldTraceWeakEdgeInStub<T>(trc)) {
           TraceNullableEdge(
-              trc, &stubInfo->getStubField<T, BaseScript*>(stub, offset),
+              trc, &stubInfo->getStubField<T, Type::WeakObject>(stub, offset),
+              "cacheir-weak-object");
+        }
+        break;
+      case Type::Symbol:
+        TraceEdge(trc, &stubInfo->getStubField<T, Type::Symbol>(stub, offset),
+                  "cacheir-symbol");
+        break;
+      case Type::String:
+        TraceEdge(trc, &stubInfo->getStubField<T, Type::String>(stub, offset),
+                  "cacheir-string");
+        break;
+      case Type::WeakBaseScript:
+        if (ShouldTraceWeakEdgeInStub<T>(trc)) {
+          TraceNullableEdge(
+              trc,
+              &stubInfo->getStubField<T, Type::WeakBaseScript>(stub, offset),
               "cacheir-weak-script");
         }
         break;
-      case StubField::Type::JitCode:
-        TraceEdge(trc, &stubInfo->getStubField<T, JitCode*>(stub, offset),
+      case Type::JitCode:
+        TraceEdge(trc, &stubInfo->getStubField<T, Type::JitCode>(stub, offset),
                   "cacheir-jitcode");
         break;
-      case StubField::Type::Id:
-        TraceEdge(trc, &stubInfo->getStubField<T, jsid>(stub, offset),
+      case Type::Id:
+        TraceEdge(trc, &stubInfo->getStubField<T, Type::Id>(stub, offset),
                   "cacheir-id");
         break;
-      case StubField::Type::Value:
-        TraceEdge(trc, &stubInfo->getStubField<T, JS::Value>(stub, offset),
+      case Type::Value:
+        TraceEdge(trc, &stubInfo->getStubField<T, Type::Value>(stub, offset),
                   "cacheir-value");
         break;
-      case StubField::Type::AllocSite: {
+      case Type::AllocSite: {
         gc::AllocSite* site =
             stubInfo->getPtrStubField<T, gc::AllocSite>(stub, offset);
         site->trace(trc);
         break;
       }
-      case StubField::Type::Limit:
+      case Type::Limit:
         return;  // Done.
     }
     field++;
@@ -1301,41 +1361,43 @@ template void jit::TraceCacheIRStub(JSTracer* trc, IonICStub* stub,
 template <typename T>
 bool jit::TraceWeakCacheIRStub(JSTracer* trc, T* stub,
                                const CacheIRStubInfo* stubInfo) {
+  using Type = StubField::Type;
+
   uint32_t field = 0;
   size_t offset = 0;
   while (true) {
-    StubField::Type fieldType = stubInfo->fieldType(field);
+    Type fieldType = stubInfo->fieldType(field);
     switch (fieldType) {
-      case StubField::Type::WeakShape: {
-        GCPtr<Shape*>& shapeField =
-            stubInfo->getStubField<T, Shape*>(stub, offset);
+      case Type::WeakShape: {
+        WeakHeapPtr<Shape*>& shapeField =
+            stubInfo->getStubField<T, Type::WeakShape>(stub, offset);
         auto r = TraceWeakEdge(trc, &shapeField, "cacheir-weak-shape");
         if (r.isDead()) {
           return false;
         }
         break;
       }
-      case StubField::Type::WeakObject: {
-        GCPtr<JSObject*>& objectField =
-            stubInfo->getStubField<T, JSObject*>(stub, offset);
+      case Type::WeakObject: {
+        WeakHeapPtr<JSObject*>& objectField =
+            stubInfo->getStubField<T, Type::WeakObject>(stub, offset);
         auto r = TraceWeakEdge(trc, &objectField, "cacheir-weak-object");
         if (r.isDead()) {
           return false;
         }
         break;
       }
-      case StubField::Type::WeakBaseScript: {
-        GCPtr<BaseScript*>& scriptField =
-            stubInfo->getStubField<T, BaseScript*>(stub, offset);
+      case Type::WeakBaseScript: {
+        WeakHeapPtr<BaseScript*>& scriptField =
+            stubInfo->getStubField<T, Type::WeakBaseScript>(stub, offset);
         auto r = TraceWeakEdge(trc, &scriptField, "cacheir-weak-script");
         if (r.isDead()) {
           return false;
         }
         break;
       }
-      case StubField::Type::WeakGetterSetter: {
-        GCPtr<GetterSetter*>& getterSetterField =
-            stubInfo->getStubField<T, GetterSetter*>(stub, offset);
+      case Type::WeakGetterSetter: {
+        WeakHeapPtr<GetterSetter*>& getterSetterField =
+            stubInfo->getStubField<T, Type::WeakGetterSetter>(stub, offset);
         auto r = TraceWeakEdge(trc, &getterSetterField,
                                "cacheir-weak-getter-setter");
         if (r.isDead()) {
@@ -1343,20 +1405,20 @@ bool jit::TraceWeakCacheIRStub(JSTracer* trc, T* stub,
         }
         break;
       }
-      case StubField::Type::Limit:
+      case Type::Limit:
         return true;  // Done.
-      case StubField::Type::RawInt32:
-      case StubField::Type::RawPointer:
-      case StubField::Type::Shape:
-      case StubField::Type::JSObject:
-      case StubField::Type::Symbol:
-      case StubField::Type::String:
-      case StubField::Type::JitCode:
-      case StubField::Type::Id:
-      case StubField::Type::AllocSite:
-      case StubField::Type::RawInt64:
-      case StubField::Type::Value:
-      case StubField::Type::Double:
+      case Type::RawInt32:
+      case Type::RawPointer:
+      case Type::Shape:
+      case Type::JSObject:
+      case Type::Symbol:
+      case Type::String:
+      case Type::JitCode:
+      case Type::Id:
+      case Type::AllocSite:
+      case Type::RawInt64:
+      case Type::Value:
+      case Type::Double:
         break;  // Skip non-weak fields.
     }
     field++;
@@ -2336,12 +2398,9 @@ bool CacheIRCompiler::emitIdToStringOrSymbol(ValOperandId resultId,
   Register intReg = output.scratchReg();
   masm.unboxInt32(output, intReg);
 
-  masm.boundsCheck32PowerOfTwo(intReg, StaticStrings::INT_STATIC_LIMIT,
-                               &callVM);
-
   // Fast path for small integers.
-  masm.movePtr(ImmPtr(&cx_->runtime()->staticStrings->intStaticTable), scratch);
-  masm.loadPtr(BaseIndex(scratch, intReg, ScalePointer), intReg);
+  masm.lookupStaticIntString(intReg, intReg, scratch, cx_->staticStrings(),
+                             &callVM);
   masm.jump(&intDone);
 
   masm.bind(&callVM);
@@ -3013,9 +3072,9 @@ bool CacheIRCompiler::emitDoubleModResult(NumberOperandId lhsId,
 
   using Fn = double (*)(double a, double b);
   masm.setupUnalignedABICall(scratch);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch1, MoveOp::DOUBLE);
-  masm.callWithABI<Fn, js::NumberMod>(MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
+  masm.passABIArg(floatScratch1, ABIType::Float64);
+  masm.callWithABI<Fn, js::NumberMod>(ABIType::Float64);
   masm.storeCallFloatResult(floatScratch0);
 
   LiveRegisterSet ignore;
@@ -3043,9 +3102,9 @@ bool CacheIRCompiler::emitDoublePowResult(NumberOperandId lhsId,
 
   using Fn = double (*)(double x, double y);
   masm.setupUnalignedABICall(scratch);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch1, MoveOp::DOUBLE);
-  masm.callWithABI<Fn, js::ecmaPow>(MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
+  masm.passABIArg(floatScratch1, ABIType::Float64);
+  masm.callWithABI<Fn, js::ecmaPow>(ABIType::Float64);
   masm.storeCallFloatResult(floatScratch0);
 
   LiveRegisterSet ignore;
@@ -3600,8 +3659,8 @@ bool CacheIRCompiler::emitTruncateDoubleToUInt32(NumberOperandId inputId,
 
   using Fn = int32_t (*)(double);
   masm.setupUnalignedABICall(res);
-  masm.passABIArg(floatReg, MoveOp::DOUBLE);
-  masm.callWithABI<Fn, JS::ToInt32>(MoveOp::GENERAL,
+  masm.passABIArg(floatReg, ABIType::Float64);
+  masm.callWithABI<Fn, JS::ToInt32>(ABIType::General,
                                     CheckUnsafeCallWithABI::DontCheckOther);
   masm.storeCallInt32Result(res);
 
@@ -3815,6 +3874,7 @@ bool CacheIRCompiler::emitLoadFunctionNameResult(ObjOperandId objId) {
 bool CacheIRCompiler::emitLinearizeForCharAccess(StringOperandId strId,
                                                  Int32OperandId indexId,
                                                  StringOperandId resultId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
   Register str = allocator.useRegister(masm, strId);
   Register index = allocator.useRegister(masm, indexId);
   Register result = allocator.defineRegister(masm, resultId);
@@ -3852,6 +3912,67 @@ bool CacheIRCompiler::emitLinearizeForCharAccess(StringOperandId strId,
   }
 
   masm.bind(&done);
+  return true;
+}
+
+bool CacheIRCompiler::emitLinearizeForCodePointAccess(
+    StringOperandId strId, Int32OperandId indexId, StringOperandId resultId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+  Register str = allocator.useRegister(masm, strId);
+  Register index = allocator.useRegister(masm, indexId);
+  Register result = allocator.defineRegister(masm, resultId);
+  AutoScratchRegister scratch1(allocator, masm);
+  AutoScratchRegister scratch2(allocator, masm);
+
+  FailurePath* failure;
+  if (!addFailurePath(&failure)) {
+    return false;
+  }
+
+  Label done;
+  masm.movePtr(str, result);
+
+  // We can omit the bounds check, because we only compare the index against the
+  // string length. In the worst case we unnecessarily linearize the string
+  // when the index is out-of-bounds.
+
+  masm.branchIfCanLoadStringCodePoint(str, index, scratch1, scratch2, &done);
+  {
+    LiveRegisterSet volatileRegs(GeneralRegisterSet::Volatile(),
+                                 liveVolatileFloatRegs());
+    masm.PushRegsInMask(volatileRegs);
+
+    using Fn = JSLinearString* (*)(JSString*);
+    masm.setupUnalignedABICall(scratch1);
+    masm.passABIArg(str);
+    masm.callWithABI<Fn, js::jit::LinearizeForCharAccessPure>();
+    masm.storeCallPointerResult(result);
+
+    LiveRegisterSet ignore;
+    ignore.add(result);
+    masm.PopRegsInMaskIgnore(volatileRegs, ignore);
+
+    masm.branchTestPtr(Assembler::Zero, result, result, failure->label());
+  }
+
+  masm.bind(&done);
+  return true;
+}
+
+bool CacheIRCompiler::emitToRelativeStringIndex(Int32OperandId indexId,
+                                                StringOperandId strId,
+                                                Int32OperandId resultId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+  Register index = allocator.useRegister(masm, indexId);
+  Register str = allocator.useRegister(masm, strId);
+  Register result = allocator.defineRegister(masm, resultId);
+
+  // If |index| is non-negative, it's an index relative to the start of the
+  // string. Otherwise it's an index relative to the end of the string.
+  masm.move32(Imm32(0), result);
+  masm.cmp32Load32(Assembler::LessThan, index, Imm32(0),
+                   Address(str, JSString::offsetOfLength()), result);
+  masm.add32(index, result);
   return true;
 }
 
@@ -3915,6 +4036,56 @@ bool CacheIRCompiler::emitLoadStringCharCodeResult(StringOperandId strId,
   return true;
 }
 
+bool CacheIRCompiler::emitLoadStringCodePointResult(StringOperandId strId,
+                                                    Int32OperandId indexId,
+                                                    bool handleOOB) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+  AutoOutputRegister output(*this);
+  Register str = allocator.useRegister(masm, strId);
+  Register index = allocator.useRegister(masm, indexId);
+  AutoScratchRegisterMaybeOutput scratch1(allocator, masm, output);
+  AutoScratchRegisterMaybeOutputType scratch2(allocator, masm, output);
+  AutoScratchRegister scratch3(allocator, masm);
+
+  // Bounds check, load string char.
+  Label done;
+  if (!handleOOB) {
+    FailurePath* failure;
+    if (!addFailurePath(&failure)) {
+      return false;
+    }
+
+    masm.spectreBoundsCheck32(index, Address(str, JSString::offsetOfLength()),
+                              scratch1, failure->label());
+    masm.loadStringCodePoint(str, index, scratch1, scratch2, scratch3,
+                             failure->label());
+  } else {
+    // Return undefined for out-of-bounds access.
+    masm.moveValue(JS::UndefinedValue(), output.valueReg());
+
+    // The bounds check mustn't use a scratch register which aliases the output.
+    MOZ_ASSERT(!output.valueReg().aliases(scratch3));
+
+    // This CacheIR op is always preceded by |LinearizeForCodePointAccess|, so
+    // we're guaranteed to see no nested ropes or split surrogates.
+    Label loadFailed;
+    masm.spectreBoundsCheck32(index, Address(str, JSString::offsetOfLength()),
+                              scratch3, &done);
+    masm.loadStringCodePoint(str, index, scratch1, scratch2, scratch3,
+                             &loadFailed);
+
+    Label loadedChar;
+    masm.jump(&loadedChar);
+    masm.bind(&loadFailed);
+    masm.assumeUnreachable("loadStringCodePoint can't fail for linear strings");
+    masm.bind(&loadedChar);
+  }
+
+  masm.tagValue(JSVAL_TYPE_INT32, scratch1, output.valueReg());
+  masm.bind(&done);
+  return true;
+}
+
 bool CacheIRCompiler::emitNewStringObjectResult(uint32_t templateObjectOffset,
                                                 StringOperandId strId) {
   JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
@@ -3928,6 +4099,24 @@ bool CacheIRCompiler::emitNewStringObjectResult(uint32_t templateObjectOffset,
 
   using Fn = JSObject* (*)(JSContext*, HandleString);
   callvm.call<Fn, NewStringObject>();
+  return true;
+}
+
+bool CacheIRCompiler::emitStringIncludesResult(StringOperandId strId,
+                                               StringOperandId searchStrId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+
+  AutoCallVM callvm(masm, this, allocator);
+
+  Register str = allocator.useRegister(masm, strId);
+  Register searchStr = allocator.useRegister(masm, searchStrId);
+
+  callvm.prepare();
+  masm.Push(searchStr);
+  masm.Push(str);
+
+  using Fn = bool (*)(JSContext*, HandleString, HandleString, bool*);
+  callvm.call<Fn, js::StringIncludes>();
   return true;
 }
 
@@ -3946,6 +4135,24 @@ bool CacheIRCompiler::emitStringIndexOfResult(StringOperandId strId,
 
   using Fn = bool (*)(JSContext*, HandleString, HandleString, int32_t*);
   callvm.call<Fn, js::StringIndexOf>();
+  return true;
+}
+
+bool CacheIRCompiler::emitStringLastIndexOfResult(StringOperandId strId,
+                                                  StringOperandId searchStrId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+
+  AutoCallVM callvm(masm, this, allocator);
+
+  Register str = allocator.useRegister(masm, strId);
+  Register searchStr = allocator.useRegister(masm, searchStrId);
+
+  callvm.prepare();
+  masm.Push(searchStr);
+  masm.Push(str);
+
+  using Fn = bool (*)(JSContext*, HandleString, HandleString, int32_t*);
+  callvm.call<Fn, js::StringLastIndexOf>();
   return true;
 }
 
@@ -4012,6 +4219,51 @@ bool CacheIRCompiler::emitStringToUpperCaseResult(StringOperandId strId) {
 
   using Fn = JSString* (*)(JSContext*, HandleString);
   callvm.call<Fn, js::StringToUpperCase>();
+  return true;
+}
+
+bool CacheIRCompiler::emitStringTrimResult(StringOperandId strId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+
+  AutoCallVM callvm(masm, this, allocator);
+
+  Register str = allocator.useRegister(masm, strId);
+
+  callvm.prepare();
+  masm.Push(str);
+
+  using Fn = JSString* (*)(JSContext*, HandleString);
+  callvm.call<Fn, js::StringTrim>();
+  return true;
+}
+
+bool CacheIRCompiler::emitStringTrimStartResult(StringOperandId strId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+
+  AutoCallVM callvm(masm, this, allocator);
+
+  Register str = allocator.useRegister(masm, strId);
+
+  callvm.prepare();
+  masm.Push(str);
+
+  using Fn = JSString* (*)(JSContext*, HandleString);
+  callvm.call<Fn, js::StringTrimStart>();
+  return true;
+}
+
+bool CacheIRCompiler::emitStringTrimEndResult(StringOperandId strId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+
+  AutoCallVM callvm(masm, this, allocator);
+
+  Register str = allocator.useRegister(masm, strId);
+
+  callvm.prepare();
+  masm.Push(str);
+
+  using Fn = JSString* (*)(JSContext*, HandleString);
+  callvm.call<Fn, js::StringTrimEnd>();
   return true;
 }
 
@@ -4963,6 +5215,25 @@ bool CacheIRCompiler::emitObjectCreateResult(uint32_t templateObjectOffset) {
   return true;
 }
 
+bool CacheIRCompiler::emitObjectKeysResult(ObjOperandId objId) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+
+  AutoCallVM callvm(masm, this, allocator);
+  Register obj = allocator.useRegister(masm, objId);
+
+  // Our goal is only to record calls to Object.keys, to elide it when
+  // partially used, not to provide an alternative implementation.
+  {
+    callvm.prepare();
+    masm.Push(obj);
+
+    using Fn = JSObject* (*)(JSContext*, HandleObject);
+    callvm.call<Fn, jit::ObjectKeys>();
+  }
+
+  return true;
+}
+
 bool CacheIRCompiler::emitNewArrayFromLengthResult(
     uint32_t templateObjectOffset, Int32OperandId lengthId) {
   JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
@@ -5291,10 +5562,10 @@ bool CacheIRCompiler::emitMathHypot2NumberResult(NumberOperandId first,
 
   using Fn = double (*)(double x, double y);
   masm.setupUnalignedABICall(scratch);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch1, MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
+  masm.passABIArg(floatScratch1, ABIType::Float64);
 
-  masm.callWithABI<Fn, ecmaHypot>(MoveOp::DOUBLE);
+  masm.callWithABI<Fn, ecmaHypot>(ABIType::Float64);
   masm.storeCallFloatResult(floatScratch0);
 
   LiveRegisterSet ignore;
@@ -5325,11 +5596,11 @@ bool CacheIRCompiler::emitMathHypot3NumberResult(NumberOperandId first,
 
   using Fn = double (*)(double x, double y, double z);
   masm.setupUnalignedABICall(scratch);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch1, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch2, MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
+  masm.passABIArg(floatScratch1, ABIType::Float64);
+  masm.passABIArg(floatScratch2, ABIType::Float64);
 
-  masm.callWithABI<Fn, hypot3>(MoveOp::DOUBLE);
+  masm.callWithABI<Fn, hypot3>(ABIType::Float64);
   masm.storeCallFloatResult(floatScratch0);
 
   LiveRegisterSet ignore;
@@ -5363,12 +5634,12 @@ bool CacheIRCompiler::emitMathHypot4NumberResult(NumberOperandId first,
 
   using Fn = double (*)(double x, double y, double z, double w);
   masm.setupUnalignedABICall(scratch);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch1, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch2, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch3, MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
+  masm.passABIArg(floatScratch1, ABIType::Float64);
+  masm.passABIArg(floatScratch2, ABIType::Float64);
+  masm.passABIArg(floatScratch3, ABIType::Float64);
 
-  masm.callWithABI<Fn, hypot4>(MoveOp::DOUBLE);
+  masm.callWithABI<Fn, hypot4>(ABIType::Float64);
   masm.storeCallFloatResult(floatScratch0);
 
   LiveRegisterSet ignore;
@@ -5396,9 +5667,9 @@ bool CacheIRCompiler::emitMathAtan2NumberResult(NumberOperandId yId,
 
   using Fn = double (*)(double x, double y);
   masm.setupUnalignedABICall(scratch);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
-  masm.passABIArg(floatScratch1, MoveOp::DOUBLE);
-  masm.callWithABI<Fn, js::ecmaAtan2>(MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
+  masm.passABIArg(floatScratch1, ABIType::Float64);
+  masm.callWithABI<Fn, js::ecmaAtan2>(ABIType::Float64);
   masm.storeCallFloatResult(floatScratch0);
 
   LiveRegisterSet ignore;
@@ -5591,9 +5862,9 @@ bool CacheIRCompiler::emitMathFunctionNumberResultShared(
   masm.PushRegsInMask(save);
 
   masm.setupUnalignedABICall(output.scratchReg());
-  masm.passABIArg(inputScratch, MoveOp::DOUBLE);
+  masm.passABIArg(inputScratch, ABIType::Float64);
   masm.callWithABI(DynamicFunction<UnaryMathFunctionType>(funPtr),
-                   MoveOp::DOUBLE);
+                   ABIType::Float64);
   masm.storeCallFloatResult(inputScratch);
 
   masm.PopRegsInMask(save);
@@ -7030,11 +7301,11 @@ bool CacheIRCompiler::emitCompareBigIntNumberResult(JSOp op,
   // - |left <= right| is implemented as |right >= left|.
   // - |left > right| is implemented as |right < left|.
   if (op == JSOp::Le || op == JSOp::Gt) {
-    masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
+    masm.passABIArg(floatScratch0, ABIType::Float64);
     masm.passABIArg(lhs);
   } else {
     masm.passABIArg(lhs);
-    masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
+    masm.passABIArg(floatScratch0, ABIType::Float64);
   }
 
   using FnBigIntNumber = bool (*)(BigInt*, double);
@@ -7377,12 +7648,8 @@ bool CacheIRCompiler::emitMegamorphicLoadSlotByValueResult(ObjOperandId objId,
   masm.xorPtr(scratch2, scratch2);
 #else
   Label cacheHit;
-  if (JitOptions.enableWatchtowerMegamorphic) {
-    masm.emitMegamorphicCacheLookupByValue(
-        idVal, obj, scratch1, scratch3, scratch2, output.valueReg(), &cacheHit);
-  } else {
-    masm.xorPtr(scratch2, scratch2);
-  }
+  masm.emitMegamorphicCacheLookupByValue(
+      idVal, obj, scratch1, scratch3, scratch2, output.valueReg(), &cacheHit);
 #endif
 
   masm.branchIfNonNativeObj(obj, scratch1, failure->label());
@@ -7455,13 +7722,9 @@ bool CacheIRCompiler::emitMegamorphicHasPropResult(ObjOperandId objId,
 
 #ifndef JS_CODEGEN_X86
   Label cacheHit, done;
-  if (JitOptions.enableWatchtowerMegamorphic) {
-    masm.emitMegamorphicCacheLookupExists(idVal, obj, scratch1, scratch3,
-                                          scratch2, output.maybeReg(),
-                                          &cacheHit, hasOwn);
-  } else {
-    masm.xorPtr(scratch2, scratch2);
-  }
+  masm.emitMegamorphicCacheLookupExists(idVal, obj, scratch1, scratch3,
+                                        scratch2, output.maybeReg(), &cacheHit,
+                                        hasOwn);
 #else
   masm.xorPtr(scratch2, scratch2);
 #endif
@@ -7735,14 +7998,10 @@ bool CacheIRCompiler::emitMegamorphicLoadSlotResult(ObjOperandId objId,
   masm.xorPtr(scratch3, scratch3);
 #else
   Label cacheHit;
-  if (JitOptions.enableWatchtowerMegamorphic) {
-    emitLoadStubField(id, idReg);
-    masm.emitMegamorphicCacheLookupByValue(idReg.get(), obj, scratch1, scratch2,
-                                           scratch3, output.valueReg(),
-                                           &cacheHit);
-  } else {
-    masm.xorPtr(scratch3, scratch3);
-  }
+  emitLoadStubField(id, idReg);
+  masm.emitMegamorphicCacheLookupByValue(idReg.get(), obj, scratch1, scratch2,
+                                         scratch3, output.valueReg(),
+                                         &cacheHit);
 #endif
 
   masm.branchIfNonNativeObj(obj, scratch1, failure->label());
@@ -8055,7 +8314,7 @@ bool CacheIRCompiler::emitCallNumberToString(NumberOperandId inputId,
   masm.setupUnalignedABICall(result);
   masm.loadJSContext(result);
   masm.passABIArg(result);
-  masm.passABIArg(floatScratch0, MoveOp::DOUBLE);
+  masm.passABIArg(floatScratch0, ABIType::Float64);
   masm.callWithABI<Fn, js::NumberToStringPure>();
 
   masm.storeCallPointerResult(result);
@@ -8086,12 +8345,16 @@ bool CacheIRCompiler::emitInt32ToStringWithBaseResult(Int32OperandId inputId,
   masm.branch32(Assembler::LessThan, base, Imm32(2), failure->label());
   masm.branch32(Assembler::GreaterThan, base, Imm32(36), failure->label());
 
+  // Use lower-case characters by default.
+  constexpr bool lowerCase = true;
+
   callvm.prepare();
 
+  masm.Push(Imm32(lowerCase));
   masm.Push(base);
   masm.Push(input);
 
-  using Fn = JSString* (*)(JSContext*, int32_t, int32_t);
+  using Fn = JSString* (*)(JSContext*, int32_t, int32_t, bool);
   callvm.call<Fn, js::Int32ToStringWithBase>();
   return true;
 }
@@ -9392,6 +9655,21 @@ bool CacheIRCompiler::emitGuardGlobalGeneration(uint32_t expectedOffset,
   masm.branch32(Assembler::NotEqual, Address(scratch2, 0), scratch,
                 failure->label());
 
+  return true;
+}
+
+bool CacheIRCompiler::emitGuardFuse(RealmFuses::FuseIndex fuseIndex) {
+  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
+  AutoScratchRegister scratch(allocator, masm);
+
+  FailurePath* failure;
+  if (!addFailurePath(&failure)) {
+    return false;
+  }
+
+  masm.loadRealmFuse(fuseIndex, scratch);
+  masm.branchPtr(Assembler::NotEqual, scratch, ImmPtr(nullptr),
+                 failure->label());
   return true;
 }
 

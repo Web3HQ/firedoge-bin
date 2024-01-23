@@ -56,9 +56,30 @@ XPCOMUtils.defineLazyServiceGetters(lazy, {
 // by storing the installed version number of the task to a pref and comparing
 // that version number to the current version. If they aren't equal, we know
 // that we have to re-register the task.
-const TASK_DEF_CURRENT_VERSION = 3;
+const TASK_DEF_CURRENT_VERSION = 4;
 const TASK_INSTALLED_VERSION_PREF =
   "app.update.background.lastInstalledTaskVersion";
+
+// This returns the version of the task naming scheme being used which
+// is different from the task version used for the task definition.
+function taskNameVersion(taskVersion) {
+  if (AppConstants.platform != "win" || taskVersion < 4) {
+    return 1;
+  }
+  return 2;
+}
+
+async function deleteTasksInRange(installedVersion, currentVersion) {
+  for (
+    let taskVersion = installedVersion;
+    taskVersion <= currentVersion;
+    taskVersion++
+  ) {
+    await lazy.TaskScheduler.deleteTask(this.taskId, {
+      nameVersion: taskNameVersion(taskVersion),
+    });
+  }
+}
 
 export var BackgroundUpdate = {
   QueryInterface: ChromeUtils.generateQI([
@@ -211,10 +232,13 @@ export var BackgroundUpdate = {
       }
 
       if (!serviceRegKeyExists) {
-        // The nimbus experiment allows users with unelevated installations
-        // to update in the background.
-        let allowUnelevated = lazy.NimbusFeatures.backgroundUpdate.getVariable(
-          "allowUpdatesForUnelevatedInstallations"
+        // A Nimbus rollout sets this preference and allows users with
+        // unelevated installations to update in the background. For that to
+        // work we use the setPref function to toggle a preference, because the
+        // value for Nimbus is currently not readable in a backgroundtask. The
+        // preference serves in that case as our communication channel.
+        let allowUnelevated = await Services.prefs.getBoolPref(
+          "app.update.background.allowUpdatesForUnelevatedInstallations"
         );
 
         if (!allowUnelevated) {
@@ -555,7 +579,11 @@ export var BackgroundUpdate = {
         );
 
         if (!successfullyReadPrevious || previousEnabled) {
-          await lazy.TaskScheduler.deleteTask(this.taskId);
+          let installedVersion = Services.prefs.getIntPref(
+            TASK_INSTALLED_VERSION_PREF,
+            TASK_DEF_CURRENT_VERSION
+          );
+          await deleteTasksInRange(installedVersion, TASK_DEF_CURRENT_VERSION);
           lazy.log.debug(
             `${SLUG}: witnessed falling (enabled -> disabled) edge; deleted task ${this.taskId}.`
           );
@@ -584,7 +612,11 @@ export var BackgroundUpdate = {
             `Removing task so the new version can be registered`
         );
         try {
-          await lazy.TaskScheduler.deleteTask(this.taskId);
+          let installedVersion = Services.prefs.getIntPref(
+            TASK_INSTALLED_VERSION_PREF,
+            TASK_DEF_CURRENT_VERSION
+          );
+          await deleteTasksInRange(installedVersion, TASK_DEF_CURRENT_VERSION);
         } catch (e) {
           lazy.log.error(`${SLUG}: Error removing old task: ${e}`);
         }
@@ -902,7 +934,7 @@ export var BackgroundUpdate = {
     for (const [key, value] of Object.entries(this.REASON)) {
       if (reasons.includes(value)) {
         try {
-          // `testGetValue` throws `NS_ERROR_LOSS_OF_SIGNIFICANT_DATA` in case
+          // `testGetValue` throws a `DataError` in case
           // of `InvalidOverflow` and other outstanding errors.
           Glean.backgroundUpdate.reasonsToNotUpdate.testGetValue();
           Glean.backgroundUpdate.reasonsToNotUpdate.add(key);

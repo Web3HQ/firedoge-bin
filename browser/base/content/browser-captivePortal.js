@@ -26,6 +26,9 @@ var CaptivePortalWatcher = {
   // after successful login if we're redirected to the canonicalURL.
   _previousCaptivePortalTab: null,
 
+  // Stores the time at which the banner was displayed
+  _bannerDisplayTime: Date.now(),
+
   get _captivePortalNotification() {
     return gNotificationBox.getNotificationWithValue(
       this.PORTAL_NOTIFICATION_VALUE
@@ -239,6 +242,16 @@ var CaptivePortalWatcher = {
     this._cancelDelayedCaptivePortal();
     this._removeNotification();
 
+    let durationInSeconds = Math.round(
+      (Date.now() - this._bannerDisplayTime) / 1000
+    );
+
+    Services.telemetry.keyedScalarAdd(
+      "networking.captive_portal_banner_display_time",
+      aSuccess ? "success" : "abort",
+      durationInSeconds
+    );
+
     if (!this._captivePortalTab) {
       return;
     }
@@ -264,12 +277,15 @@ var CaptivePortalWatcher = {
     }
   },
 
-  handleEvent(aEvent) {
+  async handleEvent(aEvent) {
     switch (aEvent.type) {
       case "activate":
         this._delayedCaptivePortalDetected();
         break;
       case "TabSelect":
+        if (this._notificationPromise) {
+          await this._notificationPromise;
+        }
         if (!this._captivePortalTab || !this._captivePortalNotification) {
           break;
         }
@@ -298,6 +314,12 @@ var CaptivePortalWatcher = {
       return;
     }
 
+    Services.telemetry.scalarAdd(
+      "networking.captive_portal_banner_displayed",
+      1
+    );
+    this._bannerDisplayTime = Date.now();
+
     let buttons = [
       {
         label: this._browserBundle.GetStringFromName(
@@ -317,13 +339,25 @@ var CaptivePortalWatcher = {
     );
 
     let closeHandler = aEventName => {
+      if (aEventName == "dismissed") {
+        let durationInSeconds = Math.round(
+          (Date.now() - this._bannerDisplayTime) / 1000
+        );
+
+        Services.telemetry.keyedScalarAdd(
+          "networking.captive_portal_banner_display_time",
+          "dismiss",
+          durationInSeconds
+        );
+      }
+
       if (aEventName != "removed") {
         return;
       }
       gBrowser.tabContainer.removeEventListener("TabSelect", this);
     };
 
-    gNotificationBox.appendNotification(
+    this._notificationPromise = gNotificationBox.appendNotification(
       this.PORTAL_NOTIFICATION_VALUE,
       {
         label: message,

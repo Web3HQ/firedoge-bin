@@ -11,8 +11,9 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/dom/AuthenticatorResponse.h"
 #include "mozilla/dom/BindingDeclarations.h"
+#include "mozilla/dom/WebAuthenticationBinding.h"
 #include "nsCycleCollectionParticipant.h"
-#include "nsIWebAuthnController.h"
+#include "nsIWebAuthnAttObj.h"
 #include "nsWrapperCache.h"
 
 namespace mozilla::dom {
@@ -49,7 +50,12 @@ class AuthenticatorAttestationResponse final : public AuthenticatorResponse {
 
   COSEAlgorithmIdentifier GetPublicKeyAlgorithm(ErrorResult& aRv);
 
+  void ToJSON(AuthenticatorAttestationResponseJSON& aJSON, ErrorResult& aError);
+
  private:
+  nsresult GetAuthenticatorDataBytes(nsTArray<uint8_t>& aAuthenticatorData);
+  nsresult GetPublicKeyBytes(nsTArray<uint8_t>& aPublicKeyBytes);
+
   nsTArray<uint8_t> mAttestationObject;
   nsCOMPtr<nsIWebAuthnAttObj> mAttestationObjectParsed;
   JS::Heap<JSObject*> mAttestationObjectCachedObj;

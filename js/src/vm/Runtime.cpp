@@ -107,7 +107,6 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
       readPrincipals(nullptr),
       canAddPrivateElement(&DefaultHostEnsureCanAddPrivateElementCallback),
       warningReporter(nullptr),
-      selfHostedLazyScript(),
       geckoProfiler_(thisFromCtor()),
       trustedPrincipals_(nullptr),
       wrapObjectCallbacks(&DefaultWrapObjectCallbacks),
@@ -123,7 +122,6 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
       profilingScripts(false),
       scriptAndCountsVector(nullptr),
       watchtowerTestingLog(nullptr),
-      lcovOutput_(),
       jitRuntime_(nullptr),
       gc(thisFromCtor()),
       emptyString(nullptr),
@@ -151,12 +149,7 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
       stackFormat_(parentRuntime ? js::StackFormat::Default
                                  : js::StackFormat::SpiderMonkey),
       wasmInstances(mutexid::WasmRuntimeInstances),
-      moduleAsyncEvaluatingPostOrder(ASYNC_EVALUATING_POST_ORDER_INIT),
-      moduleResolveHook(),
-      moduleMetadataHook(),
-      moduleDynamicImportHook(),
-      scriptPrivateAddRefHook(),
-      scriptPrivateReleaseHook() {
+      moduleAsyncEvaluatingPostOrder(ASYNC_EVALUATING_POST_ORDER_INIT) {
   JS_COUNT_CTOR(JSRuntime);
   liveRuntimesCount++;
 
@@ -216,6 +209,11 @@ void JSRuntime::destroyRuntime() {
   MOZ_ASSERT(!JS::RuntimeHeapIsBusy());
   MOZ_ASSERT(childRuntimeCount == 0);
   MOZ_ASSERT(initialized_);
+
+  for (auto [f, data] : cleanupClosures.ref()) {
+    f(data);
+  }
+  cleanupClosures.ref().clear();
 
 #ifdef JS_HAS_INTL_API
   sharedIntlData.ref().destroyInstance();
@@ -470,6 +468,11 @@ void JSContext::requestInterrupt(InterruptReason reason) {
       fx.notify(FutexThread::NotifyForJSInterrupt);
     }
     fx.unlock();
+  }
+
+  if (reason == InterruptReason::CallbackUrgent ||
+      reason == InterruptReason::MajorGC ||
+      reason == InterruptReason::MinorGC) {
     wasm::InterruptRunningCode(this);
   }
 }
@@ -795,8 +798,8 @@ JS_PUBLIC_API void JS::DisableRecordingAllocations(JSContext* cx) {
   cx->runtime()->stopRecordingAllocations();
 }
 
-JS_PUBLIC_API void JS::shadow::RegisterWeakCache(
-    JSRuntime* rt, detail::WeakCacheBase* cachep) {
+JS_PUBLIC_API void js::gc::RegisterWeakCache(JSRuntime* rt,
+                                             gc::WeakCacheBase* cachep) {
   rt->registerWeakCache(cachep);
 }
 

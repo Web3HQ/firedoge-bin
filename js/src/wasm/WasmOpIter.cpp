@@ -282,6 +282,10 @@ OpKind wasm::Classify(OpBytes op) {
       return OpKind::Rethrow;
     case Op::Try:
       return OpKind::Try;
+    case Op::ThrowRef:
+      return OpKind::ThrowRef;
+    case Op::TryTable:
+      return OpKind::TryTable;
     case Op::MemorySize:
       return OpKind::MemorySize;
     case Op::MemoryGrow:
@@ -322,28 +326,29 @@ OpKind wasm::Classify(OpBytes op) {
         case GcOp::ArrayNewDefault:
           WASM_GC_OP(OpKind::ArrayNewDefault);
         case GcOp::ArrayNewData:
-        case GcOp::ArrayInitFromElemStaticV5:
-        case GcOp::ArrayNewElem:
           WASM_GC_OP(OpKind::ArrayNewData);
+        case GcOp::ArrayNewElem:
+          WASM_GC_OP(OpKind::ArrayNewElem);
+        case GcOp::ArrayInitData:
+          WASM_GC_OP(OpKind::ArrayInitData);
+        case GcOp::ArrayInitElem:
+          WASM_GC_OP(OpKind::ArrayInitElem);
         case GcOp::ArrayGet:
         case GcOp::ArrayGetS:
         case GcOp::ArrayGetU:
           WASM_GC_OP(OpKind::ArrayGet);
         case GcOp::ArraySet:
           WASM_GC_OP(OpKind::ArraySet);
-        case GcOp::ArrayLenWithTypeIndex:
         case GcOp::ArrayLen:
           WASM_GC_OP(OpKind::ArrayLen);
         case GcOp::ArrayCopy:
           WASM_GC_OP(OpKind::ArrayCopy);
-        case GcOp::I31New:
+        case GcOp::ArrayFill:
+          WASM_GC_OP(OpKind::ArrayFill);
+        case GcOp::RefI31:
         case GcOp::I31GetS:
         case GcOp::I31GetU:
           WASM_GC_OP(OpKind::Conversion);
-        case GcOp::RefTestV5:
-          WASM_GC_OP(OpKind::RefTestV5);
-        case GcOp::RefCastV5:
-          WASM_GC_OP(OpKind::RefCastV5);
         case GcOp::RefTest:
         case GcOp::RefTestNull:
           WASM_GC_OP(OpKind::RefTest);
@@ -353,21 +358,9 @@ OpKind wasm::Classify(OpBytes op) {
         case GcOp::BrOnCast:
         case GcOp::BrOnCastFail:
           WASM_GC_OP(OpKind::BrOnCast);
-        case GcOp::BrOnCastV5:
-        case GcOp::BrOnCastHeapV5:
-        case GcOp::BrOnCastHeapNullV5:
-          WASM_GC_OP(OpKind::BrOnCastV5);
-        case GcOp::BrOnCastFailV5:
-        case GcOp::BrOnCastFailHeapV5:
-        case GcOp::BrOnCastFailHeapNullV5:
-          WASM_GC_OP(OpKind::BrOnCastFailV5);
-        case GcOp::RefAsStructV5:
-          WASM_GC_OP(OpKind::Conversion);
-        case GcOp::BrOnNonStructV5:
-          WASM_GC_OP(OpKind::BrOnNonStructV5);
-        case GcOp::ExternInternalize:
+        case GcOp::AnyConvertExtern:
           WASM_GC_OP(OpKind::RefConversion);
-        case GcOp::ExternExternalize:
+        case GcOp::ExternConvertAny:
           WASM_GC_OP(OpKind::RefConversion);
       }
       break;
@@ -816,8 +809,8 @@ OpKind wasm::Classify(OpBytes op) {
           return OpKind::OldCallDirect;
         case MozOp::OldCallIndirect:
           return OpKind::OldCallIndirect;
-        case MozOp::Intrinsic:
-          return OpKind::Intrinsic;
+        case MozOp::CallBuiltinModuleFunc:
+          return OpKind::CallBuiltinModuleFunc;
       }
       break;
     }

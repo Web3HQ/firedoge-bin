@@ -70,7 +70,7 @@ add_task(async function clearURLBarAfterParentProcessURLInExistingTab() {
       },
       { capture: true, once: true }
     );
-    BrowserTestUtils.loadURIString(newTabBrowser, "about:preferences");
+    BrowserTestUtils.startLoadingURIString(newTabBrowser, "about:preferences");
   });
   document.getElementById("home-button").click();
   await BrowserTestUtils.browserLoaded(
@@ -145,11 +145,11 @@ add_task(async function dontTemporarilyShowAboutHome() {
     false,
     "about:logo"
   );
-  BrowserTestUtils.loadURIString(currentBrowser, "about:logo");
+  BrowserTestUtils.startLoadingURIString(currentBrowser, "about:logo");
   await loadPromise;
 
   let homeButton = win.document.getElementById("home-button");
-  ok(BrowserTestUtils.is_visible(homeButton), "home-button is visible");
+  ok(BrowserTestUtils.isVisible(homeButton), "home-button is visible");
 
   let changeListener;
   let locationChangePromise = new Promise(resolve => {

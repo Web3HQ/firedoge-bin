@@ -15,7 +15,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   FirefoxProfileMigrator: "resource:///modules/FirefoxProfileMigrator.sys.mjs",
   MigrationUtils: "resource:///modules/MigrationUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
   ResponsivenessMonitor: "resource://gre/modules/ResponsivenessMonitor.sys.mjs",
 });
 
@@ -236,6 +235,13 @@ export class MigratorBase {
   }
 
   /**
+   * @returns {Promise<boolean|string>}
+   */
+  async canGetPermissions() {
+    return Promise.resolve(false);
+  }
+
+  /**
    * This method returns a number that is the bitwise OR of all resource
    * types that are available in aProfile. See MigrationUtils.resourceTypes
    * for each resource type.
@@ -431,7 +437,7 @@ export class MigratorBase {
 
         let itemSuccess = false;
         for (let res of itemResources) {
-          let completeDeferred = lazy.PromiseUtils.defer();
+          let completeDeferred = Promise.withResolvers();
           let resourceDone = function (aSuccess, details) {
             itemResources.delete(res);
             itemSuccess |= aSuccess;

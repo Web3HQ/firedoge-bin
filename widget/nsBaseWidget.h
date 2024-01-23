@@ -187,13 +187,14 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   bool IsFullyOccluded() const override { return mIsFullyOccluded; }
 
   void SetCursor(const Cursor&) override;
+  void SetCustomCursorAllowed(bool) override;
   void ClearCachedCursor() final {
     mCursor = {};
     mUpdateCursor = true;
   }
   void SetTransparencyMode(TransparencyMode aMode) override;
   TransparencyMode GetTransparencyMode() override;
-  void SetWindowShadowStyle(mozilla::StyleWindowShadow aStyle) override {}
+  void SetWindowShadowStyle(mozilla::WindowShadow) override {}
   void SetShowsToolbarButton(bool aShow) override {}
   void SetSupportsNativeFullscreen(bool aSupportsNativeFullscreen) override {}
   void SetWindowAnimationType(WindowAnimationType aType) override {}
@@ -694,6 +695,7 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   RefPtr<mozilla::SwipeTracker> mSwipeTracker;
   mozilla::UniquePtr<mozilla::SwipeEventQueue> mSwipeEventQueue;
   Cursor mCursor;
+  bool mCustomCursorAllowed = true;
   BorderStyle mBorderStyle;
   LayoutDeviceIntRect mBounds;
   bool mIsTiled;

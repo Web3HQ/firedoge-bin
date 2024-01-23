@@ -87,6 +87,8 @@ extern crate fluent_langneg_ffi;
 extern crate fluent;
 extern crate fluent_ffi;
 
+extern crate oxilangtag_ffi;
+
 extern crate rure;
 
 extern crate fluent_fallback;
@@ -168,4 +170,21 @@ pub unsafe extern "C" fn intentional_panic(message: *const c_char) {
 pub unsafe extern "C" fn debug_log(target: *const c_char, message: *const c_char) {
     // NOTE: The `info!` log macro is used here because we have the `release_max_level_info` feature set.
     info!(target: CStr::from_ptr(target).to_str().unwrap(), "{}", CStr::from_ptr(message).to_str().unwrap());
+}
+
+// Define extern "C" versions of these UniFFI functions, so that they can be called from C++
+#[no_mangle]
+pub extern "C" fn uniffi_rustbuffer_alloc(
+    size: i32,
+    call_status: &mut uniffi::RustCallStatus,
+) -> uniffi::RustBuffer {
+    uniffi::uniffi_rustbuffer_alloc(size, call_status)
+}
+
+#[no_mangle]
+pub extern "C" fn uniffi_rustbuffer_free(
+    buf: uniffi::RustBuffer,
+    call_status: &mut uniffi::RustCallStatus,
+) {
+    uniffi::uniffi_rustbuffer_free(buf, call_status)
 }

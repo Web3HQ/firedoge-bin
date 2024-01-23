@@ -54,11 +54,13 @@
 #include "mozilla/dom/StorageManager.h"
 #include "mozilla/dom/TCPSocket.h"
 #include "mozilla/dom/URLSearchParams.h"
+#include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/VRDisplay.h"
 #include "mozilla/dom/VRDisplayEvent.h"
 #include "mozilla/dom/VRServiceTest.h"
 #include "mozilla/dom/XRSystem.h"
 #include "mozilla/dom/workerinternals/RuntimeService.h"
+#include "mozilla/dom/WakeLockJS.h"
 #include "mozilla/Hal.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/StaticPtr.h"
@@ -159,6 +161,8 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAddonManager)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWebGpu)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocks)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mUserActivation)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWakeLock)
 
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWindow)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMediaKeySystemAccessManager)
@@ -245,7 +249,11 @@ void Navigator::Invalidate() {
     mLocks = nullptr;
   }
 
+  mUserActivation = nullptr;
+
   mSharePromise = nullptr;
+
+  mWakeLock = nullptr;
 }
 
 void Navigator::GetUserAgent(nsAString& aUserAgent, CallerType aCallerType,
@@ -561,7 +569,17 @@ bool Navigator::CookieEnabled() {
   return granted;
 }
 
-bool Navigator::OnLine() { return !NS_IsOffline(); }
+bool Navigator::OnLine() {
+  if (mWindow) {
+    // Check if this tab is set to be offline.
+    BrowsingContext* bc = mWindow->GetBrowsingContext();
+    if (bc && bc->Top()->GetForceOffline()) {
+      return false;
+    }
+  }
+  // Return the default browser value
+  return !NS_IsOffline();
+}
 
 void Navigator::GetBuildID(nsAString& aBuildID, CallerType aCallerType,
                            ErrorResult& aRv) const {
@@ -636,8 +654,14 @@ void Navigator::GetDoNotTrack(nsAString& aResult) {
 }
 
 bool Navigator::GlobalPrivacyControl() {
-  return StaticPrefs::privacy_globalprivacycontrol_enabled() &&
-         StaticPrefs::privacy_globalprivacycontrol_functionality_enabled();
+  bool gpcStatus = StaticPrefs::privacy_globalprivacycontrol_enabled();
+  if (!gpcStatus) {
+    nsCOMPtr<nsILoadContext> loadContext = do_GetInterface(mWindow);
+    gpcStatus = loadContext && loadContext->UsePrivateBrowsing() &&
+                StaticPrefs::privacy_globalprivacycontrol_pbmode_enabled();
+  }
+  return StaticPrefs::privacy_globalprivacycontrol_functionality_enabled() &&
+         gpcStatus;
 }
 
 uint64_t Navigator::HardwareConcurrency() {
@@ -656,10 +680,8 @@ namespace {
 
 class VibrateWindowListener : public nsIDOMEventListener {
  public:
-  VibrateWindowListener(nsPIDOMWindowInner* aWindow, Document* aDocument) {
-    mWindow = do_GetWeakReference(aWindow);
-    mDocument = do_GetWeakReference(aDocument);
-
+  VibrateWindowListener(nsPIDOMWindowInner* aWindow, Document* aDocument)
+      : mWindow(do_GetWeakReference(aWindow)), mDocument(aDocument) {
     constexpr auto visibilitychange = u"visibilitychange"_ns;
     aDocument->AddSystemEventListener(visibilitychange, this, /* listener */
                                       true,                   /* use capture */
@@ -675,7 +697,7 @@ class VibrateWindowListener : public nsIDOMEventListener {
   virtual ~VibrateWindowListener() = default;
 
   nsWeakPtr mWindow;
-  nsWeakPtr mDocument;
+  WeakPtr<Document> mDocument;
 };
 
 NS_IMPL_ISUPPORTS(VibrateWindowListener, nsIDOMEventListener)
@@ -707,7 +729,7 @@ VibrateWindowListener::HandleEvent(Event* aEvent) {
 }
 
 void VibrateWindowListener::RemoveListener() {
-  nsCOMPtr<EventTarget> target = do_QueryReferent(mDocument);
+  nsCOMPtr<Document> target(mDocument);
   if (!target) {
     return;
   }
@@ -2276,6 +2298,20 @@ AutoplayPolicy Navigator::GetAutoplayPolicy(HTMLMediaElement& aElement) {
 
 AutoplayPolicy Navigator::GetAutoplayPolicy(AudioContext& aContext) {
   return media::AutoplayPolicy::GetAutoplayPolicy(aContext);
+}
+
+already_AddRefed<dom::UserActivation> Navigator::UserActivation() {
+  if (!mUserActivation) {
+    mUserActivation = new dom::UserActivation(GetWindow());
+  }
+  return do_AddRef(mUserActivation);
+}
+
+dom::WakeLockJS* Navigator::WakeLock() {
+  if (!mWakeLock) {
+    mWakeLock = new WakeLockJS(mWindow);
+  }
+  return mWakeLock;
 }
 
 }  // namespace mozilla::dom

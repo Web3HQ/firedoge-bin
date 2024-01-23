@@ -86,7 +86,6 @@
 #include "mozilla/SnappyCompressOutputStream.h"
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPtr.h"
-#include "mozilla/TaskCategory.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Unused.h"
@@ -234,9 +233,6 @@ class nsPtrHashKey;
 #endif
 
 namespace mozilla {
-
-MOZ_TYPE_SPECIFIC_SCOPED_POINTER_TEMPLATE(ScopedPRFileDesc, PRFileDesc,
-                                          PR_Close);
 
 namespace dom::indexedDB {
 
@@ -590,10 +586,8 @@ Result<nsCOMPtr<nsIFileURL>, nsresult> GetDatabaseFileURL(
   // - from DeleteDatabaseOp::LoadPreviousVersion, since this might require
   //   temporarily exceeding the quota limit before the database can be
   //   deleted.
-  const auto directoryLockIdClause =
-      aDirectoryLockId >= 0
-          ? "&directoryLockId="_ns + IntToCString(aDirectoryLockId)
-          : EmptyCString();
+  const nsCString directoryLockIdClause =
+      "&directoryLockId="_ns + IntToCString(aDirectoryLockId);
 
   const auto keyClause = [&aMaybeKey] {
     nsAutoCString keyClause;
@@ -1318,7 +1312,7 @@ class ConnectionPool final {
   class ConnectionRunnable;
   class CloseConnectionRunnable;
   struct DatabaseInfo;
-  struct DatabasesCompleteCallback;
+  struct DatabaseCompleteCallback;
   class FinishCallbackWrapper;
   class IdleConnectionRunnable;
 
@@ -1464,6 +1458,7 @@ class ConnectionPool final {
   // This mutex guards mDatabases, see below.
   Mutex mDatabasesMutex MOZ_UNANNOTATED;
 
+  nsCOMPtr<nsIThreadPool> mIOTarget;
   nsTArray<IdleThreadInfo> mIdleThreads;
   nsTArray<IdleDatabaseInfo> mIdleDatabases;
   nsTArray<NotNull<DatabaseInfo*>> mDatabasesPerformingIdleMaintenance;
@@ -1478,7 +1473,7 @@ class ConnectionPool final {
   nsClassHashtable<nsUint64HashKey, TransactionInfo> mTransactions;
   nsTArray<NotNull<TransactionInfo*>> mQueuedTransactions;
 
-  nsTArray<UniquePtr<DatabasesCompleteCallback>> mCompleteCallbacks;
+  nsTArray<UniquePtr<DatabaseCompleteCallback>> mCompleteCallbacks;
 
   uint64_t mNextTransactionId;
   uint32_t mTotalThreadCount;
@@ -1509,8 +1504,8 @@ class ConnectionPool final {
     Unused << CloseDatabaseWhenIdleInternal(aDatabaseId);
   }
 
-  void WaitForDatabasesToComplete(nsTArray<nsCString>&& aDatabaseIds,
-                                  nsIRunnable* aCallback);
+  void WaitForDatabaseToComplete(const nsCString& aDatabaseId,
+                                 nsIRunnable* aCallback);
 
   void Shutdown();
 
@@ -1520,6 +1515,10 @@ class ConnectionPool final {
   ~ConnectionPool();
 
   static void IdleTimerCallback(nsITimer* aTimer, void* aClosure);
+
+  static uint32_t SerialNumber() { return ++sSerialNumber; }
+
+  static uint32_t sSerialNumber;
 
   void Cleanup();
 
@@ -1544,7 +1543,7 @@ class ConnectionPool final {
 
   void NoteClosedDatabase(DatabaseInfo& aDatabaseInfo);
 
-  bool MaybeFireCallback(DatabasesCompleteCallback* aCallback);
+  bool MaybeFireCallback(DatabaseCompleteCallback* aCallback);
 
   void PerformIdleDatabaseMaintenance(DatabaseInfo& aDatabaseInfo);
 
@@ -1613,14 +1612,14 @@ struct ConnectionPool::DatabaseInfo final {
   bool mClosing;
 
 #ifdef DEBUG
-  PRThread* mDEBUGConnectionThread;
+  nsISerialEventTarget* mDEBUGConnectionEventTarget;
 #endif
 
   DatabaseInfo(ConnectionPool* aConnectionPool, const nsACString& aDatabaseId);
 
   void AssertIsOnConnectionThread() const {
-    MOZ_ASSERT(mDEBUGConnectionThread);
-    MOZ_ASSERT(PR_GetCurrentThread() == mDEBUGConnectionThread);
+    MOZ_ASSERT(mDEBUGConnectionEventTarget);
+    MOZ_ASSERT(GetCurrentSerialEventTarget() == mDEBUGConnectionEventTarget);
   }
 
   uint64_t TotalTransactionCount() const {
@@ -1634,17 +1633,17 @@ struct ConnectionPool::DatabaseInfo final {
   DatabaseInfo& operator=(const DatabaseInfo&) = delete;
 };
 
-struct ConnectionPool::DatabasesCompleteCallback final {
-  friend class DefaultDelete<DatabasesCompleteCallback>;
+struct ConnectionPool::DatabaseCompleteCallback final {
+  friend class DefaultDelete<DatabaseCompleteCallback>;
 
-  nsTArray<nsCString> mDatabaseIds;
+  nsCString mDatabaseId;
   nsCOMPtr<nsIRunnable> mCallback;
 
-  DatabasesCompleteCallback(nsTArray<nsCString>&& aDatabaseIds,
-                            nsIRunnable* aCallback);
+  DatabaseCompleteCallback(const nsCString& aDatabaseIds,
+                           nsIRunnable* aCallback);
 
  private:
-  ~DatabasesCompleteCallback();
+  ~DatabaseCompleteCallback();
 };
 
 class NS_NO_VTABLE ConnectionPool::FinishCallback : public nsIRunnable {
@@ -1683,9 +1682,6 @@ class ConnectionPool::FinishCallbackWrapper final : public Runnable {
 };
 
 class ConnectionPool::ThreadRunnable final : public Runnable {
-  // Only touched on the background thread.
-  static uint32_t sNextSerialNumber;
-
   // Set at construction for logging.
   const uint32_t mSerialNumber;
 
@@ -1694,15 +1690,11 @@ class ConnectionPool::ThreadRunnable final : public Runnable {
   FlippedOnce<true> mContinueRunning;
 
  public:
-  ThreadRunnable();
+  explicit ThreadRunnable(uint32_t aSerialNumber);
 
   NS_INLINE_DECL_REFCOUNTING_INHERITED(ThreadRunnable, Runnable)
 
   uint32_t SerialNumber() const { return mSerialNumber; }
-
-  nsCString GetThreadName() const {
-    return nsPrintfCString("IndexedDB #%" PRIu32, mSerialNumber);
-  }
 
  private:
   ~ThreadRunnable() override;
@@ -2114,13 +2106,6 @@ class Factory final : public PBackgroundIDBFactoryParent,
 
   bool DeallocPBackgroundIDBFactoryRequestParent(
       PBackgroundIDBFactoryRequestParent* aActor) override;
-
-  PBackgroundIDBDatabaseParent* AllocPBackgroundIDBDatabaseParent(
-      const DatabaseSpec& aSpec,
-      NotNull<PBackgroundIDBFactoryRequestParent*> aRequest) override;
-
-  bool DeallocPBackgroundIDBDatabaseParent(
-      PBackgroundIDBDatabaseParent* aActor) override;
 };
 
 class WaitForTransactionsHelper final : public Runnable {
@@ -2217,6 +2202,13 @@ class Database final
       MOZ_ASSERT(mInvalidated);
     }
 #endif
+  }
+
+  NS_IMETHOD_(MozExternalRefCountType) AddRef() override {
+    return AtomicSafeRefCounted<Database>::AddRef();
+  }
+  NS_IMETHOD_(MozExternalRefCountType) Release() override {
+    return AtomicSafeRefCounted<Database>::Release();
   }
 
   MOZ_DECLARE_REFCOUNTED_TYPENAME(mozilla::dom::indexedDB::Database)
@@ -2943,7 +2935,6 @@ class VersionChangeTransaction final
 
 class FactoryOp
     : public DatabaseOperationBase,
-      public OpenDirectoryListener,
       public PBackgroundIDBFactoryRequestParent,
       public SupportsCheckedUnsafePtr<CheckIf<DiagnosticAssertEnabled>> {
  public:
@@ -3131,18 +3122,13 @@ class FactoryOp
   // Should only be called by Run().
   virtual void SendResults() = 0;
 
-  // We need to declare refcounting unconditionally, because
-  // OpenDirectoryListener has pure-virtual refcounting.
-  NS_DECL_ISUPPORTS_INHERITED
-
   // Common nsIRunnable implementation that subclasses may not override.
   NS_IMETHOD
   Run() final;
 
-  // OpenDirectoryListener overrides.
-  void DirectoryLockAcquired(DirectoryLock* aLock) override;
+  void DirectoryLockAcquired(DirectoryLock* aLock);
 
-  void DirectoryLockFailed() override;
+  void DirectoryLockFailed();
 
   // IPDL methods.
   void ActorDestroy(ActorDestroyReason aWhy) override;
@@ -4070,9 +4056,11 @@ constexpr IDBCursorType ToKeyOnlyType(const IDBCursorType aType) {
              aType == IDBCursorType::Index || aType == IDBCursorType::IndexKey);
   switch (aType) {
     case IDBCursorType::ObjectStore:
+      [[fallthrough]];
     case IDBCursorType::ObjectStoreKey:
       return IDBCursorType::ObjectStoreKey;
     case IDBCursorType::Index:
+      [[fallthrough]];
     case IDBCursorType::IndexKey:
       return IDBCursorType::IndexKey;
   }
@@ -4830,8 +4818,7 @@ class QuotaClient final : public mozilla::dom::quota::Client {
   void ProcessMaintenanceQueue();
 };
 
-class DeleteFilesRunnable final : public Runnable,
-                                  public OpenDirectoryListener {
+class DeleteFilesRunnable final : public Runnable {
   using DirectoryLock = mozilla::dom::quota::DirectoryLock;
 
   enum State {
@@ -4878,16 +4865,14 @@ class DeleteFilesRunnable final : public Runnable,
 
   void UnblockOpen();
 
-  NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_NSIRUNNABLE
 
-  // OpenDirectoryListener overrides.
-  virtual void DirectoryLockAcquired(DirectoryLock* aLock) override;
+  void DirectoryLockAcquired(DirectoryLock* aLock);
 
-  virtual void DirectoryLockFailed() override;
+  void DirectoryLockFailed();
 };
 
-class Maintenance final : public Runnable, public OpenDirectoryListener {
+class Maintenance final : public Runnable {
   struct DirectoryInfo final {
     InitializedOnce<const OriginMetadata> mOriginMetadata;
     InitializedOnce<const nsTArray<nsString>> mDatabasePaths;
@@ -5033,16 +5018,11 @@ class Maintenance final : public Runnable, public OpenDirectoryListener {
   // if any of above methods fails.
   void Finish();
 
-  // We need to declare refcounting unconditionally, because
-  // OpenDirectoryListener has pure-virtual refcounting.
-  NS_DECL_ISUPPORTS_INHERITED
-
   NS_DECL_NSIRUNNABLE
 
-  // OpenDirectoryListener overrides.
-  void DirectoryLockAcquired(DirectoryLock* aLock) override;
+  void DirectoryLockAcquired(DirectoryLock* aLock);
 
-  void DirectoryLockFailed() override;
+  void DirectoryLockFailed();
 };
 
 Maintenance::DirectoryInfo::DirectoryInfo(PersistenceType aPersistenceType,
@@ -5544,7 +5524,7 @@ nsresult DeleteFilesNoQuota(nsIFile* aDirectory, const nsAString& aFilename) {
   // don't update the size of origin. Adding this assertion for preventing from
   // misusing.
   DebugOnly<QuotaManager*> quotaManager = QuotaManager::Get();
-  MOZ_ASSERT(!quotaManager->IsTemporaryStorageInitialized());
+  MOZ_ASSERT(!quotaManager->IsTemporaryStorageInitializedInternal());
 
   QM_TRY_INSPECT(const auto& file, CloneFileAndAppend(*aDirectory, aFilename));
 
@@ -6425,8 +6405,7 @@ class DeserializeIndexValueHelper final : public Runnable {
     MonitorAutoLock lock(mMonitor);
 
     RefPtr<Runnable> self = this;
-    QM_TRY(MOZ_TO_RESULT(
-        SchedulerGroup::Dispatch(TaskCategory::Other, self.forget())));
+    QM_TRY(MOZ_TO_RESULT(SchedulerGroup::Dispatch(self.forget())));
 
     lock.Wait();
     return mStatus;
@@ -6524,6 +6503,22 @@ auto DeserializeIndexValueToUpdateInfos(
 bool IsSome(
     const Maybe<CachingDatabaseConnection::BorrowedStatement>& aMaybeStmt) {
   return aMaybeStmt.isSome();
+}
+
+already_AddRefed<nsIThreadPool> MakeConnectionIOTarget() {
+  nsCOMPtr<nsIThreadPool> threadPool = new nsThreadPool();
+
+  MOZ_ALWAYS_SUCCEEDS(threadPool->SetThreadLimit(kMaxConnectionThreadCount));
+
+  MOZ_ALWAYS_SUCCEEDS(
+      threadPool->SetIdleThreadLimit(kMaxIdleConnectionThreadCount));
+
+  MOZ_ALWAYS_SUCCEEDS(
+      threadPool->SetIdleThreadTimeout(kConnectionThreadIdleMS));
+
+  MOZ_ALWAYS_SUCCEEDS(threadPool->SetName("IndexedDB IO"_ns));
+
+  return threadPool.forget();
 }
 
 }  // namespace
@@ -7555,6 +7550,7 @@ DatabaseConnection::UpdateRefcountFunction::OnFunctionCall(
 
 ConnectionPool::ConnectionPool()
     : mDatabasesMutex("ConnectionPool::mDatabasesMutex"),
+      mIOTarget(MakeConnectionIOTarget()),
       mIdleTimer(NS_NewTimer()),
       mNextTransactionId(0),
       mTotalThreadCount(0) {
@@ -7656,7 +7652,7 @@ ConnectionPool::GetOrCreateConnection(const Database& aDatabase) {
     return dbInfo->mConnection;
   }
 
-  MOZ_ASSERT(!dbInfo->mDEBUGConnectionThread);
+  MOZ_ASSERT(!dbInfo->mDEBUGConnectionEventTarget);
 
   QM_TRY_UNWRAP(
       MovingNotNull<nsCOMPtr<mozIStorageConnection>> storageConnection,
@@ -7675,7 +7671,7 @@ ConnectionPool::GetOrCreateConnection(const Database& aDatabase) {
                  NS_ConvertUTF16toUTF8(aDatabase.FilePath()).get()));
 
 #ifdef DEBUG
-  dbInfo->mDEBUGConnectionThread = PR_GetCurrentThread();
+  dbInfo->mDEBUGConnectionEventTarget = GetCurrentSerialEventTarget();
 #endif
 
   return connection;
@@ -7813,31 +7809,21 @@ void ConnectionPool::Finish(uint64_t aTransactionId,
 #endif
 }
 
-void ConnectionPool::WaitForDatabasesToComplete(
-    nsTArray<nsCString>&& aDatabaseIds, nsIRunnable* aCallback) {
+void ConnectionPool::WaitForDatabaseToComplete(const nsCString& aDatabaseId,
+                                               nsIRunnable* aCallback) {
   AssertIsOnOwningThread();
-  MOZ_ASSERT(!aDatabaseIds.IsEmpty());
+  MOZ_ASSERT(!aDatabaseId.IsEmpty());
   MOZ_ASSERT(aCallback);
 
-  AUTO_PROFILER_LABEL("ConnectionPool::WaitForDatabasesToComplete", DOM);
+  AUTO_PROFILER_LABEL("ConnectionPool::WaitForDatabaseToComplete", DOM);
 
-  bool mayRunCallbackImmediately = true;
-
-  for (const nsACString& databaseId : aDatabaseIds) {
-    MOZ_ASSERT(!databaseId.IsEmpty());
-
-    if (CloseDatabaseWhenIdleInternal(databaseId)) {
-      mayRunCallbackImmediately = false;
-    }
-  }
-
-  if (mayRunCallbackImmediately) {
+  if (!CloseDatabaseWhenIdleInternal(aDatabaseId)) {
     Unused << aCallback->Run();
     return;
   }
 
-  mCompleteCallbacks.EmplaceBack(MakeUnique<DatabasesCompleteCallback>(
-      std::move(aDatabaseIds), aCallback));
+  mCompleteCallbacks.EmplaceBack(
+      MakeUnique<DatabaseCompleteCallback>(aDatabaseId, aCallback));
 }
 
 void ConnectionPool::Shutdown() {
@@ -8051,12 +8037,15 @@ bool ConnectionPool::ScheduleTransaction(TransactionInfo& aTransactionInfo,
       bool created = false;
 
       if (mTotalThreadCount < kMaxConnectionThreadCount) {
+        const uint32_t serialNumber = SerialNumber();
+        const nsCString serialName =
+            nsPrintfCString("IndexedDB #%" PRIu32, serialNumber);
         // This will set the thread up with the profiler.
-        RefPtr<ThreadRunnable> runnable = new ThreadRunnable();
+        RefPtr<ThreadRunnable> runnable = new ThreadRunnable(serialNumber);
 
         nsCOMPtr<nsIThread> newThread;
-        nsresult rv = NS_NewNamedThread(runnable->GetThreadName(),
-                                        getter_AddRefs(newThread), runnable);
+        nsresult rv =
+            NS_NewNamedThread(serialName, getter_AddRefs(newThread), runnable);
         if (NS_SUCCEEDED(rv)) {
           newThread->SetNameForWakeupTelemetry("IndexedDB (all)"_ns);
           MOZ_ASSERT(newThread);
@@ -8359,21 +8348,15 @@ void ConnectionPool::NoteClosedDatabase(DatabaseInfo& aDatabaseInfo) {
   }
 }
 
-bool ConnectionPool::MaybeFireCallback(DatabasesCompleteCallback* aCallback) {
+bool ConnectionPool::MaybeFireCallback(DatabaseCompleteCallback* aCallback) {
   AssertIsOnOwningThread();
   MOZ_ASSERT(aCallback);
-  MOZ_ASSERT(!aCallback->mDatabaseIds.IsEmpty());
+  MOZ_ASSERT(!aCallback->mDatabaseId.IsEmpty());
   MOZ_ASSERT(aCallback->mCallback);
 
   AUTO_PROFILER_LABEL("ConnectionPool::MaybeFireCallback", DOM);
 
-  if (std::any_of(aCallback->mDatabaseIds.begin(),
-                  aCallback->mDatabaseIds.end(),
-                  [&databases = mDatabases](const auto& databaseId) {
-                    MOZ_ASSERT(!databaseId.IsEmpty());
-
-                    return databases.Get(databaseId);
-                  })) {
+  if (mDatabases.Get(aCallback->mDatabaseId)) {
     return false;
   }
 
@@ -8513,7 +8496,7 @@ ConnectionPool::CloseConnectionRunnable::Run() {
       mDatabaseInfo.mConnection = nullptr;
 
 #ifdef DEBUG
-      mDatabaseInfo.mDEBUGConnectionThread = nullptr;
+      mDatabaseInfo.mDEBUGConnectionEventTarget = nullptr;
 #endif
     }
 
@@ -8539,7 +8522,7 @@ ConnectionPool::DatabaseInfo::DatabaseInfo(ConnectionPool* aConnectionPool,
       mClosing(false)
 #ifdef DEBUG
       ,
-      mDEBUGConnectionThread(nullptr)
+      mDEBUGConnectionEventTarget(nullptr)
 #endif
 {
   AssertIsOnBackgroundThread();
@@ -8561,20 +8544,20 @@ ConnectionPool::DatabaseInfo::~DatabaseInfo() {
   MOZ_COUNT_DTOR(ConnectionPool::DatabaseInfo);
 }
 
-ConnectionPool::DatabasesCompleteCallback::DatabasesCompleteCallback(
-    nsTArray<nsCString>&& aDatabaseIds, nsIRunnable* aCallback)
-    : mDatabaseIds(std::move(aDatabaseIds)), mCallback(aCallback) {
+ConnectionPool::DatabaseCompleteCallback::DatabaseCompleteCallback(
+    const nsCString& aDatabaseId, nsIRunnable* aCallback)
+    : mDatabaseId(aDatabaseId), mCallback(aCallback) {
   AssertIsOnBackgroundThread();
-  MOZ_ASSERT(!mDatabaseIds.IsEmpty());
+  MOZ_ASSERT(!mDatabaseId.IsEmpty());
   MOZ_ASSERT(aCallback);
 
-  MOZ_COUNT_CTOR(ConnectionPool::DatabasesCompleteCallback);
+  MOZ_COUNT_CTOR(ConnectionPool::DatabaseCompleteCallback);
 }
 
-ConnectionPool::DatabasesCompleteCallback::~DatabasesCompleteCallback() {
+ConnectionPool::DatabaseCompleteCallback::~DatabaseCompleteCallback() {
   AssertIsOnBackgroundThread();
 
-  MOZ_COUNT_DTOR(ConnectionPool::DatabasesCompleteCallback);
+  MOZ_COUNT_DTOR(ConnectionPool::DatabaseCompleteCallback);
 }
 
 ConnectionPool::FinishCallbackWrapper::FinishCallbackWrapper(
@@ -8631,11 +8614,11 @@ nsresult ConnectionPool::FinishCallbackWrapper::Run() {
   return NS_OK;
 }
 
-uint32_t ConnectionPool::ThreadRunnable::sNextSerialNumber = 0;
+uint32_t ConnectionPool::sSerialNumber = 0u;
 
-ConnectionPool::ThreadRunnable::ThreadRunnable()
+ConnectionPool::ThreadRunnable::ThreadRunnable(uint32_t aSerialNumber)
     : Runnable("dom::indexedDB::ConnectionPool::ThreadRunnable"),
-      mSerialNumber(++sNextSerialNumber) {
+      mSerialNumber(aSerialNumber) {
   AssertIsOnBackgroundThread();
 }
 
@@ -9118,23 +9101,6 @@ bool Factory::DeallocPBackgroundIDBFactoryRequestParent(
   return true;
 }
 
-PBackgroundIDBDatabaseParent* Factory::AllocPBackgroundIDBDatabaseParent(
-    const DatabaseSpec& aSpec,
-    NotNull<PBackgroundIDBFactoryRequestParent*> aRequest) {
-  MOZ_CRASH(
-      "PBackgroundIDBDatabaseParent actors should be constructed "
-      "manually!");
-}
-
-bool Factory::DeallocPBackgroundIDBDatabaseParent(
-    PBackgroundIDBDatabaseParent* aActor) {
-  AssertIsOnBackgroundThread();
-  MOZ_ASSERT(aActor);
-
-  RefPtr<Database> database = dont_AddRef(static_cast<Database*>(aActor));
-  return true;
-}
-
 /*******************************************************************************
  * WaitForTransactionsHelper
  ******************************************************************************/
@@ -9153,8 +9119,8 @@ void WaitForTransactionsHelper::MaybeWaitForTransactions() {
   if (connectionPool) {
     mState = State::WaitingForTransactions;
 
-    connectionPool->WaitForDatabasesToComplete(nsTArray<nsCString>{mDatabaseId},
-                                               this);
+    connectionPool->WaitForDatabaseToComplete(mDatabaseId, this);
+
     return;
   }
 
@@ -9327,10 +9293,6 @@ void Database::SetActorAlive() {
   MOZ_ASSERT(!mActorDestroyed);
 
   mActorWasAlive.Flip();
-
-  // This reference will be absorbed by IPDL and released when the actor is
-  // destroyed.
-  AddRef();
 }
 
 void Database::MapBlob(const IPCBlob& aIPCBlob,
@@ -11617,6 +11579,10 @@ DatabaseFileManager::DatabaseFileManager(
       mOriginMetadata(aOriginMetadata),
       mDatabaseName(aDatabaseName),
       mDatabaseID(aDatabaseID),
+      mCipherKeyManager(
+          aIsInPrivateBrowsingMode
+              ? new IndexedDBCipherKeyManager("IndexedDBCipherKeyManager")
+              : nullptr),
       mEnforcingQuota(aEnforcingQuota),
       mIsInPrivateBrowsingMode(aIsInPrivateBrowsingMode) {}
 
@@ -11974,6 +11940,16 @@ nsresult DatabaseFileManager::SyncDeleteFile(nsIFile& aFile,
   return NS_OK;
 }
 
+nsresult DatabaseFileManager::Invalidate() {
+  if (mCipherKeyManager) {
+    mCipherKeyManager->Invalidate();
+  }
+
+  QM_TRY(MOZ_TO_RESULT(FileInfoManager::Invalidate()));
+
+  return NS_OK;
+}
+
 /*******************************************************************************
  * QuotaClient
  ******************************************************************************/
@@ -12308,7 +12284,7 @@ nsresult QuotaClient::GetUsageForOriginInternal(
               ([&directory,
                 &subdirName](const nsresult) -> Result<Ok, nsresult> {
                 // XXX It seems if we really got here, we can fail the
-                // MOZ_ASSERT(!quotaManager->IsTemporaryStorageInitialized());
+                // MOZ_ASSERT(!quotaManager->IsTemporaryStorageInitializedInternal());
                 // assertion in DeleteFilesNoQuota.
                 QM_TRY(MOZ_TO_RESULT(DeleteFilesNoQuota(directory, subdirName)),
                        Err(NS_ERROR_UNEXPECTED));
@@ -12724,12 +12700,21 @@ void DeleteFilesRunnable::Open() {
     return;
   }
 
-  RefPtr<DirectoryLock> directoryLock = quotaManager->CreateDirectoryLock(
-      mFileManager->Type(), mFileManager->OriginMetadata(), quota::Client::IDB,
-      /* aExclusive */ false);
-
   mState = State_DirectoryOpenPending;
-  directoryLock->Acquire(this);
+
+  quotaManager
+      ->OpenClientDirectory(
+          {mFileManager->OriginMetadata(), quota::Client::IDB})
+      ->Then(
+          GetCurrentSerialEventTarget(), __func__,
+          [self = RefPtr(this)](
+              const ClientDirectoryLockPromise::ResolveOrRejectValue& aValue) {
+            if (aValue.IsResolve()) {
+              self->DirectoryLockAcquired(aValue.ResolveValue());
+            } else {
+              self->DirectoryLockFailed();
+            }
+          });
 }
 
 void DeleteFilesRunnable::DoDatabaseWork() {
@@ -12765,8 +12750,6 @@ void DeleteFilesRunnable::UnblockOpen() {
 
   mState = State_Completed;
 }
-
-NS_IMPL_ISUPPORTS_INHERITED0(DeleteFilesRunnable, Runnable)
 
 NS_IMETHODIMP
 DeleteFilesRunnable::Run() {
@@ -12941,21 +12924,28 @@ nsresult Maintenance::OpenDirectory() {
     return NS_ERROR_ABORT;
   }
 
-  // Get a shared lock for <profile>/storage/*/*/idb
+  QuotaManager* quotaManager = QuotaManager::Get();
+  MOZ_ASSERT(quotaManager);
 
-  mPendingDirectoryLock = QuotaManager::Get()->CreateDirectoryLockInternal(
-      Nullable<PersistenceType>(), OriginScope::FromNull(),
-      Nullable<Client::Type>(Client::IDB),
-      /* aExclusive */ false);
+  // Get a shared lock for <profile>/storage/*/*/idb
 
   mState = State::DirectoryOpenPending;
 
-  {
-    // Pin the directory lock, because Acquire might clear mPendingDirectoryLock
-    // during the Acquire call.
-    RefPtr pinnedDirectoryLock = mPendingDirectoryLock;
-    pinnedDirectoryLock->Acquire(this);
-  }
+  quotaManager
+      ->OpenStorageDirectory(
+          Nullable<PersistenceType>(), OriginScope::FromNull(),
+          Nullable<Client::Type>(Client::IDB), /* aExclusive */ false,
+          SomeRef(mPendingDirectoryLock))
+      ->Then(GetCurrentSerialEventTarget(), __func__,
+             [self = RefPtr(this)](
+                 const UniversalDirectoryLockPromise::ResolveOrRejectValue&
+                     aValue) {
+               if (aValue.IsResolve()) {
+                 self->DirectoryLockAcquired(aValue.ResolveValue());
+               } else {
+                 self->DirectoryLockFailed();
+               }
+             });
 
   return NS_OK;
 }
@@ -13001,8 +12991,6 @@ nsresult Maintenance::DirectoryWork() {
   QuotaManager* const quotaManager = QuotaManager::Get();
   MOZ_ASSERT(quotaManager);
 
-  QM_TRY(MOZ_TO_RESULT(quotaManager->EnsureStorageIsInitialized()));
-
   // Since idle maintenance may occur before temporary storage is initialized,
   // make sure it's initialized here (all non-persistent origins need to be
   // cleaned up and quota info needs to be loaded for them).
@@ -13011,7 +12999,8 @@ nsresult Maintenance::DirectoryWork() {
   // repository can still
   // be processed.
   const bool initTemporaryStorageFailed = [&quotaManager] {
-    QM_TRY(MOZ_TO_RESULT(quotaManager->EnsureTemporaryStorageIsInitialized()),
+    QM_TRY(MOZ_TO_RESULT(
+               quotaManager->EnsureTemporaryStorageIsInitializedInternal()),
            true);
     return false;
   }();
@@ -13135,7 +13124,7 @@ nsresult Maintenance::DirectoryWork() {
                 // We have to check that all persistent origins are cleaned up,
                 // but there's no way to do that by one call, we need to
                 // initialize (and possibly clean up) them one by one
-                // (EnsureTemporaryStorageIsInitialized cleans up only
+                // (EnsureTemporaryStorageIsInitializedInternal cleans up only
                 // non-persistent origins).
 
                 QM_TRY_UNWRAP(
@@ -13353,8 +13342,6 @@ void Maintenance::Finish() {
 
   mState = State::Complete;
 }
-
-NS_IMPL_ISUPPORTS_INHERITED0(Maintenance, Runnable)
 
 NS_IMETHODIMP
 Maintenance::Run() {
@@ -14186,10 +14173,14 @@ nsresult DatabaseOperationBase::DeleteObjectStoreDataTableRowsWithIndexes(
 
   const bool singleRowOnly = aKeyRange.isSome() && aKeyRange.ref().isOnly();
 
+  const auto keyRangeClause =
+      MaybeGetBindingClauseForKeyRange(aKeyRange, kColumnNameKey);
+
   Key objectStoreKey;
   QM_TRY_INSPECT(
       const auto& selectStmt,
-      ([singleRowOnly, &aConnection, &objectStoreKey, &aKeyRange]()
+      ([singleRowOnly, &aConnection, &objectStoreKey, &aKeyRange,
+        &keyRangeClause]()
            -> Result<CachingDatabaseConnection::BorrowedStatement, nsresult> {
         if (singleRowOnly) {
           QM_TRY_UNWRAP(auto selectStmt,
@@ -14207,9 +14198,6 @@ nsresult DatabaseOperationBase::DeleteObjectStoreDataTableRowsWithIndexes(
 
           return selectStmt;
         }
-
-        const auto keyRangeClause =
-            MaybeGetBindingClauseForKeyRange(aKeyRange, kColumnNameKey);
 
         QM_TRY_UNWRAP(
             auto selectStmt,
@@ -14233,15 +14221,9 @@ nsresult DatabaseOperationBase::DeleteObjectStoreDataTableRowsWithIndexes(
 
   QM_TRY(CollectWhileHasResult(
       *selectStmt,
-      [singleRowOnly, aObjectStoreId, &objectStoreKey, &aConnection,
-       &resultCountDEBUG, indexValues = IndexDataValuesAutoArray{},
-       deleteStmt = DatabaseConnection::LazyStatement{
-           *aConnection,
-           "DELETE FROM object_data "
-           "WHERE object_store_id = :"_ns +
-               kStmtParamNameObjectStoreId + " AND key = :"_ns +
-               kStmtParamNameKey +
-               ";"_ns}](auto& selectStmt) mutable -> Result<Ok, nsresult> {
+      [singleRowOnly, &objectStoreKey, &aConnection, &resultCountDEBUG,
+       indexValues = IndexDataValuesAutoArray{}](
+          auto& selectStmt) mutable -> Result<Ok, nsresult> {
         if (!singleRowOnly) {
           QM_TRY(
               MOZ_TO_RESULT(objectStoreKey.SetFromStatement(&selectStmt, 1)));
@@ -14254,20 +14236,28 @@ nsresult DatabaseOperationBase::DeleteObjectStoreDataTableRowsWithIndexes(
         QM_TRY(MOZ_TO_RESULT(DeleteIndexDataTableRows(
             aConnection, objectStoreKey, indexValues)));
 
-        QM_TRY_INSPECT(const auto& borrowedDeleteStmt, deleteStmt.Borrow());
-
-        QM_TRY(MOZ_TO_RESULT(borrowedDeleteStmt->BindInt64ByName(
-            kStmtParamNameObjectStoreId, aObjectStoreId)));
-        QM_TRY(MOZ_TO_RESULT(objectStoreKey.BindToStatement(
-            &*borrowedDeleteStmt, kStmtParamNameKey)));
-        QM_TRY(MOZ_TO_RESULT(borrowedDeleteStmt->Execute()));
-
         resultCountDEBUG++;
 
         return Ok{};
       }));
 
   MOZ_ASSERT_IF(singleRowOnly, resultCountDEBUG <= 1);
+
+  QM_TRY_UNWRAP(
+      auto deleteManyStmt,
+      aConnection->BorrowCachedStatement(
+          "DELETE FROM object_data "_ns + "WHERE object_store_id = :"_ns +
+          kStmtParamNameObjectStoreId + keyRangeClause + ";"_ns));
+
+  QM_TRY(MOZ_TO_RESULT(deleteManyStmt->BindInt64ByName(
+      kStmtParamNameObjectStoreId, aObjectStoreId)));
+
+  if (aKeyRange.isSome()) {
+    QM_TRY(MOZ_TO_RESULT(
+        BindKeyRangeToStatement(aKeyRange.ref(), &*deleteManyStmt)));
+  }
+
+  QM_TRY(MOZ_TO_RESULT(deleteManyStmt->Execute()));
 
   return NS_OK;
 }
@@ -14953,13 +14943,19 @@ nsresult FactoryOp::FinishOpen() {
       }()));
 
   // Open directory
-  RefPtr<DirectoryLock> directoryLock = quotaManager->CreateDirectoryLock(
-      persistenceType, mOriginMetadata, Client::IDB,
-      /* aExclusive */ false);
-
   mState = State::DirectoryOpenPending;
 
-  directoryLock->Acquire(this);
+  quotaManager->OpenClientDirectory({mOriginMetadata, Client::IDB})
+      ->Then(
+          GetCurrentSerialEventTarget(), __func__,
+          [self = RefPtr(this)](
+              const ClientDirectoryLockPromise::ResolveOrRejectValue& aValue) {
+            if (aValue.IsResolve()) {
+              self->DirectoryLockAcquired(aValue.ResolveValue());
+            } else {
+              self->DirectoryLockFailed();
+            }
+          });
 
   return NS_OK;
 }
@@ -14974,8 +14970,6 @@ bool FactoryOp::MustWaitFor(const FactoryOp& aExistingOp) {
          aExistingOp.mOriginMetadata.mOrigin == mOriginMetadata.mOrigin &&
          aExistingOp.mDatabaseId == mDatabaseId;
 }
-
-NS_IMPL_ISUPPORTS_INHERITED0(FactoryOp, DatabaseOperationBase)
 
 // Run() assumes that the caller holds a strong reference to the object that
 // can't be cleared while Run() is being executed.
@@ -15136,8 +15130,6 @@ nsresult OpenDatabaseOp::DoDatabaseWork() {
   QuotaManager* const quotaManager = QuotaManager::Get();
   MOZ_ASSERT(quotaManager);
 
-  QM_TRY(MOZ_TO_RESULT(quotaManager->EnsureStorageIsInitialized()));
-
   QM_TRY_INSPECT(
       const auto& dbDirectory,
       ([persistenceType, &quotaManager, this]()
@@ -15147,8 +15139,8 @@ nsresult OpenDatabaseOp::DoDatabaseWork() {
               mOriginMetadata));
         }
 
-        QM_TRY(
-            MOZ_TO_RESULT(quotaManager->EnsureTemporaryStorageIsInitialized()));
+        QM_TRY(MOZ_TO_RESULT(
+            quotaManager->EnsureTemporaryStorageIsInitializedInternal()));
         QM_TRY_RETURN(quotaManager->EnsureTemporaryOriginIsInitialized(
             persistenceType, mOriginMetadata));
       }()
@@ -15972,7 +15964,6 @@ nsresult OpenDatabaseOp::EnsureDatabaseActorIsAlive() {
 
   QM_TRY_INSPECT(const auto& spec, MetadataToSpec());
 
-  // Transfer ownership to IPDL.
   mDatabase->SetActorAlive();
 
   if (!factory->SendPBackgroundIDBDatabaseConstructor(

@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-import {ServerResponse} from 'http';
+import type {ServerResponse} from 'http';
 
 import expect from 'expect';
-import {Frame, TimeoutError} from 'puppeteer';
-import {HTTPRequest} from 'puppeteer-core/internal/api/HTTPRequest.js';
+import {type Frame, TimeoutError} from 'puppeteer';
+import type {HTTPRequest} from 'puppeteer-core/internal/api/HTTPRequest.js';
+import type {HTTPResponse} from 'puppeteer-core/internal/api/HTTPResponse.js';
 import {Deferred} from 'puppeteer-core/internal/util/Deferred.js';
 
 import {getTestState, setupTestBrowserHooks} from './mocha-utils.js';
@@ -127,6 +128,17 @@ describe('navigation', function () {
       const response = await page.goto(server.EMPTY_PAGE, {
         waitUntil: 'networkidle0',
       });
+      expect(response!.status()).toBe(200);
+    });
+    it('should navigate to page with iframe and networkidle0', async () => {
+      const {page, server} = await getTestState();
+
+      const response = await page.goto(
+        server.PREFIX + '/frames/one-frame.html',
+        {
+          waitUntil: 'networkidle0',
+        }
+      );
       expect(response!.status()).toBe(200);
     });
     it('should navigate to empty page with networkidle2', async () => {
@@ -277,7 +289,7 @@ describe('navigation', function () {
       let error!: Error;
       let loaded = false;
       page.once('load', () => {
-        return (loaded = true);
+        loaded = true;
       });
       await page
         .goto(server.PREFIX + '/grid.html', {timeout: 0, waitUntil: ['load']})
@@ -704,7 +716,6 @@ describe('navigation', function () {
 
       server.setRoute('/frames/style.css', () => {});
       let frame: Frame | undefined;
-      let timeout: NodeJS.Timeout | undefined;
       const eventPromises = Deferred.race([
         Promise.all([
           waitEvent(page, 'frameattached').then(_frame => {
@@ -724,7 +735,6 @@ describe('navigation', function () {
       );
       try {
         await eventPromises;
-        clearTimeout(timeout);
       } catch (error) {
         navigationPromise.catch(() => {});
         throw error;
@@ -807,6 +817,7 @@ describe('navigation', function () {
       const error = await navigationPromise;
       expect(error.message).atLeastOneToContain([
         'Navigating frame was detached',
+        'Frame detached',
         'Error: NS_BINDING_ABORTED',
         'net::ERR_ABORTED',
       ]);
@@ -828,18 +839,27 @@ describe('navigation', function () {
       server.setRoute('/one-style.html', (_req, res) => {
         return serverResponses.push(res);
       });
-      const navigations = [];
+      const navigations: Array<Promise<HTTPResponse | null>> = [];
       for (let i = 0; i < 3; ++i) {
         navigations.push(frames[i]!.goto(server.PREFIX + '/one-style.html'));
         await server.waitForRequest('/one-style.html');
       }
       // Respond from server out-of-order.
       const serverResponseTexts = ['AAA', 'BBB', 'CCC'];
-      for (const i of [1, 2, 0]) {
-        serverResponses[i]!.end(serverResponseTexts[i]);
-        const response = (await navigations[i])!;
-        expect(response.frame()).toBe(frames[i]);
-        expect(await response.text()).toBe(serverResponseTexts[i]);
+      try {
+        for (const i of [1, 2, 0]) {
+          const response = await getResponse(i);
+          expect(response.frame()).toBe(frames[i]);
+          expect(await response.text()).toBe(serverResponseTexts[i]);
+        }
+      } catch (error) {
+        await Promise.all([getResponse(0), getResponse(1), getResponse(2)]);
+        throw error;
+      }
+
+      async function getResponse(index: number) {
+        serverResponses[index]!.end(serverResponseTexts[index]);
+        return (await navigations[index])!;
       }
     });
   });

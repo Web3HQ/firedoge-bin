@@ -266,7 +266,7 @@ class ResponsiveUI {
     // gracefully, but that shouldn't be a problem since the tab will go away.
     // So, skip any waiting when we're about to close the tab.
     const isTabDestroyed =
-      !this.tab.linkedBrowser || this.responsiveFront.isDestroyed();
+      !this.tab.linkedBrowser || this.responsiveFront?.isDestroyed();
     const isWindowClosing = options?.reason === "unload" || isTabDestroyed;
     const isTabContentDestroying =
       isWindowClosing || options?.reason === "TabClose";
@@ -858,7 +858,7 @@ class ResponsiveUI {
       await this.networkFront.clearNetworkThrottling();
       return false;
     }
-    const data = throttlingProfiles.find(({ id }) => id == profile);
+    const data = throttlingProfiles.profiles.find(({ id }) => id == profile);
     const { download, upload, latency } = data;
     await this.networkFront.setNetworkThrottling({
       downloadThroughput: download,

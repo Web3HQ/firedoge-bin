@@ -8,7 +8,7 @@
 # documentation and how to modify this file.
 repo: mozilla-central
 created_at: '2021-10-14T12:50:40.073465'
-updated_at: '2023-09-05T11:25:41.469505'
+updated_at: '2024-01-16T17:14:53.714398'
 export:
   path: ./docs/mots/index.rst
   format: rst
@@ -208,6 +208,10 @@ people:
     bmo_id: 625428
     name: Chris Martin
     nick: cmartin
+  - &cmkm
+    bmo_id: 693338
+    name: Cieara Meador
+    nick: cmkm
   - &cpeterson
     bmo_id: 430528
     name: Chris Peterson
@@ -288,6 +292,10 @@ people:
     bmo_id: 1689
     name: Daniel Veditz
     nick: dveditz
+  - &dwalker
+    bmo_id: 713270
+    name: DJ
+    nick: dwalker
   - &ed
     bmo_id: 629148
     name: Ed Lee
@@ -324,10 +332,13 @@ people:
     bmo_id: 5842
     name: Masatoshi Kimura
     nick: emk
-  - &enndeakin
-    bmo_id: 6102
+  - bmo_id: 6102
     name: Neil Deakin
     nick: enndeakin
+  - &epavlov
+    bmo_id: 675384
+    name: Evgeny Pavlov
+    nick: epavlov
   - &erahm
     bmo_id: 496127
     name: Eric Rahm
@@ -363,6 +374,10 @@ people:
     bmo_id: 417288
     name: Nathan Froyd
     nick: froydnj
+  - &gabriel
+    bmo_id: 697145
+    name: Gabriel Bustamante
+    nick: gabriel
   - &gbrown
     bmo_id: 411471
     name: Geoff Brown
@@ -382,7 +397,8 @@ people:
   - bmo_id: 420446
     name: Gregory Szorc
     nick: gps
-  - bmo_id: 561658
+  - &gregtatum
+    bmo_id: 561658
     name: Greg Tatum
     nick: gregtatum
   - &groovecoder
@@ -397,6 +413,10 @@ people:
     bmo_id: 448747
     name: Gabriele Svelto
     nick: gsvelto
+  - &gw
+    bmo_id: 504871
+    name: Glenn Watson
+    nick: gw
   - &haik
     bmo_id: 558190
     name: Haik Aftandilian
@@ -409,6 +429,10 @@ people:
     bmo_id: 131213
     name: Hiroyuki Ikezoe
     nick: hiro
+  - &hjones
+    bmo_id: 692246
+    name: Hanna Jones
+    nick: hjones
   - &hneiva
     bmo_id: 693369
     name: Heitor Neiva
@@ -445,10 +469,6 @@ people:
     bmo_id: 8340
     name: Jan Varga
     nick: janv
-  - &jaws
-    bmo_id: 409754
-    name: Jared Wein
-    nick: jaws
   - &jchen
     bmo_id: 281508
     name: ''
@@ -545,10 +565,18 @@ people:
     bmo_id: 646284
     name: Jens Stutte
     nick: jstutte
+  - &jsudiaman
+    bmo_id: 713253
+    name: Jonathan Sudiaman
+    nick: jsudiaman
   - &jteow
     bmo_id: 701257
     name: James Teow
     nick: jteow
+  - &jules
+    bmo_id: 699161
+    name: Jules Simplicio
+    nick: jules
   - &jwatt
     bmo_id: 32767
     name: Jonathan Watt
@@ -620,6 +648,10 @@ people:
     bmo_id: 649193
     name: Lougenia Bailey
     nick: lougenia
+  - &lsalzman
+    bmo_id: 536714
+    name: Lee Salzman
+    nick: lsalzman
   - &luke
     bmo_id: 347312
     name: Luke Wagner
@@ -692,6 +724,10 @@ people:
     bmo_id: 547538
     name: Miko Mynttinen
     nick: mikokm
+  - &mixedpuppy
+    bmo_id: 443354
+    name: Shane Caraveo
+    nick: mixedpuppy
   - &mkaply
     bmo_id: 7313
     name: Mike Kaply
@@ -764,6 +800,10 @@ people:
     bmo_id: 499343
     name: ''
     nick: nohlmeier
+  - &nordzilla
+    bmo_id: 651777
+    name: Erik Nordin
+    nick: nordzilla
   - &nrishel
     bmo_id: 697005
     name: Nick Rishel
@@ -852,10 +892,6 @@ people:
     bmo_id: 704132
     name: Alexandra Borovova
     nick: Sasha
-  - &scaraveo
-    bmo_id: 443354
-    name: ''
-    nick: scaraveo
   - &sclements
     bmo_id: 603840
     name: Sarah Clements
@@ -923,10 +959,6 @@ people:
     bmo_id: 164722
     name: Tantek Çelik
     nick: tantek
-  - &tanvi
-    bmo_id: 430652
-    name: Tanvi Vyas
-    nick: tanvi
   - &tcampbell
     bmo_id: 586681
     name: Ted Campbell
@@ -1130,16 +1162,17 @@ modules:
         - Ehsan Akhgari
         - Erica Wright
         - Gary Chen
+        - *baku
+        - *johannh
       group: dev-platform
       components:
         - 'Core::Privacy: Anti-Tracking'
     owners:
       - *timhuang
     peers:
-      - *baku
+      - *bvandersloot
       - *dimi
       - *pbz
-      - *johannh
     machine_name: core_antitracking
 
   - name: 'Core: APZ (Graphics submodule)'
@@ -1198,6 +1231,7 @@ modules:
     peers:
       - *hneiva
       - *bhearsum
+      - *gabriel
     machine_name: core_build_and_release_tools
 
   - name: 'Core: Build Config'
@@ -1303,16 +1337,17 @@ modules:
         - Jonathan Kingston
         - Thomas Nguyen
         - François Marier
+        - Tanvi Vyas
+        - Andrea Marchesini
       group: dev-security
       components:
         - 'Core::DOM: Security'
     owners:
       - *ckerschb
     peers:
-      - *tanvi
       - *dveditz
-      - *baku
       - *freddy
+      - *tschuster
     machine_name: core_content_security
 
   - name: 'Core: Cookies'
@@ -1467,7 +1502,7 @@ modules:
         - Kyle Machulis
       group: dev-platform
       components:
-        - Core::Document Navigation
+        - Core::DOM: Navigation
     owners:
       - *smaug
       - *nika
@@ -1723,6 +1758,9 @@ modules:
       - *sotaro
       - *jnicol
       - *rhunt
+      - *gw
+      - *lsalzman
+      - *aosmond
     machine_name: core_graphics
 
   - name: 'Core: HAL'
@@ -2327,14 +2365,15 @@ modules:
         - Christian Biesinger
         - Shawn Wilsher
         - Honza Bambas
+        - *baku
+        - *johannh
       group: dev-platform
       components:
         - 'Core :: Permission Manager'
+      review_group: permissions-reviewers
     owners:
       - *timhuang
     peers:
-      - *baku
-      - *johannh
       - *pbz
     machine_name: core_permissions
 
@@ -2768,6 +2807,10 @@ modules:
       - third_party/rust/wgpu-core/**/*
       - third_party/rust/wgpu-hal/**/*
       - third_party/rust/wgpu-types/**/*
+      - testing/web-platform/tests/webgpu/**/*
+      - testing/web-platform/meta/webgpu/**/*
+      - testing/web-platform/mozilla/tests/webgpu/**/*
+      - testing/web-platform/mozilla/meta/webgpu/**/*
     meta:
       group: dev-platform
       url: https://wiki.mozilla.org/Platform/GFX/WebGPU
@@ -3136,6 +3179,7 @@ modules:
         - Georg Fritzsche
         - Felipe Gomes
         - Tim Guan-tin Chien
+        - Johann Hofmann
         - KM Lee Rex
         - Fred Lin
         - Ray Lin
@@ -3144,13 +3188,14 @@ modules:
         - Mark Mentovai
         - Ted Mielczarek
         - Brian Nicholson
+        - Matthew Noorenberghe
         - Neil Rashbrook
         - Asaf Romano
         - Marina Samuel
         - J Ryan Stinnett
         - Gregory Szorc
         - Tim Taubert
-        - Johann Hofmann
+        - Jared Wein
       group: firefox-dev
       components:
         - Firefox
@@ -3160,9 +3205,9 @@ modules:
       - *Gijs
     peers:
       - *dao
-      - *jaws
       - *mak
-      - *MattN
+      - *mconley
+      - *mhowell
     submodules:
 
       - name: Add-ons Manager
@@ -3175,7 +3220,7 @@ modules:
             - Andrew Swan
             - Kris Maglione
         owners:
-          - *scaraveo
+          - *mixedpuppy
           - *rpl
         peers:
           - *rpl
@@ -3193,7 +3238,7 @@ modules:
             - Robert Strong
             - Andrew Swan
         owners:
-          - *scaraveo
+          - *mixedpuppy
           - *mstriemer
         peers:
           - *rpl
@@ -3257,18 +3302,25 @@ modules:
           - *sfoster
           - *amy
           - *emilio
+          - *jules
         machine_name: desktop_theme
 
       - name: Desktop UI
         description: The main browser UI except where covered by more specific submodules.
         includes:
           - browser/base/content/**/*
-        meta: {}
+        meta:
+          owners_emeritus:
+            - Jared Wein
+          peers_emeritus:
+            - Florian Quèze
         owners:
-          - *jaws
-        peers:
           - *mconley
-          - *florian
+        peers:
+          - *jhirsch
+          - *sclements
+          - *dwalker
+          - *cmkm
         machine_name: desktop_ui
 
       - name: Download Manager
@@ -3329,6 +3381,7 @@ modules:
         peers:
           - *sfoster
           - *kcochrane
+          - *jsudiaman
         meta:
       - name: Form Autofill
         description: Form detection and autocomplete.
@@ -3352,12 +3405,13 @@ modules:
         meta:
           components:
             - Firefox::Messaging System
+          peers_emeritus:
+            - *k88hudson
         owners:
           - *pdahiya
         peers:
           - *nanj
           - *Mardak
-          - *k88hudson
         machine_name: inproduct_messaging
 
       - name: Launcher Process
@@ -3395,11 +3449,12 @@ modules:
         meta:
           components:
             - Firefox::New Tab Page
+          peers_emeritus:
+            - *k88hudson
+            - *aoprea
         owners:
           - *ed
         peers:
-          - *k88hudson
-          - *aoprea
           - *thecount
         machine_name: new_tab_page
 
@@ -3427,6 +3482,7 @@ modules:
           peers_emeritus:
             - Bianca Danforth
             - Severin Rudie
+            - Jared Wein
           url: https://wiki.mozilla.org/Toolkit:Password_Manager
           components:
             - Toolkit::Password Manager
@@ -3436,7 +3492,6 @@ modules:
         owners:
           - *serg
         peers:
-          - *jaws
           - *tgiles
           - *dimi
           - *sfoster
@@ -3524,6 +3579,7 @@ modules:
           peers_emeritus:
             - Erica Wright
             - Nihanth Subramanya
+            - *prathiksha
           owners_emeritus:
             - Johann Hofmann
           components:
@@ -3533,8 +3589,6 @@ modules:
             - Firefox::Site Permissions
         owners:
           - *pbz
-        peers:
-          - *prathiksha
         machine_name: security_and_privacy_ui
 
       - name: Session Restore
@@ -3547,17 +3601,17 @@ modules:
             - Michael de Boer
             - Kashav Madan
             - *daleharvey
+            - *dao
           peers_emeritus:
             - Anny Gakhokidze
           components:
             - Firefox::Session Restore
         owners:
-          - *dao
-          - *farre
-        peers:
-          - *daleharvey
           - *sclements
           - *sfoster
+          - *farre
+        peers:
+          - *dao
         machine_name: session_restore
 
       - name: Settings UI
@@ -3567,14 +3621,15 @@ modules:
           - browser/themes/*/preferences
           - toolkit/mozapps/preferences
         meta:
+          owners_emeritus:
+            - Jared Wein
           peers_emeritus:
             - Tim Nguyen
         owners:
-          - *jaws
+          - *mossop
         peers:
           - *mstriemer
           - *Gijs
-          - *mossop
           - *mconley
         machine_name: settings_ui
 
@@ -4063,13 +4118,17 @@ modules:
       components:
         - Firefox
         - Toolkit
+      peers_emeritus:
+        - Matthew Noorenberghe
+        - Jared Wein
     owners:
       - *mossop
       - *Gijs
     peers:
-      - *jaws
+      - *dao
       - *mak
-      - *MattN
+      - *mconley
+      - *mhowell
     submodules:
 
       - name: Application Startup
@@ -4116,11 +4175,16 @@ modules:
         includes:
           - toolkit/content/widgets/**/*
         meta:
+          owners_emeritus:
+            - Neil Deakin
           peers_emeritus:
             - Andrew Swan
         owners:
-          - *enndeakin
+          - *mstriemer
         peers:
+          - *mak
+          - *tgiles
+          - *hjones
         machine_name: ui_widgets
 
       - name: Webextensions
@@ -4131,16 +4195,38 @@ modules:
         meta:
           peers_emeritus:
             - Andrew Swan
+            - Kris Maglione
         owners:
-          - *scaraveo
+          - *mixedpuppy
           - *zombie
         peers:
           - *rpl
-          - *kmag
           - *robwu
           - *willdurand
         machine_name: webextensions
     machine_name: toolkit
+  - machine_name: translation
+    name: Translation
+    description: Support for translation in Firefox, and the infrastructure to train
+      new translation language models.
+    includes:
+      - toolkit/components/translations/**/*
+      - toolkit/components/translation/**/*
+      - browser/components/translations/**/*
+    excludes: []
+    owners:
+      - *gregtatum
+    peers:
+      - *nordzilla
+      - *epavlov
+      - *marco
+    meta:
+      group: dev-platform
+      url: https://github.com/mozilla/firefox-translations-training https://github.com/mozilla/firefox-translations-models
+        https://github.com/mozilla/firefox-translations-evaluations https://github.com/mozilla/firefox-translations
+      components:
+        - Firefox::Translation
+      review_group: translations-reviewers
   - machine_name: url_classifier
     name: URL Classifier
     description: Database and list-based classification of URL resources, such as
@@ -4165,5 +4251,5 @@ modules:
         - Ryan Tilder
       group: dev-platform
 hashes:
-  config: d3802db3090939a68e067bb69977e7b9ec588ec6
-  export: f69b8f91dc83de42362f0f784a9f7cf927840253
+  config: fb060c17e3de2c36297486934de8c2bd6b42aaa3
+  export: ef436c78e9aaead2c41a6331db4800928d144df0

@@ -433,8 +433,9 @@ class MOZ_STACK_CLASS
 HTMLBRElement*
 HTMLEditor::HTMLWithContextInserter::GetInvisibleBRElementAtPoint(
     const EditorDOMPoint& aPointToInsert) const {
-  WSRunScanner wsRunScannerAtInsertionPoint(mHTMLEditor.ComputeEditingHost(),
-                                            aPointToInsert);
+  WSRunScanner wsRunScannerAtInsertionPoint(
+      mHTMLEditor.ComputeEditingHost(), aPointToInsert,
+      BlockInlineCheck::UseComputedDisplayStyle);
   if (wsRunScannerAtInsertionPoint.EndsByInvisibleBRElement()) {
     return wsRunScannerAtInsertionPoint.EndReasonBRElementPtr();
   }
@@ -451,6 +452,7 @@ HTMLEditor::HTMLWithContextInserter::GetNewCaretPointAfterInsertingHTML(
   if (!HTMLEditUtils::IsTable(aLastInsertedPoint.GetChild())) {
     containerContent = HTMLEditUtils::GetLastLeafContent(
         *aLastInsertedPoint.GetChild(), {LeafNodeType::OnlyEditableLeafNode},
+        BlockInlineCheck::Unused,
         aLastInsertedPoint.GetChild()->GetAsElementOrParentElement());
     if (containerContent) {
       Element* mostDistantInclusiveAncestorTableElement = nullptr;
@@ -494,13 +496,15 @@ HTMLEditor::HTMLWithContextInserter::GetNewCaretPointAfterInsertingHTML(
   // Make sure we don't end up with selection collapsed after an invisible
   // `<br>` element.
   Element* editingHost = mHTMLEditor.ComputeEditingHost();
-  WSRunScanner wsRunScannerAtCaret(editingHost, pointToPutCaret);
+  WSRunScanner wsRunScannerAtCaret(editingHost, pointToPutCaret,
+                                   BlockInlineCheck::UseComputedDisplayStyle);
   if (wsRunScannerAtCaret
           .ScanPreviousVisibleNodeOrBlockBoundaryFrom(pointToPutCaret)
           .ReachedInvisibleBRElement()) {
     WSRunScanner wsRunScannerAtStartReason(
         editingHost,
-        EditorDOMPoint(wsRunScannerAtCaret.GetStartReasonContent()));
+        EditorDOMPoint(wsRunScannerAtCaret.GetStartReasonContent()),
+        BlockInlineCheck::UseComputedDisplayStyle);
     WSScanResult backwardScanFromPointToCaretResult =
         wsRunScannerAtStartReason.ScanPreviousVisibleNodeOrBlockBoundaryFrom(
             pointToPutCaret);
@@ -884,7 +888,8 @@ HTMLEditor::HTMLWithContextInserter::InsertContents(
       pointToInsert.IsInContentNode()
           ? HTMLEditUtils::GetInclusiveAncestorElement(
                 *pointToInsert.ContainerAs<nsIContent>(),
-                HTMLEditUtils::ClosestBlockElement)
+                HTMLEditUtils::ClosestBlockElement,
+                BlockInlineCheck::UseComputedDisplayOutsideStyle)
           : nullptr;
 
   EditorDOMPoint lastInsertedPoint;
@@ -986,7 +991,9 @@ HTMLEditor::HTMLWithContextInserter::InsertContents(
           //     is not proper child of the parent element, or current node
           //     is a list element.
           if (HTMLEditUtils::IsListItem(pointToInsert.GetContainer()) &&
-              HTMLEditUtils::IsEmptyNode(*pointToInsert.GetContainer())) {
+              HTMLEditUtils::IsEmptyNode(
+                  *pointToInsert.GetContainer(),
+                  {EmptyCheckOption::TreatNonEditableContentAsInvisible})) {
             NS_WARNING_ASSERTION(pointToInsert.GetContainerParent(),
                                  "Insertion point is out of the DOM tree");
             if (pointToInsert.GetContainerParent()) {
@@ -3576,18 +3583,20 @@ void HTMLEditor::HTMLWithContextInserter::FragmentFromPasteCreator::
       //   insert empty list element.
       isEmptyNodeShouldNotInserted = HTMLEditUtils::IsEmptyNode(
           *child,
-          {// Although we don't check relation between list item element
-           // and parent list element, but it should not be a problem in the
-           // wild because appearing such invalid list element is an edge case
-           // and anyway HTMLEditor supports editing in them.
-           EmptyCheckOption::TreatListItemAsVisible,
-           // Ignore editable state because non-editable list item element
-           // may make the list element visible.  Although HTMLEditor does not
-           // support to edit list elements which have only non-editable list
-           // item elements, but it should be deleted from outside.
-           // TODO: Currently, HTMLEditor does not support deleting such list
-           //       element with Backspace.  We should fix this.
-           EmptyCheckOption::IgnoreEditableState});
+          {
+              // Although we don't check relation between list item element
+              // and parent list element, but it should not be a problem in the
+              // wild because appearing such invalid list element is an edge
+              // case and anyway HTMLEditor supports editing in them.
+              EmptyCheckOption::TreatListItemAsVisible,
+              // A non-editable list item element may make the list element
+              // visible.  Although HTMLEditor does not support to edit list
+              // elements which have only non-editable list item elements, but
+              // it should be deleted from outside.  Therefore, don't treat
+              // non-editable things as invisible.
+              // TODO: Currently, HTMLEditor does not support deleting such list
+              //       element with Backspace.  We should fix this issue.
+          });
     }
     // TODO: Perhaps, we should delete <table>s if they have no <td>/<th>
     //       element, or something other elements which must have specific

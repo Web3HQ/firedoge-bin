@@ -1025,10 +1025,7 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
       canSkipEnqueuingJobs(this, false),
       promiseRejectionTrackerCallback(this, nullptr),
       promiseRejectionTrackerCallbackData(this, nullptr),
-#ifdef JS_STRUCTURED_SPEW
-      structuredSpewer_(),
-#endif
-      insideDebuggerEvaluationWithOnNativeCallHook(this, nullptr) {
+      insideExclusiveDebuggerOnEval(this, nullptr) {
   MOZ_ASSERT(static_cast<JS::RootingContext*>(this) ==
              JS::RootingContext::get(this));
 }
@@ -1158,6 +1155,34 @@ bool JSContext::getPendingException(MutableHandleValue rval) {
   return true;
 }
 
+bool JSContext::getPendingExceptionStack(MutableHandleValue rval) {
+  MOZ_ASSERT(isExceptionPending());
+
+  Rooted<SavedFrame*> exceptionStack(this, unwrappedExceptionStack());
+  if (!exceptionStack) {
+    rval.setNull();
+    return true;
+  }
+  if (zone()->isAtomsZone()) {
+    rval.setObject(*exceptionStack);
+    return true;
+  }
+
+  RootedValue stack(this, ObjectValue(*exceptionStack));
+  RootedValue exception(this, unwrappedException());
+  JS::ExceptionStatus prevStatus = status;
+  clearPendingException();
+  if (!compartment()->wrap(this, &stack)) {
+    return false;
+  }
+  this->check(stack);
+  setPendingException(exception, exceptionStack);
+  status = prevStatus;
+
+  rval.set(stack);
+  return true;
+}
+
 SavedFrame* JSContext::getPendingExceptionStack() {
   return unwrappedExceptionStack();
 }
@@ -1252,7 +1277,7 @@ void AutoEnterOOMUnsafeRegion::crash_impl(const char* reason) {
   // In non-DEBUG builds MOZ_CRASH normally doesn't print to stderr so we have
   // to do this explicitly (the jit-test allow-unhandlable-oom annotation and
   // fuzzers depend on it).
-  MOZ_ReportCrash(msgbuf, __FILE__, __LINE__);
+  fprintf(stderr, "Hit MOZ_CRASH(%s) at %s:%d\n", msgbuf, __FILE__, __LINE__);
 #endif
   MOZ_CRASH_UNSAFE(msgbuf);
 }

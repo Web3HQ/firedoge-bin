@@ -376,6 +376,7 @@ class OutputParser {
       if (!token) {
         break;
       }
+      const lowerCaseTokenText = token.text?.toLowerCase();
 
       if (token.tokenType === "comment") {
         // This doesn't change spaceNeeded, because we didn't emit
@@ -385,12 +386,11 @@ class OutputParser {
 
       switch (token.tokenType) {
         case "function": {
-          const isColorTakingFunction = COLOR_TAKING_FUNCTIONS.includes(
-            token.text
-          );
+          const isColorTakingFunction =
+            COLOR_TAKING_FUNCTIONS.includes(lowerCaseTokenText);
           if (
             isColorTakingFunction ||
-            ANGLE_TAKING_FUNCTIONS.includes(token.text)
+            ANGLE_TAKING_FUNCTIONS.includes(lowerCaseTokenText)
           ) {
             // The function can accept a color or an angle argument, and we know
             // it isn't special in some other way. So, we let it
@@ -406,7 +406,7 @@ class OutputParser {
               colorFunctions.push({ parenDepth, functionName: token.text });
             }
             ++parenDepth;
-          } else if (token.text === "var" && options.getVariableValue) {
+          } else if (lowerCaseTokenText === "var" && options.getVariableValue) {
             const { node: variableNode, value } = this.#parseVariable(
               token,
               text,
@@ -451,11 +451,14 @@ class OutputParser {
               // to DOM accordingly.
               const functionText = functionName + functionData.join("") + ")";
 
-              if (options.expectCubicBezier && token.text === "cubic-bezier") {
+              if (
+                options.expectCubicBezier &&
+                lowerCaseTokenText === "cubic-bezier"
+              ) {
                 this.#appendCubicBezier(functionText, options);
               } else if (
                 options.expectLinearEasing &&
-                token.text === "linear"
+                lowerCaseTokenText === "linear"
               ) {
                 this.#appendLinear(functionText, options);
               } else if (
@@ -468,7 +471,7 @@ class OutputParser {
                 });
               } else if (
                 options.expectShape &&
-                BASIC_SHAPE_FUNCTIONS.includes(token.text)
+                BASIC_SHAPE_FUNCTIONS.includes(lowerCaseTokenText)
               ) {
                 this.#appendShape(functionText, options);
               } else {
@@ -482,10 +485,13 @@ class OutputParser {
         case "ident":
           if (
             options.expectCubicBezier &&
-            BEZIER_KEYWORDS.includes(token.text)
+            BEZIER_KEYWORDS.includes(lowerCaseTokenText)
           ) {
             this.#appendCubicBezier(token.text, options);
-          } else if (options.expectLinearEasing && token.text == "linear") {
+          } else if (
+            options.expectLinearEasing &&
+            lowerCaseTokenText == "linear"
+          ) {
             this.#appendLinear(token.text, options);
           } else if (this.#isDisplayFlex(text, token, options)) {
             this.#appendHighlighterToggle(token.text, options.flexClass);
@@ -805,8 +811,9 @@ class OutputParser {
       role: "button",
     });
 
+    const lowerCaseShape = shape.toLowerCase();
     for (const { prefix, coordParser } of shapeTypes) {
-      if (shape.includes(prefix)) {
+      if (lowerCaseShape.includes(prefix)) {
         const coordsBegin = prefix.length;
         const coordsEnd = shape.lastIndexOf(")");
         let valContainer = this.#createNode("span", {
@@ -1570,14 +1577,15 @@ class OutputParser {
         container.appendChild(swatch);
       }
 
-      if (!options.defaultColorType) {
+      let colorUnit = options.defaultColorUnit;
+      if (!options.useDefaultColorUnit) {
         // If we're not being asked to convert the color to the default color type
         // specified by the user, then force the CssColor instance to be set to the type
         // of the current color.
         // Not having a type means that the default color type will be automatically used.
-        colorObj.colorUnit = colorUtils.classifyColor(color);
+        colorUnit = colorUtils.classifyColor(color);
       }
-      color = colorObj.toString();
+      color = colorObj.toString(colorUnit);
       container.dataset.color = color;
 
       // Next we create the markup to show the value of the property.
@@ -1906,35 +1914,33 @@ class OutputParser {
    *
    * @param  {Object} overrides
    *         The option values to override e.g. #mergeOptions({colors: false})
-   *
-   *         Valid options are:
-   *           - defaultColorType: true // Convert colors to the default type
-   *                                    // selected in the options panel.
-   *           - angleClass: ""         // The class to use for the angle value
+   * @param {Boolean} overrides.useDefaultColorUnit: Convert colors to the default type
+   *                                                 selected in the options panel.
+   * @param {String} overrides.angleClass: The class to use for the angle value that follows
+   *                                       the swatch.
+   * @param {String} overrides.angleSwatchClass: The class to use for angle swatches.
+   * @param {} overrides.bezierClass: ""        // The class to use for the bezier value
    *                                    // that follows the swatch.
-   *           - angleSwatchClass: ""   // The class to use for angle swatches.
-   *           - bezierClass: ""        // The class to use for the bezier value
+   * @param {} overrides.bezierSwatchClass: ""  // The class to use for bezier swatches.
+   * @param {} overrides.colorClass: ""         // The class to use for the color value
    *                                    // that follows the swatch.
-   *           - bezierSwatchClass: ""  // The class to use for bezier swatches.
-   *           - colorClass: ""         // The class to use for the color value
-   *                                    // that follows the swatch.
-   *           - colorSwatchClass: ""   // The class to use for color swatches.
-   *           - filterSwatch: false    // A special case for parsing a
+   * @param {} overrides.colorSwatchClass: ""   // The class to use for color swatches.
+   * @param {} overrides.filterSwatch: false    // A special case for parsing a
    *                                    // "filter" property, causing the
    *                                    // parser to skip the call to
    *                                    // #wrapFilter.  Used only for
    *                                    // previewing with the filter swatch.
-   *           - flexClass: ""          // The class to use for the flex icon.
-   *           - gridClass: ""          // The class to use for the grid icon.
-   *           - shapeClass: ""         // The class to use for the shape value
+   * @param {} overrides.flexClass: ""          // The class to use for the flex icon.
+   * @param {} overrides.gridClass: ""          // The class to use for the grid icon.
+   * @param {} overrides.shapeClass: ""         // The class to use for the shape value
    *                                    // that follows the swatch.
-   *           - shapeSwatchClass: ""   // The class to use for the shape swatch.
-   *           - supportsColor: false   // Does the CSS property support colors?
-   *           - urlClass: ""           // The class to be used for url() links.
-   *           - fontFamilyClass: ""    // The class to be used for font families.
-   *           - baseURI: undefined     // A string used to resolve
+   * @param {} overrides.shapeSwatchClass: ""   // The class to use for the shape swatch.
+   * @param {} overrides.supportsColor: false   // Does the CSS property support colors?
+   * @param {} overrides.urlClass: ""           // The class to be used for url() links.
+   * @param {} overrides.fontFamilyClass: ""    // The class to be used for font families.
+   * @param {} overrides.baseURI: undefined     // A string used to resolve
    *                                    // relative links.
-   *           - getVariableValue       // A function taking a single
+   * @param {} overrides.getVariableValue       // A function taking a single
    *                                    // argument, the name of a variable.
    *                                    // This should return the variable's
    *                                    // value, if it is in use; or null.
@@ -1947,7 +1953,8 @@ class OutputParser {
    */
   #mergeOptions(overrides) {
     const defaults = {
-      defaultColorType: true,
+      useDefaultColorUnit: true,
+      defaultColorUnit: "authored",
       angleClass: "",
       angleSwatchClass: "",
       bezierClass: "",

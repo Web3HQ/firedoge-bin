@@ -36,17 +36,31 @@ struct WebAuthnExtensionAppId {
   nsString appIdentifier;
 };
 
+struct WebAuthnExtensionCredProps {
+  bool credProps;
+};
+
 struct WebAuthnExtensionHmacSecret {
   bool hmacCreateSecret;
 };
 
+struct WebAuthnExtensionMinPinLength {
+  bool minPinLength;
+};
+
 union WebAuthnExtension {
   WebAuthnExtensionAppId;
+  WebAuthnExtensionCredProps;
   WebAuthnExtensionHmacSecret;
+  WebAuthnExtensionMinPinLength;
 };
 
 struct WebAuthnExtensionResultAppId {
   bool AppId;
+};
+
+struct WebAuthnExtensionResultCredProps {
+  bool rk;
 };
 
 struct WebAuthnExtensionResultHmacSecret {
@@ -55,6 +69,7 @@ struct WebAuthnExtensionResultHmacSecret {
 
 union WebAuthnExtensionResult {
   WebAuthnExtensionResultAppId;
+  WebAuthnExtensionResultCredProps;
   WebAuthnExtensionResultHmacSecret;
 };
 
@@ -94,6 +109,7 @@ struct WebAuthnMakeCredentialResult {
   uint8_t[] KeyHandle;
   nsString[] Transports;
   WebAuthnExtensionResult[] Extensions;
+  nsString? AuthenticatorAttachment;
 };
 
 struct WebAuthnGetAssertionInfo {
@@ -105,6 +121,7 @@ struct WebAuthnGetAssertionInfo {
   WebAuthnScopedCredential[] AllowList;
   WebAuthnExtension[] Extensions;
   nsString userVerificationRequirement;
+  bool ConditionallyMediated;
   uint64_t BrowsingContextId;
 };
 
@@ -115,6 +132,7 @@ struct WebAuthnGetAssertionResult {
   uint8_t[] AuthenticatorData;
   WebAuthnExtensionResult[] Extensions;
   uint8_t[] UserHandle;
+  nsString? AuthenticatorAttachment;
 };
 
 [ManualDealloc]
@@ -124,6 +142,7 @@ async protocol PWebAuthnTransaction {
   parent:
     async RequestRegister(uint64_t aTransactionId, WebAuthnMakeCredentialInfo aTransactionInfo);
     async RequestSign(uint64_t aTransactionId, WebAuthnGetAssertionInfo aTransactionInfo);
+    async RequestIsUVPAA() returns (bool available);
     [Tainted] async RequestCancel(uint64_t aTransactionId);
     async DestroyMe();
 

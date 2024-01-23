@@ -2,6 +2,7 @@
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
 "use strict";
+requestLongerTimeout(5);
 
 const { ASRouter } = ChromeUtils.import(
   "resource://activity-stream/lib/ASRouter.jsm"
@@ -132,7 +133,7 @@ add_task(async function test_newtab_tab_nav_sends_ping() {
     Assert.equal(false, Glean.pocket.isSignedIn.testGetValue());
   });
 
-  BrowserTestUtils.loadURIString(tab.linkedBrowser, "about:mozilla");
+  BrowserTestUtils.startLoadingURIString(tab.linkedBrowser, "about:mozilla");
   await BrowserTestUtils.waitForCondition(
     () => pingSubmitted,
     "We expect the ping to have submitted."
@@ -180,7 +181,7 @@ add_task(async function test_newtab_doesnt_send_nimbus() {
   GleanPings.newtab.testBeforeNextSubmit(() => {
     Assert.ok(false, "Must not submit ping!");
   });
-  BrowserTestUtils.loadURIString(tab.linkedBrowser, "about:mozilla");
+  BrowserTestUtils.startLoadingURIString(tab.linkedBrowser, "about:mozilla");
   BrowserTestUtils.removeTab(tab);
   await BrowserTestUtils.waitForCondition(() => {
     let { sessions } =

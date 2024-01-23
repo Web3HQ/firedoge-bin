@@ -92,10 +92,12 @@ class LayerManager;
 namespace dom {
 class Document;
 class Element;
+class PerformanceMainThread;
 enum class PrefersColorSchemeOverride : uint8_t;
 }  // namespace dom
 namespace gfx {
 class FontPaletteValueSet;
+class PaletteCache;
 }  // namespace gfx
 }  // namespace mozilla
 
@@ -160,7 +162,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
    */
   nsresult Init(nsDeviceContext* aDeviceContext);
 
-  /*
+  /**
    * Initialize the font cache if it hasn't been initialized yet.
    * (Needed for stylo)
    */
@@ -168,7 +170,18 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   void UpdateFontCacheUserFonts(gfxUserFontSet* aUserFontSet);
 
+  /**
+   * Return the font visibility level to be applied to this context,
+   * potentially blocking user-installed or non-standard fonts from being
+   * used by web content.
+   * Note that depending on ResistFingerprinting options, the caller may
+   * override this value when resolving CSS <generic-family> keywords.
+   */
   FontVisibility GetFontVisibility() const { return mFontVisibility; }
+
+  /**
+   * Log a message to the console about a font request being blocked.
+   */
   void ReportBlockedFontFamily(const mozilla::fontlist::Family& aFamily);
   void ReportBlockedFontFamily(const gfxFontFamily& aFamily);
 
@@ -214,6 +227,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   void DocumentCharSetChanged(NotNull<const Encoding*> aCharSet);
 
+  mozilla::dom::PerformanceMainThread* GetPerformanceMainThread() const;
   /**
    * Returns the parent prescontext for this one. Returns null if this is a
    * root.
@@ -515,6 +529,8 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   bool UserInputEventsAllowed();
 
   void MaybeIncreaseMeasuredTicksSinceLoading();
+
+  bool NeedsMoreTicksForUserInput() const;
 
   void ResetUserInputEventsAllowed() {
     MOZ_ASSERT(IsRoot());
@@ -917,6 +933,8 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   void FlushFontPaletteValues();
   void MarkFontPaletteValuesDirty() { mFontPaletteValuesDirty = true; }
 
+  mozilla::gfx::PaletteCache& FontPaletteCache();
+
   // Ensure that it is safe to hand out CSS rules outside the layout
   // engine by ensuring that all CSS style sheets have unique inners
   // and, if necessary, synchronously rebuilding all style data.
@@ -1038,6 +1056,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   bool HadNonBlankPaint() const { return mHadNonBlankPaint; }
   bool HadFirstContentfulPaint() const { return mHadFirstContentfulPaint; }
+  bool HasStoppedGeneratingLCP() const;
   void NotifyNonBlankPaint();
   void NotifyContentfulPaint();
   void NotifyPaintStatusReset();
@@ -1074,7 +1093,20 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
     return mFontPaletteValueSet;
   }
 
+  bool NeedsToUpdateHiddenByContentVisibilityForAnimations() const {
+    return mNeedsToUpdateHiddenByContentVisibilityForAnimations;
+  }
+  void SetNeedsToUpdateHiddenByContentVisibilityForAnimations() {
+    mNeedsToUpdateHiddenByContentVisibilityForAnimations = true;
+  }
+  void UpdateHiddenByContentVisibilityForAnimationsIfNeeded() {
+    if (mNeedsToUpdateHiddenByContentVisibilityForAnimations) {
+      DoUpdateHiddenByContentVisibilityForAnimations();
+    }
+  }
+
  protected:
+  void DoUpdateHiddenByContentVisibilityForAnimations();
   friend class nsRunnableMethod<nsPresContext>;
   void ThemeChangedInternal();
   void RefreshSystemMetrics();
@@ -1118,6 +1150,10 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
     if (mNextFrameRateMultiplier < 8) {
       ++mNextFrameRateMultiplier;
     }
+  }
+
+  mozilla::TimeStamp GetMarkPaintTimingStart() const {
+    return mMarkPaintTimingStart;
   }
 
  protected:
@@ -1177,6 +1213,8 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   const nsStaticAtom* mMedium;
   RefPtr<gfxFontFeatureValueSet> mFontFeatureValuesLookup;
   RefPtr<mozilla::gfx::FontPaletteValueSet> mFontPaletteValueSet;
+
+  mozilla::UniquePtr<mozilla::gfx::PaletteCache> mFontPaletteCache;
 
   // TODO(emilio): Maybe lazily create and put under a UniquePtr if this grows a
   // lot?
@@ -1242,6 +1280,9 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   uint64_t mAnimationTriggeredRestyles;
 
   mozilla::TimeStamp mReflowStartTime;
+
+  // Defined in https://w3c.github.io/paint-timing/#mark-paint-timing step 2.
+  mozilla::TimeStamp mMarkPaintTimingStart;
 
   Maybe<TransactionId> mFirstContentfulPaintTransactionId;
 
@@ -1358,6 +1399,9 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   // Has NotifyDidPaintForSubtree been called for a contentful paint?
   unsigned mHadContentfulPaintComposite : 1;
+
+  // Whether we might need to update c-v state for animations.
+  unsigned mNeedsToUpdateHiddenByContentVisibilityForAnimations : 1;
 
   unsigned mUserInputEventsAllowed : 1;
 #ifdef DEBUG

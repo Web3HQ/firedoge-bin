@@ -16,15 +16,18 @@
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/Unused.h"
+#include "mozilla/Try.h"
 #include "mozilla/WinHeaderOnlyUtils.h"
 
 namespace mozilla::default_agent {
 
 using BrowserResult = mozilla::WindowsErrorResult<Browser>;
 
+constexpr std::string_view kUnknownBrowserString = "";
+
 constexpr std::pair<std::string_view, Browser> kStringBrowserMap[]{
     {"error", Browser::Error},
-    {"", Browser::Unknown},
+    {kUnknownBrowserString, Browser::Unknown},
     {"firefox", Browser::Firefox},
     {"chrome", Browser::Chrome},
     {"edge", Browser::EdgeWithEdgeHTML},
@@ -36,6 +39,7 @@ constexpr std::pair<std::string_view, Browser> kStringBrowserMap[]{
     {"qq-browser", Browser::QQBrowser},
     {"360-browser", Browser::_360Browser},
     {"sogou", Browser::Sogou},
+    {"duckduckgo", Browser::DuckDuckGo},
 };
 
 static_assert(mozilla::ArrayLength(kStringBrowserMap) == kBrowserCount);
@@ -47,7 +51,7 @@ std::string GetStringForBrowser(Browser browser) {
     }
   }
 
-  return std::string("");
+  return std::string(kUnknownBrowserString);
 }
 
 Browser GetBrowserFromString(const std::string& browserString) {
@@ -60,7 +64,7 @@ Browser GetBrowserFromString(const std::string& browserString) {
   return Browser::Unknown;
 }
 
-static BrowserResult GetDefaultBrowser() {
+BrowserResult TryGetDefaultBrowser() {
   RefPtr<IApplicationAssociationRegistration> pAAR;
   HRESULT hr = CoCreateInstance(
       CLSID_ApplicationAssociationRegistration, nullptr, CLSCTX_INPROC,
@@ -114,6 +118,7 @@ static BrowserResult GetDefaultBrowser() {
        Browser::_360Browser},
       // 搜狗高速浏览器 UTF-16 encoding
       {L"\u641c\u72d7\u9ad8\u901f\u6d4f\u89c8\u5668", Browser::Sogou},
+      {L"DuckDuckGo", Browser::DuckDuckGo},
   };
 
   // We should have one prefix for every browser we track, minus exceptions
@@ -140,11 +145,16 @@ static BrowserResult GetDefaultBrowser() {
         // "AppX[hash]" as expected. It is unclear if the EdgeWithEdgeHTML and
         // EdgeWithBlink ProgIDs would differ if the latter is changed into a
         // package containing Edge.
-        constexpr std::wstring_view progIdEdgeHtml{
+        constexpr std::wstring_view progIdEdgeHtml1{
             L"AppXq0fevzme2pys62n3e0fbqa7peapykr8v"};
+        // Apparently there is at least one other ProgID used by EdgeHTML Edge.
+        constexpr std::wstring_view progIdEdgeHtml2{
+            L"AppXd4nrz8ff68srnhf9t5a8sbjyar1cr723"};
 
-        if (!wcsnicmp(registeredApp.get(), progIdEdgeHtml.data(),
-                      progIdEdgeHtml.length())) {
+        if (!wcsnicmp(registeredApp.get(), progIdEdgeHtml1.data(),
+                      progIdEdgeHtml1.length()) ||
+            !wcsnicmp(registeredApp.get(), progIdEdgeHtml2.data(),
+                      progIdEdgeHtml2.length())) {
           return Browser::EdgeWithEdgeHTML;
         }
       }
@@ -157,7 +167,7 @@ static BrowserResult GetDefaultBrowser() {
   return Browser::Unknown;
 }
 
-static BrowserResult GetPreviousDefaultBrowser(Browser currentDefault) {
+BrowserResult TryGetReplacePreviousDefaultBrowser(Browser currentDefault) {
   // This function uses a registry value which stores the current default
   // browser. It returns the data stored in that registry value and replaces the
   // stored string with the current default browser string that was passed in.
@@ -177,18 +187,10 @@ static BrowserResult GetPreviousDefaultBrowser(Browser currentDefault) {
 DefaultBrowserResult GetDefaultBrowserInfo() {
   DefaultBrowserInfo browserInfo;
 
-  BrowserResult defaultBrowserResult = GetDefaultBrowser();
-  if (defaultBrowserResult.isErr()) {
-    return DefaultBrowserResult(defaultBrowserResult.unwrapErr());
-  }
-  browserInfo.currentDefaultBrowser = defaultBrowserResult.unwrap();
-
-  BrowserResult previousDefaultBrowserResult =
-      GetPreviousDefaultBrowser(browserInfo.currentDefaultBrowser);
-  if (previousDefaultBrowserResult.isErr()) {
-    return DefaultBrowserResult(previousDefaultBrowserResult.unwrapErr());
-  }
-  browserInfo.previousDefaultBrowser = previousDefaultBrowserResult.unwrap();
+  MOZ_TRY_VAR(browserInfo.currentDefaultBrowser, TryGetDefaultBrowser());
+  MOZ_TRY_VAR(
+      browserInfo.previousDefaultBrowser,
+      TryGetReplacePreviousDefaultBrowser(browserInfo.currentDefaultBrowser));
 
   return browserInfo;
 }
@@ -225,6 +227,14 @@ void MaybeMigrateCurrentDefault() {
     mozilla::Unused << RegistrySetValueString(IsPrefixed::Unprefixed, valueName,
                                               value.c_str());
   }
+}
+
+Browser GetDefaultBrowser() {
+  return TryGetDefaultBrowser().unwrapOr(Browser::Error);
+}
+Browser GetReplacePreviousDefaultBrowser(Browser currentBrowser) {
+  return TryGetReplacePreviousDefaultBrowser(currentBrowser)
+      .unwrapOr(Browser::Error);
 }
 
 }  // namespace mozilla::default_agent

@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
-import {ServerResponse} from 'http';
+import type {ServerResponse} from 'http';
 
 import expect from 'expect';
-import {TimeoutError} from 'puppeteer';
-import {Page} from 'puppeteer-core/internal/api/Page.js';
-import {Target} from 'puppeteer-core/internal/common/Target.js';
+import {type Target, TimeoutError} from 'puppeteer';
+import type {Page} from 'puppeteer-core/internal/api/Page.js';
 
 import {getTestState, setupTestBrowserHooks} from './mocha-utils.js';
 import {waitEvent} from './utils.js';
@@ -80,11 +79,16 @@ describe('Target', function () {
 
     const [otherPage] = await Promise.all([
       context
-        .waitForTarget(target => {
-          return target.page().then(page => {
-            return page!.url() === server.CROSS_PROCESS_PREFIX + '/empty.html';
-          });
-        })
+        .waitForTarget(
+          target => {
+            return target.page().then(page => {
+              return (
+                page!.url() === server.CROSS_PROCESS_PREFIX + '/empty.html'
+              );
+            });
+          },
+          {timeout: 3000}
+        )
         .then(target => {
           return target.page();
         }),
@@ -95,16 +99,19 @@ describe('Target', function () {
     expect(otherPage!.url()).toEqual(
       server.CROSS_PROCESS_PREFIX + '/empty.html'
     );
-    expect(page).not.toEqual(otherPage);
+    expect(page).not.toBe(otherPage);
   });
   it('should report when a new page is created and closed', async () => {
     const {page, server, context} = await getTestState();
 
     const [otherPage] = await Promise.all([
       context
-        .waitForTarget(target => {
-          return target.url() === server.CROSS_PROCESS_PREFIX + '/empty.html';
-        })
+        .waitForTarget(
+          target => {
+            return target.url() === server.CROSS_PROCESS_PREFIX + '/empty.html';
+          },
+          {timeout: 3000}
+        )
         .then(target => {
           return target.page();
         }),
@@ -168,10 +175,14 @@ describe('Target', function () {
 
     await page.goto(server.PREFIX + '/serviceworkers/empty/sw.html');
 
-    const target = await context.waitForTarget(target => {
-      return target.type() === 'service_worker';
-    });
+    const target = await context.waitForTarget(
+      target => {
+        return target.type() === 'service_worker';
+      },
+      {timeout: 3000}
+    );
     const worker = (await target.worker())!;
+
     expect(
       await worker.evaluate(() => {
         return self.toString();
@@ -185,9 +196,12 @@ describe('Target', function () {
     await page.evaluate(() => {
       new SharedWorker('data:text/javascript,console.log("hi")');
     });
-    const target = await context.waitForTarget(target => {
-      return target.type() === 'shared_worker';
-    });
+    const target = await context.waitForTarget(
+      target => {
+        return target.type() === 'shared_worker';
+      },
+      {timeout: 3000}
+    );
     const worker = (await target.worker())!;
     expect(
       await worker.evaluate(() => {
@@ -212,7 +226,7 @@ describe('Target', function () {
 
     let targetChanged = false;
     const listener = () => {
-      return (targetChanged = true);
+      targetChanged = true;
     };
     context.on('targetchanged', listener);
     const targetPromise = waitEvent<Target>(context, 'targetcreated');
@@ -232,6 +246,7 @@ describe('Target', function () {
     expect(targetChanged).toBe(false);
     context.off('targetchanged', listener);
   });
+
   it('should not crash while redirecting if original request was missed', async () => {
     const {page, server, context} = await getTestState();
 
@@ -247,15 +262,19 @@ describe('Target', function () {
       server.waitForRequest('/one-style.css'),
     ]);
     // Connect to the opened page.
-    const target = await context.waitForTarget(target => {
-      return target.url().includes('one-style.html');
-    });
+    const target = await context.waitForTarget(
+      target => {
+        return target.url().includes('one-style.html');
+      },
+      {timeout: 3000}
+    );
     const newPage = (await target.page())!;
+    const loadEvent = waitEvent(newPage, 'load');
     // Issue a redirect.
     serverResponse.writeHead(302, {location: '/injectedstyle.css'});
     serverResponse.end();
     // Wait for the new page to load.
-    await waitEvent(newPage, 'load');
+    await loadEvent;
     // Cleanup.
     await newPage.close();
   });
@@ -279,9 +298,12 @@ describe('Target', function () {
       const {browser, server} = await getTestState();
 
       let resolved = false;
-      const targetPromise = browser.waitForTarget(target => {
-        return target.url() === server.EMPTY_PAGE;
-      });
+      const targetPromise = browser.waitForTarget(
+        target => {
+          return target.url() === server.EMPTY_PAGE;
+        },
+        {timeout: 3000}
+      );
       targetPromise
         .then(() => {
           return (resolved = true);
@@ -316,7 +338,7 @@ describe('Target', function () {
       await browser
         .waitForTarget(
           target => {
-            return target.url() === server.EMPTY_PAGE;
+            return target.url() === server.PREFIX + '/does-not-exist.html';
           },
           {
             timeout: 1,

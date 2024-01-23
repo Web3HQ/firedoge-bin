@@ -5,8 +5,7 @@
   "private": true,
   "scripts": {
     "build": "wireit",
-    "build:packages": "wireit",
-    "clean": "tsc -b --clean && rm -rf build",
+    "clean": "../../tools/clean.js",
     "test": "mocha"
   },
   "wireit": {
@@ -45,7 +44,7 @@
     "assets"
   ],
   "dependencies": {
-    "glob": "10.3.3",
+    "glob": "10.3.10",
     "mocha": "10.2.0"
   }
 }

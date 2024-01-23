@@ -11,6 +11,7 @@
 #include "mozilla/dom/Comment.h"
 #include "mozilla/dom/CustomElementRegistry.h"
 #include "mozilla/dom/DocGroup.h"
+#include "mozilla/dom/DocumentFragment.h"
 #include "mozilla/dom/DocumentType.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/LinkStyle.h"
@@ -18,12 +19,14 @@
 #include "mozilla/dom/HTMLImageElement.h"
 #include "mozilla/dom/HTMLTemplateElement.h"
 #include "mozilla/dom/MutationObservers.h"
+#include "mozilla/dom/ShadowRoot.h"
 #include "mozilla/dom/Text.h"
 #include "nsAttrName.h"
 #include "nsContentCreatorFunctions.h"
 #include "nsContentUtils.h"
 #include "nsDocElementCreatedNotificationRunner.h"
 #include "nsEscape.h"
+#include "nsGenericHTMLElement.h"
 #include "nsHtml5AutoPauseUpdate.h"
 #include "nsHtml5DocumentMode.h"
 #include "nsHtml5HtmlAttributes.h"
@@ -39,6 +42,7 @@
 #include "nsIURI.h"
 #include "nsNetUtil.h"
 #include "nsTextNode.h"
+#include "js/ColumnNumber.h"  // JS::ColumnNumberOneOrigin
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -134,13 +138,18 @@ nsHtml5TreeOperation::~nsHtml5TreeOperation() {
 
     void operator()(const opGetDocumentFragmentForTemplate& aOperation) {}
 
+    void operator()(const opSetDocumentFragmentForTemplate& aOperation) {}
+
+    void operator()(const opGetShadowRootFromHost& aOperation) {}
+
     void operator()(const opGetFosterParent& aOperation) {}
 
     void operator()(const opMarkAsBroken& aOperation) {}
 
-    void operator()(const opRunScript& aOperation) {}
+    void operator()(const opRunScriptThatMayDocumentWriteOrBlock& aOperation) {}
 
-    void operator()(const opRunScriptAsyncDefer& aOperation) {}
+    void operator()(
+        const opRunScriptThatCannotDocumentWriteOrBlock& aOperation) {}
 
     void operator()(const opPreventScriptExecution& aOperation) {}
 
@@ -416,18 +425,9 @@ void nsHtml5TreeOperation::SetHTMLElementAttributes(
       nsAtom* localName = aAttributes->getLocalNameNoBoundsCheck(i);
       nsAtom* prefix = aAttributes->getPrefixNoBoundsCheck(i);
       int32_t nsuri = aAttributes->getURINoBoundsCheck(i);
-
       nsString value;  // Not Auto, because using it to hold nsStringBuffer*
       val.ToString(value);
-      if (nsGkAtoms::a == aName && nsGkAtoms::name == localName) {
-        // This is an HTML5-incompliant Geckoism.
-        // Remove when fixing bug 582361
-        NS_ConvertUTF16toUTF8 cname(value);
-        NS_ConvertUTF8toUTF16 uv(nsUnescape(cname.BeginWriting()));
-        aElement->SetAttr(nsuri, localName, prefix, uv, false);
-      } else {
-        aElement->SetAttr(nsuri, localName, prefix, value, false);
-      }
+      aElement->SetAttr(nsuri, localName, prefix, value, false);
     }
   }
 }
@@ -701,6 +701,12 @@ nsIContent* nsHtml5TreeOperation::GetDocumentFragmentForTemplate(
   return tempElem->Content();
 }
 
+void nsHtml5TreeOperation::SetDocumentFragmentForTemplate(
+    nsIContent* aNode, nsIContent* aDocumentFragment) {
+  auto* tempElem = static_cast<HTMLTemplateElement*>(aNode);
+  tempElem->SetContent(static_cast<DocumentFragment*>(aDocumentFragment));
+}
+
 nsIContent* nsHtml5TreeOperation::GetFosterParent(nsIContent* aTable,
                                                   nsIContent* aStackParent) {
   nsIContent* tableParent = aTable->GetParent();
@@ -727,8 +733,7 @@ void nsHtml5TreeOperation::DoneCreatingElement(nsIContent* aNode) {
 
 void nsHtml5TreeOperation::SvgLoad(nsIContent* aNode) {
   nsCOMPtr<nsIRunnable> event = new nsHtml5SVGLoadDispatcher(aNode);
-  if (NS_FAILED(
-          aNode->OwnerDoc()->Dispatch(TaskCategory::Network, event.forget()))) {
+  if (NS_FAILED(aNode->OwnerDoc()->Dispatch(event.forget()))) {
     NS_WARNING("failed to dispatch svg load dispatcher");
   }
 }
@@ -902,6 +907,31 @@ nsresult nsHtml5TreeOperation::Perform(nsHtml5TreeOpExecutor* aBuilder,
       return NS_OK;
     }
 
+    nsresult operator()(const opSetDocumentFragmentForTemplate& aOperation) {
+      SetDocumentFragmentForTemplate(*aOperation.mTemplate,
+                                     *aOperation.mFragment);
+      return NS_OK;
+    }
+
+    nsresult operator()(const opGetShadowRootFromHost& aOperation) {
+      nsIContent* root = nsContentUtils::AttachDeclarativeShadowRoot(
+          *aOperation.mHost, aOperation.mShadowRootMode,
+          aOperation.mShadowRootDelegatesFocus);
+      if (root) {
+        *aOperation.mFragHandle = root;
+        return NS_OK;
+      }
+
+      // We failed to attach a new shadow root, so instead attach a template
+      // element and return its content.
+      nsHtml5TreeOperation::Append(*aOperation.mTemplateNode, *aOperation.mHost,
+                                   mBuilder);
+      *aOperation.mFragHandle =
+          static_cast<HTMLTemplateElement*>(*aOperation.mTemplateNode)
+              ->Content();
+      return NS_OK;
+    }
+
     nsresult operator()(const opGetFosterParent& aOperation) {
       nsIContent* table = *(aOperation.mTable);
       nsIContent* stackParent = *(aOperation.mStackParent);
@@ -914,7 +944,8 @@ nsresult nsHtml5TreeOperation::Perform(nsHtml5TreeOpExecutor* aBuilder,
       return aOperation.mResult;
     }
 
-    nsresult operator()(const opRunScript& aOperation) {
+    nsresult operator()(
+        const opRunScriptThatMayDocumentWriteOrBlock& aOperation) {
       nsIContent* node = *(aOperation.mElement);
       nsAHtml5TreeBuilderState* snapshot = aOperation.mBuilderState;
       if (snapshot) {
@@ -925,8 +956,9 @@ nsresult nsHtml5TreeOperation::Perform(nsHtml5TreeOpExecutor* aBuilder,
       return NS_OK;
     }
 
-    nsresult operator()(const opRunScriptAsyncDefer& aOperation) {
-      mBuilder->RunScript(*(aOperation.mElement));
+    nsresult operator()(
+        const opRunScriptThatCannotDocumentWriteOrBlock& aOperation) {
+      mBuilder->RunScript(*(aOperation.mElement), false);
       return NS_OK;
     }
 
@@ -995,7 +1027,8 @@ nsresult nsHtml5TreeOperation::Perform(nsHtml5TreeOpExecutor* aBuilder,
       nsCOMPtr<nsIScriptElement> sele = do_QueryInterface(node);
       if (sele) {
         sele->SetScriptLineNumber(aOperation.mLineNumber);
-        sele->SetScriptColumnNumber(aOperation.mColumnNumber);
+        sele->SetScriptColumnNumber(
+            JS::ColumnNumberOneOrigin(aOperation.mColumnNumber));
         sele->FreezeExecutionAttrs(node->OwnerDoc());
       } else {
         MOZ_ASSERT(nsNameSpaceManager::GetInstance()->mSVGDisabled,

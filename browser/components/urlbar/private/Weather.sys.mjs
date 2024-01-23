@@ -9,9 +9,7 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   clearTimeout: "resource://gre/modules/Timer.sys.mjs",
   MerinoClient: "resource:///modules/MerinoClient.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
-  QuickSuggestRemoteSettings:
-    "resource:///modules/urlbar/private/QuickSuggestRemoteSettings.sys.mjs",
+  QuickSuggest: "resource:///modules/QuickSuggest.sys.mjs",
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
 });
@@ -43,8 +41,7 @@ export class Weather extends BaseFeature {
     // set by Nimbus.
     return (
       lazy.UrlbarPrefs.get("weatherFeatureGate") &&
-      lazy.UrlbarPrefs.get("suggest.weather") &&
-      lazy.UrlbarPrefs.get("merinoEnabled")
+      lazy.UrlbarPrefs.get("suggest.weather")
     );
   }
 
@@ -152,7 +149,7 @@ export class Weather extends BaseFeature {
    */
   waitForFetches() {
     if (!this.#waitForFetchesDeferred) {
-      this.#waitForFetchesDeferred = lazy.PromiseUtils.defer();
+      this.#waitForFetchesDeferred = Promise.withResolvers();
     }
     return this.#waitForFetchesDeferred.promise;
   }
@@ -197,12 +194,12 @@ export class Weather extends BaseFeature {
     // been either synced from remote settings or set by Nimbus.
     this.#updateConfig();
     lazy.UrlbarPrefs.addObserver(this);
-    lazy.QuickSuggestRemoteSettings.register(this);
+    lazy.QuickSuggest.jsBackend.register(this);
   }
 
   #uninit() {
     this.#stopFetching();
-    lazy.QuickSuggestRemoteSettings.unregister(this);
+    lazy.QuickSuggest.jsBackend.unregister(this);
     lazy.UrlbarPrefs.removeObserver(this);
     this.#keywords = null;
   }

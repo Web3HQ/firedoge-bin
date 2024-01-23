@@ -14,6 +14,9 @@ use rusqlite::{
 pub enum SuggestionProvider {
     Amp = 1,
     Wikipedia = 2,
+    Amo = 3,
+    Pocket = 4,
+    Yelp = 5,
 }
 
 impl FromSql for SuggestionProvider {
@@ -32,6 +35,9 @@ impl SuggestionProvider {
         match v {
             1 => Some(SuggestionProvider::Amp),
             2 => Some(SuggestionProvider::Wikipedia),
+            3 => Some(SuggestionProvider::Amo),
+            4 => Some(SuggestionProvider::Pocket),
+            5 => Some(SuggestionProvider::Yelp),
             _ => None,
         }
     }

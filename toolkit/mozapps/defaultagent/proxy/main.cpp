@@ -11,6 +11,7 @@
 #include <filesystem>
 
 #include "../ScheduledTask.h"
+#include "../ScheduledTaskRemove.h"
 #include "mozilla/CmdLineAndEnvUtils.h"
 
 using namespace mozilla::default_agent;
@@ -75,4 +76,43 @@ int wmain(int argc, wchar_t** argv) {
   CreateProcessW(programPath.c_str(), cmdLine.get(), nullptr, nullptr, false,
                  DETACHED_PROCESS | NORMAL_PRIORITY_CLASS, nullptr, nullptr,
                  &si, &pi);
+
+  // Wait until process exists so uninstalling doesn't interrupt the background
+  // task cleaning registry entries.
+  DWORD exitCode;
+  if (WaitForSingleObject(pi.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+      ::GetExitCodeProcess(pi.hProcess, &exitCode)) {
+    // Match EXIT_CODE in BackgroundTasksManager.sys.mjs and
+    // BackgroundTask_defaultagent.sys.mjs.
+    enum EXIT_CODE {
+      SUCCESS = 0,
+      NOT_FOUND = 2,
+      EXCEPTION = 3,
+      TIMEOUT = 4,
+      DISABLED_BY_POLICY = 11,
+      INVALID_ARGUMENT = 12,
+      MUTEX_NOT_LOCKABLE = 13,
+    };
+
+    switch (exitCode) {
+      case SUCCESS:
+        return S_OK;
+      case NOT_FOUND:
+        return E_UNEXPECTED;
+      case EXCEPTION:
+        return E_FAIL;
+      case TIMEOUT:
+        return E_FAIL;
+      case DISABLED_BY_POLICY:
+        return HRESULT_FROM_WIN32(ERROR_ACCESS_DISABLED_BY_POLICY);
+      case INVALID_ARGUMENT:
+        return E_INVALIDARG;
+      case MUTEX_NOT_LOCKABLE:
+        return HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+      default:
+        return E_UNEXPECTED;
+    }
+  }
+
+  return E_UNEXPECTED;
 }

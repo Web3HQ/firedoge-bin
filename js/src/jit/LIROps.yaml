@@ -306,7 +306,7 @@
   mir_op: true
   operands:
     ref: WordSized
-    superSuperTypeVector: WordSized
+    superSTV: WordSized
   result_type: WordSized
   num_temps: 2
 
@@ -322,6 +322,14 @@
 
 - name: WasmRefIsSubtypeOfAbstractAndBranch
   gen_boilerplate: false
+
+- name: WasmNewStructObject
+  mir_op: true
+  operands:
+    instance: WordSized
+    typeDefData: WordSized
+  result_type: WordSized
+  num_temps: 2
 
 - name: WasmReinterpret
   gen_boilerplate: false
@@ -683,6 +691,16 @@
     constant: JSLinearString*
   mir_op: Compare
 
+- name: CompareSSingle
+  result_type: WordSized
+  operands:
+    input: WordSized
+  arguments:
+    jsop: JSOp
+    constant: JSLinearString*
+  num_temps: 1
+  mir_op: Compare
+
 - name: CompareBigInt
   result_type: WordSized
   operands:
@@ -860,6 +878,12 @@
 - name: Throw
   operands:
     value: BoxedValue
+  call_instruction: true
+
+- name: ThrowWithStack
+  operands:
+    value: BoxedValue
+    stack: BoxedValue
   call_instruction: true
 
 - name: MinMaxI
@@ -1157,12 +1181,36 @@
     rhs: WordSized
   num_temps: 5
 
+# Linearize a string.
+- name: LinearizeString
+  result_type: WordSized
+  operands:
+    str: WordSized
+  mir_op: true
+
 # Linearize a string before a character access.
 - name: LinearizeForCharAccess
   result_type: WordSized
   operands:
     str: WordSized
     index: WordSized
+  mir_op: true
+
+# Linearize a string before a code point access.
+- name: LinearizeForCodePointAccess
+  result_type: WordSized
+  operands:
+    str: WordSized
+    index: WordSized
+  num_temps: 1
+  mir_op: true
+
+# Compute the relative string index.
+- name: ToRelativeStringIndex
+  result_type: WordSized
+  operands:
+    index: WordSized
+    length: WordSized
   mir_op: true
 
 # Get uint16 character code from a string.
@@ -1173,26 +1221,59 @@
     index: WordSized
   num_temps: 2
 
-# Get uint16 character code from a string. Return NaN on out-of-bounds.
-- name: CharCodeAtMaybeOutOfBounds
-  result_type: BoxedValue
-  operands:
-    str: WordSized
-    index: WordSized
-  num_temps: 2
-
-# Get uint16 character code from a string and convert it to a string. Return
-# the empty string on out-of-bounds.
-- name: CharAtMaybeOutOfBounds
+# Get uint16 character code from a string. Return -1 on out-of-bounds.
+- name: CharCodeAtOrNegative
   result_type: WordSized
   operands:
     str: WordSized
     index: WordSized
   num_temps: 2
+
+# Get uint32 code point from a string.
+- name: CodePointAt
+  result_type: WordSized
+  operands:
+    str: WordSized
+    index: WordSized
+  num_temps: 2
+
+# Get uint32 code point from a string. Return -1 on out-of-bounds.
+- name: CodePointAtOrNegative
+  result_type: WordSized
+  operands:
+    str: WordSized
+    index: WordSized
+  num_temps: 2
+
+# Box the input if non-negative. Otherwise return NaN.
+- name: NegativeToNaN
+  result_type: BoxedValue
+  operands:
+    input: WordSized
+
+# Box the input if non-negative. Otherwise return undefined.
+- name: NegativeToUndefined
+  result_type: BoxedValue
+  operands:
+    input: WordSized
 
 # Convert uint16 character code to a string.
 - name: FromCharCode
   result_type: WordSized
+  operands:
+    code: WordSized
+
+# Convert non-negative input as a uint16 character code to a string. If the
+# input is negative, return the empty string.
+- name: FromCharCodeEmptyIfNegative
+  result_type: WordSized
+  operands:
+    code: WordSized
+
+# Convert non-negative input as a uint16 character code to a string. If the
+# input is negative, return the undefined value.
+- name: FromCharCodeUndefinedIfNegative
+  result_type: BoxedValue
   operands:
     code: WordSized
 
@@ -1203,8 +1284,42 @@
     codePoint: WordSized
   num_temps: 2
 
+# Test if a string includes the search string.
+- name: StringIncludes
+  result_type: WordSized
+  operands:
+    string: WordSized
+    searchString: WordSized
+  call_instruction: true
+
+# Test if a string includes the constant search string.
+- name: StringIncludesSIMD
+  result_type: WordSized
+  operands:
+    string: WordSized
+  arguments:
+    searchString: JSLinearString*
+  num_temps: 3
+
 # Search for the first index of the search string.
 - name: StringIndexOf
+  result_type: WordSized
+  operands:
+    string: WordSized
+    searchString: WordSized
+  call_instruction: true
+
+# Search for the first index of the constant search string.
+- name: StringIndexOfSIMD
+  result_type: WordSized
+  operands:
+    string: WordSized
+  arguments:
+    searchString: JSLinearString*
+  num_temps: 3
+
+# Search for the last index of the search string.
+- name: StringLastIndexOf
   result_type: WordSized
   operands:
     string: WordSized
@@ -1254,6 +1369,15 @@
   num_temps: 5
   mir_op: StringConvertCase
 
+# Calls the ToLowerCase case conversion function. Inlines the case conversion
+# when possible.
+- name: CharCodeToLowerCase
+  result_type: WordSized
+  operands:
+    code: WordSized
+  num_temps: 1
+  mir_op: CharCodeConvertCase
+
 # Calls the ToUpperCase case conversion function.
 - name: StringToUpperCase
   result_type: WordSized
@@ -1261,6 +1385,28 @@
     string: WordSized
   call_instruction: true
   mir_op: StringConvertCase
+
+# Calls the ToUpperCase case conversion function. Inlines the case conversion
+# when possible.
+- name: CharCodeToUpperCase
+  result_type: WordSized
+  operands:
+    code: WordSized
+  num_temps: 1
+  mir_op: CharCodeConvertCase
+
+# Index of first non-whitespace character.
+- name: StringTrimStartIndex
+  result_type: WordSized
+  operands:
+    string: WordSized
+
+# Index of last non-whitespace character.
+- name: StringTrimEndIndex
+  result_type: WordSized
+  operands:
+    string: WordSized
+    start: WordSized
 
 - name: StringSplit
   result_type: WordSized
@@ -1277,7 +1423,7 @@
     begin: WordSized
     length: WordSized
   num_temps: 3
-  mir_op: StringSplit
+  mir_op: true
 
 - name: Int32ToDouble
   result_type: WordSized
@@ -1866,6 +2012,20 @@
   call_instruction: true
   mir_op: true
 
+- name: ObjectKeys
+  result_type: WordSized
+  operands:
+    object: WordSized
+  num_temps: 0
+  call_instruction: true
+
+- name: ObjectKeysLength
+  result_type: WordSized
+  operands:
+    object: WordSized
+  num_temps: 0
+  call_instruction: true
+
 - name: LoadUnboxedScalar
   result_type: WordSized
   operands:
@@ -2006,6 +2166,15 @@
     object: WordSized
   mir_op: LoadFixedSlot
 
+# Load a boxed value from an object's fixed slot.
+# If it is a non-atom string, atomize it and update the slot.
+- name: LoadFixedSlotAndAtomize
+  result_type: BoxedValue
+  operands:
+    object: WordSized
+  num_temps: 1
+  mir_op: LoadFixedSlot
+
 # Load a typed value from an object's fixed slot.
 - name: LoadFixedSlotT
   result_type: WordSized
@@ -2031,6 +2200,18 @@
     elements: WordSized
     index: WordSized
   mir_op: true
+
+- name: LoadFixedSlotUnboxAndAtomize
+  result_type: WordSized
+  operands:
+    object: WordSized
+  mir_op: LoadFixedSlotAndUnbox
+
+- name: LoadDynamicSlotUnboxAndAtomize
+  result_type: WordSized
+  operands:
+    slots: WordSized
+  mir_op: LoadDynamicSlotAndUnbox
 
 - name: AddAndStoreSlot
   operands:
@@ -2116,6 +2297,15 @@
   result_type: BoxedValue
   operands:
     in: WordSized
+  mir_op: LoadDynamicSlot
+
+# Load a value from an object's dslots or a slots vector.
+# If it is a non-atom string, atomize it and update the slot.
+- name: LoadDynamicSlotAndAtomize
+  result_type: BoxedValue
+  operands:
+    in: WordSized
+  num_temps: 1
   mir_op: LoadDynamicSlot
 
 # Store a value to an object's dslots or a slots vector.
@@ -2359,6 +2549,13 @@
 - name: CloseIterCache
   operands:
     iter: WordSized
+  num_temps: 1
+  mir_op: true
+
+- name: OptimizeGetIteratorCache
+  result_type: WordSized
+  operands:
+    value: BoxedValue
   num_temps: 1
   mir_op: true
 
@@ -2607,6 +2804,10 @@
   num_temps: 1
 
 - name: GuardGlobalGeneration
+  mir_op: true
+  num_temps: 1
+
+- name: GuardFuse
   mir_op: true
   num_temps: 1
 
@@ -2892,6 +3093,15 @@
 
 - name: WasmBoundsCheck64
   gen_boilerplate: false
+
+- name: WasmBoundsCheckRange32
+  result_type: WordSized
+  operands:
+    index: WordSized
+    length: WordSized
+    limit: WordSized
+  mir_op: true
+  num_temps: 1
 
 - name: WasmExtendU32Index
   result_type: WordSized
@@ -3239,7 +3449,16 @@
   result_type: WordSized
   operands:
     generator: WordSized
-    valueOrReason: BoxedValue
+    value: BoxedValue
+  call_instruction: true
+  mir_op: true
+
+- name: AsyncReject
+  result_type: WordSized
+  operands:
+    generator: WordSized
+    reason: BoxedValue
+    stack: BoxedValue
   call_instruction: true
   mir_op: true
 

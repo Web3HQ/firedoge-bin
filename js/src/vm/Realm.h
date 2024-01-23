@@ -23,8 +23,10 @@
 #include "js/TelemetryTimers.h"
 #include "js/UniquePtr.h"
 #include "vm/ArrayBufferObject.h"
+#include "vm/GuardFuse.h"
 #include "vm/JSContext.h"
 #include "vm/PromiseLookup.h"  // js::PromiseLookup
+#include "vm/RealmFuses.h"
 #include "vm/SavedStacks.h"
 #include "wasm/WasmRealm.h"
 
@@ -136,6 +138,54 @@ class NewPlainObjectWithPropsCache {
   }
 };
 
+// Cache for Object.assign's fast path for two plain objects. It's used to
+// optimize:
+//
+//   Object.assign(to, from)
+//
+// If the |to| object has shape |emptyToShape_| (shape with no properties) and
+// the |from| object has shape |fromShape_|, we can use |newToShape_| for |to|
+// and copy all (data)) properties from the |from| object.
+//
+// This is a one-entry cache for now. It has a hit rate of > 90% on both
+// Speedometer 2 and Speedometer 3.
+class MOZ_NON_TEMPORARY_CLASS PlainObjectAssignCache {
+  SharedShape* emptyToShape_ = nullptr;
+  SharedShape* fromShape_ = nullptr;
+  SharedShape* newToShape_ = nullptr;
+
+#ifdef DEBUG
+  void assertValid() const;
+#else
+  void assertValid() const {}
+#endif
+
+ public:
+  PlainObjectAssignCache() = default;
+  PlainObjectAssignCache(const PlainObjectAssignCache&) = delete;
+  void operator=(const PlainObjectAssignCache&) = delete;
+
+  SharedShape* lookup(Shape* emptyToShape, Shape* fromShape) const {
+    if (emptyToShape_ == emptyToShape && fromShape_ == fromShape) {
+      assertValid();
+      return newToShape_;
+    }
+    return nullptr;
+  }
+  void fill(SharedShape* emptyToShape, SharedShape* fromShape,
+            SharedShape* newToShape) {
+    emptyToShape_ = emptyToShape;
+    fromShape_ = fromShape;
+    newToShape_ = newToShape;
+    assertValid();
+  }
+  void purge() {
+    emptyToShape_ = nullptr;
+    fromShape_ = nullptr;
+    newToShape_ = nullptr;
+  }
+};
+
 // [SMDOC] Object MetadataBuilder API
 //
 // We must ensure that all newly allocated JSObjects get their metadata
@@ -188,7 +238,7 @@ class ObjectRealm {
 
  public:
   // Map from array buffers to views sharing that storage.
-  JS::WeakCache<js::InnerViewTable> innerViews;
+  WeakCache<js::InnerViewTable> innerViews;
 
   // Keep track of the metadata objects which can be associated with each JS
   // object. Both keys and values are in this realm.
@@ -317,6 +367,7 @@ class JS::Realm : public JS::shadow::Realm {
     DebuggerObservesAsmJS = 1 << 2,
     DebuggerObservesCoverage = 1 << 3,
     DebuggerObservesWasm = 1 << 4,
+    DebuggerObservesNativeCall = 1 << 5,
   };
   unsigned debugModeBits_ = 0;
   friend class js::AutoRestoreRealmDebugMode;
@@ -334,6 +385,7 @@ class JS::Realm : public JS::shadow::Realm {
   js::DtoaCache dtoaCache;
   js::NewProxyCache newProxyCache;
   js::NewPlainObjectWithPropsCache newPlainObjectWithPropsCache;
+  js::PlainObjectAssignCache plainObjectAssignCache;
   js::ArraySpeciesLookup arraySpeciesLookup;
   js::PromiseLookup promiseLookup;
 
@@ -351,6 +403,9 @@ class JS::Realm : public JS::shadow::Realm {
 
   // Counter for shouldCaptureStackForThrow.
   uint16_t numStacksCapturedForThrow_ = 0;
+
+  // Count the number of allocation sites pretenured, for testing purposes.
+  uint16_t numAllocSitesPretenured = 0;
 
 #ifdef DEBUG
   bool firedOnNewGlobalObject = false;
@@ -379,6 +434,9 @@ class JS::Realm : public JS::shadow::Realm {
   // alternative for making the global a debuggee, when no actual debugging
   // features are required.
   bool isUnlimitedStacksCapturingEnabled = false;
+
+  // Whether or not the deprecation warning for bug 1873186 has been shown.
+  bool warnedAboutDateLateWeekday = false;
 
  private:
   void updateDebuggerObservesFlag(unsigned flag);
@@ -422,6 +480,9 @@ class JS::Realm : public JS::shadow::Realm {
   const JS::RealmBehaviors& behaviors() const { return behaviors_; }
 
   void setNonLive() { behaviors_.setNonLive(); }
+  void setReduceTimerPrecisionCallerType(JS::RTPCallerTypeToken type) {
+    behaviors_.setReduceTimerPrecisionCallerType(type);
+  }
 
   /* Whether to preserve JIT code on non-shrinking GCs. */
   bool preserveJitCode() { return creationOptions_.preserveJitCode(); }
@@ -656,6 +717,17 @@ class JS::Realm : public JS::shadow::Realm {
     updateDebuggerObservesFlag(DebuggerObservesWasm);
   }
 
+  // True if this compartment's global is a debuggee of some Debugger
+  // object with a live hook that observes native calls.
+  // (has a onNativeCall function registered)
+  bool debuggerObservesNativeCall() const {
+    static const unsigned Mask = IsDebuggee | DebuggerObservesNativeCall;
+    return (debugModeBits_ & Mask) == Mask;
+  }
+  void updateDebuggerObservesNativeCall() {
+    updateDebuggerObservesFlag(DebuggerObservesNativeCall);
+  }
+
   // True if this realm's global is a debuggee of some Debugger object
   // whose collectCoverageInfo flag is true.
   bool debuggerObservesCoverage() const {
@@ -720,6 +792,8 @@ class JS::Realm : public JS::shadow::Realm {
                   "JIT code assumes field is pointer-sized");
     return offsetof(JS::Realm, global_);
   }
+
+  js::RealmFuses realmFuses;
 
  private:
   void purgeForOfPicChain();

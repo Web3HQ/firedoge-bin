@@ -26,6 +26,7 @@
 #include "wasm/WasmBCFrame.h"
 #include "wasm/WasmBCRegDefs.h"
 #include "wasm/WasmBCStk.h"
+#include "wasm/WasmConstants.h"
 
 namespace js {
 namespace wasm {
@@ -80,6 +81,9 @@ struct Control {
         deadOnArrival(false),
         deadThenBranch(false),
         tryNoteIndex(0) {}
+
+  Control(Control&&) = default;
+  Control(const Control&) = delete;
 };
 
 // A vector of Nothing values, used for reading opcodes.
@@ -87,11 +91,13 @@ class BaseNothingVector {
   Nothing unused_;
 
  public:
+  bool reserve(size_t size) { return true; }
   bool resize(size_t length) { return true; }
   Nothing& operator[](size_t) { return unused_; }
   Nothing& back() { return unused_; }
   size_t length() const { return 0; }
   bool append(Nothing& nothing) { return true; }
+  void infallibleAppend(Nothing& nothing) {}
 };
 
 // The baseline compiler tracks values on a stack of its own -- it needs to scan
@@ -872,6 +878,9 @@ struct BaseCompiler final {
   void shuffleStackResultsBeforeBranch(StackHeight srcHeight,
                                        StackHeight destHeight, ResultType type);
 
+  // If in debug mode, adds LeaveFrame breakpoint.
+  bool insertDebugCollapseFrame();
+
   //////////////////////////////////////////////////////////////////////
   //
   // Stack maps
@@ -1061,6 +1070,17 @@ struct BaseCompiler final {
   inline void branchTo(Assembler::Condition c, RegI64 lhs, Imm64 rhs, Label* l);
   inline void branchTo(Assembler::Condition c, RegRef lhs, ImmWord rhs,
                        Label* l);
+
+  // Helpers for accessing Instance::baselineScratchWords_.  Note that Word
+  // and I64 versions of these routines access the same area and it is up to
+  // the caller to use it in some way which makes sense.
+
+  // Store/load `r`, a machine word, to/from the `index`th scratch storage
+  // slot in the current Instance.  `instancePtr` must point at the current
+  // Instance; it will not be modified.  For ::stashWord, `r` must not be the
+  // same as `instancePtr`.
+  void stashWord(RegPtr instancePtr, size_t index, RegPtr r);
+  void unstashWord(RegPtr instancePtr, size_t index, RegPtr r);
 
 #ifdef JS_CODEGEN_X86
   // Store r in instance scratch storage after first loading the instance from
@@ -1377,10 +1397,12 @@ struct BaseCompiler final {
   [[nodiscard]] bool emitBodyDelegateThrowPad();
 
   [[nodiscard]] bool emitTry();
+  [[nodiscard]] bool emitTryTable();
   [[nodiscard]] bool emitCatch();
   [[nodiscard]] bool emitCatchAll();
   [[nodiscard]] bool emitDelegate();
   [[nodiscard]] bool emitThrow();
+  [[nodiscard]] bool emitThrowRef();
   [[nodiscard]] bool emitRethrow();
   [[nodiscard]] bool emitEnd();
   [[nodiscard]] bool emitBr();
@@ -1437,6 +1459,7 @@ struct BaseCompiler final {
   [[nodiscard]] bool endIfThen(ResultType type);
   [[nodiscard]] bool endIfThenElse(ResultType type);
   [[nodiscard]] bool endTryCatch(ResultType type);
+  [[nodiscard]] bool endTryTable(ResultType type);
 
   void doReturn(ContinuationKind kind);
   void pushReturnValueOfCall(const FunctionCall& call, MIRType type);
@@ -1662,18 +1685,15 @@ struct BaseCompiler final {
   [[nodiscard]] bool emitArrayNewDefault();
   [[nodiscard]] bool emitArrayNewData();
   [[nodiscard]] bool emitArrayNewElem();
+  [[nodiscard]] bool emitArrayInitData();
+  [[nodiscard]] bool emitArrayInitElem();
   [[nodiscard]] bool emitArrayGet(FieldWideningOp wideningOp);
   [[nodiscard]] bool emitArraySet();
-  [[nodiscard]] bool emitArrayLen(bool decodeIgnoredTypeIndex);
+  [[nodiscard]] bool emitArrayLen();
   [[nodiscard]] bool emitArrayCopy();
-  [[nodiscard]] bool emitI31New();
+  [[nodiscard]] bool emitArrayFill();
+  [[nodiscard]] bool emitRefI31();
   [[nodiscard]] bool emitI31Get(FieldWideningOp wideningOp);
-  [[nodiscard]] bool emitRefTestV5();
-  [[nodiscard]] bool emitRefCastV5();
-  [[nodiscard]] bool emitBrOnCastV5(bool onSuccess);
-  [[nodiscard]] bool emitBrOnCastHeapV5(bool onSuccess, bool nullable);
-  [[nodiscard]] bool emitRefAsStructV5();
-  [[nodiscard]] bool emitBrOnNonStructV5();
   [[nodiscard]] bool emitRefTest(bool nullable);
   [[nodiscard]] bool emitRefCast(bool nullable);
   [[nodiscard]] bool emitBrOnCastCommon(bool onSuccess,
@@ -1681,18 +1701,20 @@ struct BaseCompiler final {
                                         const ResultType& labelType,
                                         RefType sourceType, RefType destType);
   [[nodiscard]] bool emitBrOnCast(bool onSuccess);
-  [[nodiscard]] bool emitExternInternalize();
-  [[nodiscard]] bool emitExternExternalize();
+  [[nodiscard]] bool emitAnyConvertExtern();
+  [[nodiscard]] bool emitExternConvertAny();
 
   // Utility classes/methods to add trap information related to
-  // null pointer derefences/accesses.
+  // null pointer dereferences/accesses.
   struct NoNullCheck {
-    static void emitNullCheck(BaseCompiler*, RegRef) {}
-    static void emitTrapSite(BaseCompiler*) {}
+    static void emitNullCheck(BaseCompiler* bc, RegRef rp) {}
+    static void emitTrapSite(BaseCompiler* bc, FaultingCodeOffset fco,
+                             TrapMachineInsn tmi) {}
   };
   struct SignalNullCheck {
     static void emitNullCheck(BaseCompiler* bc, RegRef rp);
-    static void emitTrapSite(BaseCompiler* bc);
+    static void emitTrapSite(BaseCompiler* bc, FaultingCodeOffset fco,
+                             TrapMachineInsn tmi);
   };
 
   // Load a pointer to the TypeDefInstanceData for a given type index
@@ -1700,6 +1722,11 @@ struct BaseCompiler final {
   // Load a pointer to the SuperTypeVector for a given type index
   RegPtr loadSuperTypeVector(uint32_t typeIndex);
 
+  template <bool ZeroFields>
+  bool emitStructAlloc(uint32_t typeIndex, RegRef* object,
+                       bool* isOutlineStruct, RegPtr* outlineBase);
+
+  template <typename NullCheckPolicy>
   RegPtr emitGcArrayGetData(RegRef rp);
   template <typename NullCheckPolicy>
   RegI32 emitGcArrayGetNumElements(RegRef rp);
@@ -1758,7 +1785,7 @@ struct BaseCompiler final {
   [[nodiscard]] bool emitVectorShiftRightI64x2();
 #  endif
 #endif
-  [[nodiscard]] bool emitIntrinsic();
+  [[nodiscard]] bool emitCallBuiltinModuleFunc();
 };
 
 }  // namespace wasm

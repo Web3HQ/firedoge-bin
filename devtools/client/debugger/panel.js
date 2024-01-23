@@ -4,10 +4,12 @@
 
 "use strict";
 
-const { MultiLocalizationHelper } = require("devtools/shared/l10n");
+const {
+  MultiLocalizationHelper,
+} = require("resource://devtools/shared/l10n.js");
 const {
   FluentL10n,
-} = require("devtools/client/shared/fluent-l10n/fluent-l10n");
+} = require("resource://devtools/client/shared/fluent-l10n/fluent-l10n.js");
 
 loader.lazyRequireGetter(
   this,
@@ -51,6 +53,8 @@ const DBG_STRINGS_URI = [
   // These are used in the AppErrorBoundary component
   "devtools/client/locales/startup.properties",
   "devtools/client/locales/components.properties",
+  // Used by SourceMapLoader
+  "devtools/client/locales/toolbox.properties",
 ];
 const L10N = new MultiLocalizationHelper(...DBG_STRINGS_URI);
 
@@ -100,10 +104,10 @@ class DebuggerPanel {
     return this;
   }
 
-  _onDebuggerStateChange(state, oldState) {
+  async _onDebuggerStateChange(state, oldState) {
     const { getCurrentThread } = this._selectors;
-
     const currentThreadActorID = getCurrentThread(state);
+
     if (
       currentThreadActorID &&
       currentThreadActorID !== getCurrentThread(oldState)
@@ -112,6 +116,20 @@ class DebuggerPanel {
         this.commands.client.getFrontByID(currentThreadActorID);
       this.toolbox.selectTarget(threadFront?.targetFront.actorID);
     }
+
+    this.toolbox.emit(
+      "show-original-variable-mapping-warnings",
+      this.shouldShowOriginalVariableMappingWarnings()
+    );
+  }
+
+  shouldShowOriginalVariableMappingWarnings() {
+    const { getSelectedSource, isMapScopesEnabled } = this._selectors;
+    if (!this.isPaused() || isMapScopesEnabled(this._getState())) {
+      return false;
+    }
+    const selectedSource = getSelectedSource(this._getState());
+    return selectedSource?.isOriginal && !selectedSource?.isPrettyPrinted;
   }
 
   getVarsForTests() {
@@ -300,9 +318,19 @@ class DebuggerPanel {
     return true;
   }
 
-  async selectWorker(workerDescriptorFront) {
-    const threadActorID = workerDescriptorFront.threadFront?.actorID;
+  async selectServiceWorker(workerDescriptorFront) {
+    // The descriptor used by the application panel isn't fetching the worker target,
+    // but the debugger will fetch it via the watcher actor and TargetCommand.
+    // So try to match the descriptor with its related target.
+    const targets = this.commands.targetCommand.getAllTargets([
+      this.commands.targetCommand.TYPES.SERVICE_WORKER,
+    ]);
+    const workerTarget = targets.find(
+      target => target.id == workerDescriptorFront.id
+    );
 
+    const threadFront = await workerTarget.getFront("thread");
+    const threadActorID = threadFront?.actorID;
     const isThreadAvailable = this._selectors
       .getThreads(this._getState())
       .find(x => x.actor === threadActorID);
@@ -337,12 +365,6 @@ class DebuggerPanel {
 
   selectThread(threadActorID) {
     this._actions.selectThread(threadActorID);
-  }
-
-  toggleJavascriptTracing() {
-    this._actions.toggleTracing(
-      this._selectors.getJavascriptTracingLogMethod(this._getState())
-    );
   }
 
   destroy() {

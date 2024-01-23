@@ -18,7 +18,7 @@ const INSTRUCTIONS = [
   "array.set $a_unpacked",
   "array.copy $a_unpacked $a_unpacked",
   "array.len",
-  "i31.new",
+  "ref.i31",
   "i31.get_s",
   "i31.get_u",
   "ref.test structref",
@@ -37,8 +37,8 @@ const INSTRUCTIONS = [
   "ref.cast nullexternref",
   "br_on_cast 0 anyref (ref $s)",
   "br_on_cast_fail 0 anyref (ref $s)",
-  "extern.internalize",
-  "extern.externalize",
+  "any.convert_extern",
+  "extern.convert_any",
 ];
 
 for (let instruction of INSTRUCTIONS) {

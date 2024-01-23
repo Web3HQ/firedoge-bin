@@ -454,11 +454,6 @@ impl<'a> Resolver<'a> {
                     self.component_val_type(field)?;
                 }
             }
-            ComponentDefinedType::Union(t) => {
-                for ty in t.types.iter_mut() {
-                    self.component_val_type(ty)?;
-                }
-            }
             ComponentDefinedType::Option(o) => {
                 self.component_val_type(&mut o.element)?;
             }
@@ -528,6 +523,7 @@ impl<'a> Resolver<'a> {
                     ValType::Ref(r) => match &mut r.heap {
                         core::HeapType::Func
                         | core::HeapType::Extern
+                        | core::HeapType::Exn
                         | core::HeapType::Any
                         | core::HeapType::Eq
                         | core::HeapType::Array
@@ -536,7 +532,7 @@ impl<'a> Resolver<'a> {
                         | core::HeapType::None
                         | core::HeapType::NoFunc
                         | core::HeapType::NoExtern => {}
-                        core::HeapType::Index(id) => {
+                        core::HeapType::Concrete(id) => {
                             self.resolve_ns(id, Ns::Type)?;
                         }
                     },

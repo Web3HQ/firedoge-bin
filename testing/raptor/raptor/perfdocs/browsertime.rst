@@ -124,6 +124,58 @@ Or for Raptor-Browsertime (use ``chrome`` for desktop, and ``chrome-m`` for mobi
 
   ./mach raptor --browsertime -t amazon --app chrome --browsertime-chromedriver <PATH/TO/CHROMEDRIVER>
 
+Running Page-load tests with third party WebExtensions
+------------------------------------------------------
+Page-load tests can also be executed on both Firefox Desktop and Firefox for Android builds with a set of popular
+third party extensions installed (similarly to talos-realworld-webextensions, which runs tp5 tests with a set of third
+party extensions installed).
+
+Any of the page-load tests can be executed locally with the pre-selected set of third party extensions installed by just
+adding to the base raptor command the additional ``--conditioned-profile settled-webext`` command line option.
+
+Launch amazon tp6 page-load test on Firefox Desktop:
+
+::
+
+   ./mach raptor --browsertime -t amazon --conditioned-profile settled-webext
+
+Launch amazon tp6 mobile page-load test on Firefox for Android (the apk has to be pre-installed, mach raptor does detect if already installed but
+it does not install it):
+
+::
+
+   ./mach raptor --browsertime -t amazon --app fenix --binary org.mozilla.fenix --conditioned-profile settled-webext
+
+To run these jobs on try, make sure to select the tp6 jobs that include the string `webextensions`, as an example (add ``--no-push`` to force try fuzzy to only
+list the jobs selected by the try fuzzy query) to run all tp6 page-load webextensons jobs currently defined:
+
+::
+
+   ./mach try fuzzy -q "'tp6 'webextensions"
+
+Similarly for running tp6m on Firefox for Android builds:
+
+::
+
+   ./mach try fuzzy --full -q "'tp6m 'webextensions"
+
+The set of extensions installed are the ones listed in the ``"addons"`` property of the condprof customization file
+`webext.json`_ from the ``testing/condprofile/condprof/customization/`` directory.
+
+All extensions listed in the ``webext.json`` file are expected to have been predownloaded and included in the ``firefox-addons.tar`` archive
+defined in the CI fetch config named `firefox-addons`_, but they will be automatically downloaded from the url specified in the ``webext.json``
+file if they are not.
+
+In a try push we allow to run jobs on new extension xpi files not part of the firefox-addons.tar archive, the new extension needs to be just
+added in the `webext.json`_ condprof customization file in a patch part of the same stack of patches being pushed to try.
+
+On the contrary new extensions added to the `webext.json`_ condprof customization file on mozilla-central patches will require the xpi file to be
+added to the ``firefox-addons.tar`` archive and the `firefox-addons`_ CI fetch config updated accordingly (missing to update the archive will
+trigger explicit linter errors, :doc:`see condprof-addons linter docs </code-quality/lint/linters/condprof-addons>`).
+
+.. _webext.json: https://searchfox.org/mozilla-central/rev/bc6a50e6f08db0bb371ef7197c472555499e82c0/testing/condprofile/condprof/customization/webext.json
+.. _firefox-addons: https://searchfox.org/mozilla-central/rev/bc6a50e6f08db0bb371ef7197c472555499e82c0/taskcluster/ci/fetch/browsertime.yml#169-176
+
 More Examples
 -------------
 
@@ -172,23 +224,27 @@ To run gecko profiling using Raptor-Browsertime you can add the ``--gecko-profil
 
 Note that vanilla Browsertime does support Gecko Profiling but **it does not symbolicate the profiles** so it is **not recommended** to use for debugging performance regressions/improvements.
 
-Custom Gecko profiling with Raptor-Browsertime
-----------------------------------------------
-
-With browsertime you can now use the exposed start/stop commands of the gecko profiler. First, one needs to define the ``expose_gecko_profiler`` variable in the `test's configuration file <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/testing/raptor/raptor/tests/benchmarks/speedometer-desktop.ini#12>`_
-
-If you want to run the test in CI then you will want to ensure you set the ``--extra-profiler-run`` flag in the mozharness extra options for where your test is defined in the `browsertime-desktop yaml file <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/taskcluster/ci/test/browsertime-desktop.yml#404-406>`_. Otherwise you can just pass the ``--extra-profiler-run`` flag locally in your command line.
-
-Both of these steps are required to satisfy the ``_expose_gecko_profiler()`` `method <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/testing/raptor/raptor/browsertime/base.py#186-196>`_ so that the option, `expose_profiler <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/testing/raptor/raptor/browsertime/base.py#330-333>`_, is passed into your browsertime script. Finally, it should be as simple as calling the ``start()`` & ``stop()`` commands in your `script <https://searchfox.org/mozilla-central/rev/7a4c08f2c3a895c9dc064734ada320f920250c1f/testing/raptor/browsertime/speedometer3.js#16,32-35,71-74>`_.
-
-You should also keep in mind these `default parameters <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/testing/raptor/raptor/browsertime/base.py#474-495>`_, which you may or may not want to change yourself in your tests configuration file.
-
 Gathering a Chrome trace with Raptor-Browsertime
 ------------------------------------------------
 
 Browsertime supports the ability to profile Chrome applications and this functionality is now available in Raptor.
 
-If running a Chrome/Chromium/Chromium-as-release test locally, simply add the ``--extra-profiler-run`` flag to your command line. By default the Chrome trace is run in CI now, and can be opened in the Firefox profiler UI. At the moment only pageload tracing is supported.
+If running a Chrome/Chromium/Chromium-as-release test locally, simply add the ``--extra-profiler-run`` flag to your command line. By default the Chrome trace is run in CI now, and can be opened in the Firefox profiler UI.
+
+Equivalent functionality to the ``--gecko-profile`` flag, i.e. something like ``--chrome-trace``, is not yet supported. That is currently tracked in `Bug 1848390 <https://bugzilla.mozilla.org/show_bug.cgi?id=1848390>`_
+
+Custom profiling with Raptor-Browsertime
+----------------------------------------
+
+With browsertime you can now use the exposed start/stop commands of the gecko profiler **and** chrome trace. First, one needs to define the ``expose_browser_profiler`` and ``apps`` variables appropriately in the `test's configuration file <https://searchfox.org/mozilla-central/rev/11d085b63cf74b35737d9c036be80434883dd3f6/testing/raptor/raptor/tests/benchmarks/speedometer-desktop.ini#9,12>`_
+
+If you want to run the test in CI then you will want to ensure you set the ``--extra-profiler-run`` flag in the mozharness extra options for where your test is defined in the `browsertime-desktop yaml file <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/taskcluster/ci/test/browsertime-desktop.yml#404-406>`_. Otherwise you can just pass the ``--extra-profiler-run`` flag locally in your command line.
+
+Both of these steps are required to satisfy the ``_expose_browser_profiler()`` `method <https://searchfox.org/mozilla-central/rev/11d085b63cf74b35737d9c036be80434883dd3f6/testing/raptor/raptor/browsertime/base.py#241>`_ so that the option, `expose_profiler <https://searchfox.org/mozilla-central/rev/11d085b63cf74b35737d9c036be80434883dd3f6/testing/raptor/raptor/browsertime/base.py#383-386>`_, is passed into your browsertime script. Finally, it should be as simple as calling the ``start()`` & ``stop()`` commands in your `script <https://searchfox.org/mozilla-central/rev/11d085b63cf74b35737d9c036be80434883dd3f6/testing/raptor/browsertime/speedometer3.js#14,30-37,58-65>`_.
+
+For the gecko profiler, you should also keep in mind these `default parameters <https://searchfox.org/mozilla-central/rev/2e06f92ba068e32a9a7213ee726e8171f91605c7/testing/raptor/raptor/browsertime/base.py#474-495>`_, which you may or may not want to change yourself in your tests configuration file.
+
+Likewise, for chrome trace you will want to be aware of `these defaults. <https://searchfox.org/mozilla-central/rev/11d085b63cf74b35737d9c036be80434883dd3f6/testing/raptor/raptor/browsertime/base.py#646-658>`_
 
 Upgrading Browsertime In-Tree
 -----------------------------

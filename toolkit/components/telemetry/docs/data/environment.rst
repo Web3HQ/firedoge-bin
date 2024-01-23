@@ -160,7 +160,9 @@ Structure:
             installYear: <number>, // windows only or null on failure
             locale: <string>, // "en" or null on failure
             hasPrefetch: <bool>, // windows only, or null on failure
-            hasSuperfetch: <bool>, // windows only, or nul on failure
+            hasSuperfetch: <bool>, // windows only, or null on failure
+            distro: <string>, // linux only, or null on failure
+            distroVersion: <string>, // linux only, or null on failure
         },
         hdd: {
           profile: { // hdd where the profile folder is located
@@ -407,8 +409,6 @@ The following is a partial list of `collected preferences <https://searchfox.org
 
 - ``browser.urlbar.showSearchTerms.enabled``: True if to show the search term in the urlbar while on a default search engine results page.
 
-- ``browser.urlbar.suggest.bestmatch``: True if to show best match result is enabled in the urlbar.
-
 - ``browser.urlbar.suggest.quicksuggest.nonsponsored``: True if non-sponsored Firefox Suggest suggestions are enabled in the urlbar.
 
 - ``browser.urlbar.suggest.quicksuggest.sponsored``: True if sponsored Firefox Suggest suggestions are enabled in the urlbar.
@@ -470,6 +470,10 @@ The following is a partial list of `collected preferences <https://searchfox.org
 - ``nimbus.qa.pref-2``: Used to monitor the results of pref-setting test experiments.
 
 - ``signon.firefoxRelay.feature``: User choice regarding Firefox Relay integration with Firefox Password Manager. Can be one of undefined, "available", "offered", "enabled" or "disabled".
+
+- ``dom.popup_allowed_events``: Which events should allow popups. Only exposed with about:config.
+
+- ``intl.ime.use_composition_events_for_insert_text``: Whether a set of composition events is fired when user inserts text without keyboard events nor composing state of a composition (only on Linux and macOS).
 
 attribution
 ~~~~~~~~~~~

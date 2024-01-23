@@ -71,6 +71,24 @@ region-name-tw = Taiwan
   L10nRegistry.getInstance().registerSources([mockSource]);
 }
 
+/**
+ * Mock the return value of Services.focus.elementIsFocusable
+ * since a field's focusability can't be tested in a unit test.
+ */
+(function ignoreAFieldsFocusability() {
+  let stub = sinon.stub(Services, "focus").get(() => {
+    return {
+      elementIsFocusable() {
+        return true;
+      },
+    };
+  });
+
+  registerCleanupFunction(() => {
+    stub.restore();
+  });
+})();
+
 do_get_profile();
 
 const EXTENSION_ID = "formautofill@mozilla.org";
@@ -290,7 +308,8 @@ function getSyncChangeCounter(records, guid) {
 
 /**
  * Performs a partial deep equality check to determine if an object contains
- * the given fields.
+ * the given fields. To ensure the object doesn't contain a property, set the
+ * property of the `fields` object to `undefined`
  *
  * @param   {object} object
  *          The object to check. Unlike `ObjectUtils.deepEqual`, properties in
@@ -302,9 +321,11 @@ function getSyncChangeCounter(records, guid) {
  */
 function objectMatches(object, fields) {
   let actual = {};
-  for (let key in fields) {
+  for (const key in fields) {
     if (!object.hasOwnProperty(key)) {
-      return false;
+      if (fields[key] != undefined) {
+        return false;
+      }
     }
     actual[key] = object[key];
   }

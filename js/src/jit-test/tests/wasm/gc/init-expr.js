@@ -94,9 +94,32 @@ assertEq(wasmGcReadField(wasmGcReadField(result, 1), 1), 4);
 assertEq(wasmGcReadField(wasmGcReadField(result, 2), 0), 5);
 assertEq(wasmGcReadField(wasmGcReadField(result, 2), 1), 6);
 
+// any.convert_extern and extern.convert_any
+
+let {testString, testArray} = wasmEvalText(`(module
+        (type $array (array i32))
+        (import "env" "s" (global $s (ref extern)))
+        (global $s' (ref extern) (extern.convert_any (any.convert_extern (global.get $s))))
+        (func (export "testString") (result (ref extern))
+           (global.get $s'))
+        (global $a (ref $array) (array.new_fixed $array 1 (i32.const 0)))
+        (global $a' (ref any) (any.convert_extern (extern.convert_any (global.get $a))))
+        (func (export "testArray") (result i32)
+           (ref.eq (global.get $a) (ref.cast (ref eq) (global.get $a'))))
+)`, {env:{s:"abc"}}).exports;
+
+assertEq(testString(), 'abc');
+assertEq(testArray(), 1);
+
+wasmFailValidateText(`(module
+	(global $g (ref extern) (extern.convert_any (any.convert_extern (ref.null extern))))
+)`, /expected/);
+wasmFailValidateText(`(module
+	(global $g (ref extern) (any.convert_extern (extern.convert_any (ref.null any))))
+)`, /expected/);
+
 // Simple table initialization
 {
-  // TODO: uncomment things and fix up this test once i31ref has landed.
   const { t1, t2, t1init } = wasmEvalText(`(module
     (type $s (struct (field i32)))
     (type $a1 (array f64))
@@ -107,24 +130,25 @@ assertEq(wasmGcReadField(wasmGcReadField(result, 2), 1), 6);
       (item (struct.new $s (i32.const 123)))
       (item (array.new $a1 (f64.const 234) (i32.const 3)))
       (item (array.new_default $a2 (i32.const 3)))
-      ;; (item (i31.new (i32.const 345)))
+      (item (ref.i31 (i32.const 345)))
     )
-    (table $t1 (export "t1") 3 3 anyref)
+    (table $t1 (export "t1") 4 4 anyref)
 
     ;; active segment
     (table $t2 (export "t2") anyref (elem
       (item (struct.new $s (i32.const 321)))
       (item (array.new $a1 (f64.const 432) (i32.const 3)))
       (item (array.new_default $a2 (i32.const 3)))
-      ;; (item (i31.new (i32.const 543)))
+      (item (ref.i31 (i32.const 543)))
     ))
 
-    (func (export "t1init") (table.init $t1 $e1 (i32.const 0) (i32.const 0) (i32.const 3)))
+    (func (export "t1init") (table.init $t1 $e1 (i32.const 0) (i32.const 0) (i32.const 4)))
   )`).exports;
 
   assertEq(t1.get(0), null);
   assertEq(t1.get(1), null);
   assertEq(t1.get(2), null);
+  assertEq(t1.get(3), null);
 
   assertEq(wasmGcReadField(t2.get(0), 0), 321);
   assertEq(wasmGcReadField(t2.get(1), 0), 432);
@@ -133,6 +157,7 @@ assertEq(wasmGcReadField(wasmGcReadField(result, 2), 1), 6);
   assertEq(wasmGcReadField(t2.get(2), 0), null);
   assertEq(wasmGcReadField(t2.get(2), 1), null);
   assertEq(wasmGcReadField(t2.get(2), 2), null);
+  assertEq(t2.get(3), 543);
 
   t1init();
   assertEq(wasmGcReadField(t1.get(0), 0), 123);
@@ -142,6 +167,7 @@ assertEq(wasmGcReadField(wasmGcReadField(result, 2), 1), 6);
   assertEq(wasmGcReadField(t1.get(2), 0), null);
   assertEq(wasmGcReadField(t1.get(2), 1), null);
   assertEq(wasmGcReadField(t1.get(2), 2), null);
+  assertEq(t1.get(3), 345);
 }
 
 // The contents of passive segments are unique per instance and evaluated at

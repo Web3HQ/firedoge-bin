@@ -4,58 +4,124 @@ requestLongerTimeout(2);
 
 const gHttpTestRoot = "https://example.com/browser/dom/base/test/";
 
-/**
- * Enable local telemetry recording for the duration of the tests.
- */
-var gOldContentCanRecord = false;
-var gOldParentCanRecord = false;
-add_task(async function test_initialize() {
-  let Telemetry = Cc["@mozilla.org/base/telemetry;1"].getService(
-    Ci.nsITelemetry
-  );
-  gOldParentCanRecord = Telemetry.canRecordExtended;
-  Telemetry.canRecordExtended = true;
-
+add_setup(async function test_initialize() {
   await SpecialPowers.pushPrefEnv({
     set: [
-      // Because canRecordExtended is a per-process variable, we need to make sure
-      // that all of the pages load in the same content process. Limit the number
-      // of content processes to at most 1 (or 0 if e10s is off entirely).
-      ["dom.ipc.processCount", 1],
       ["layout.css.use-counters.enabled", true],
       ["layout.css.use-counters-unimplemented.enabled", true],
     ],
   });
-
-  gOldContentCanRecord = await SpecialPowers.spawn(
-    gBrowser.selectedBrowser,
-    [],
-    function () {
-      let telemetry = Cc["@mozilla.org/base/telemetry;1"].getService(
-        Ci.nsITelemetry
-      );
-      let old = telemetry.canRecordExtended;
-      telemetry.canRecordExtended = true;
-      return old;
-    }
-  );
-  info("canRecord for content: " + gOldContentCanRecord);
 });
 
-add_task(async function () {
+async function grabCounters(counters, before) {
+  let result = await grabHistogramsFromContent(
+    counters.map(c => c.name),
+    before?.sentinel
+  );
+  await Services.fog.testFlushAllChildren();
+  result.gleanPage = Object.fromEntries(
+    counters.map(c => [
+      c.name,
+      Glean[`useCounter${c.glean[0]}Page`][c.glean[1]].testGetValue() ?? 0,
+    ])
+  );
+  result.gleanDoc = Object.fromEntries(
+    counters.map(c => [
+      c.name,
+      Glean[`useCounter${c.glean[0]}Doc`][c.glean[1]].testGetValue() ?? 0,
+    ])
+  );
+  result.glean_docs_destroyed =
+    Glean.useCounter.contentDocumentsDestroyed.testGetValue();
+  result.glean_toplevel_destroyed =
+    Glean.useCounter.topLevelContentDocumentsDestroyed.testGetValue();
+  return result;
+}
+
+function assertRange(before, after, key, range) {
+  before = before[key];
+  after = after[key];
+  let desc = key + " are correct";
+  if (Array.isArray(range)) {
+    let [min, max] = range;
+    Assert.greaterOrEqual(after, before + min, desc);
+    Assert.lessOrEqual(after, before + max, desc);
+  } else {
+    Assert.equal(after, before + range, desc);
+  }
+}
+
+async function test_once(
+  { counters, toplevel_docs, docs, ignore_sentinel },
+  callback
+) {
+  // Hold on to the current values of the telemetry histograms we're
+  // interested in. Opening an about:blank tab shouldn't change those.
+  let before = await grabCounters(counters);
+
+  await callback();
+
+  let after = await grabCounters(counters, ignore_sentinel ? null : before);
+
+  // Compare before and after.
+  for (let counter of counters) {
+    let name = counter.name;
+    let value = counter.value ?? 1;
+    if (!counter.xfail) {
+      is(
+        after.page[name],
+        before.page[name] + value,
+        `page counts for ${name} after are correct`
+      );
+      is(
+        after.document[name],
+        before.document[name] + value,
+        `document counts for ${name} after are correct`
+      );
+      is(
+        after.gleanPage[name],
+        before.gleanPage[name] + value,
+        `Glean page counts for ${name} are correct`
+      );
+      is(
+        after.gleanDoc[name],
+        before.gleanDoc[name] + value,
+        `Glean document counts for ${name} are correct`
+      );
+    }
+  }
+
+  assertRange(before, after, "toplevel_docs", toplevel_docs);
+  assertRange(before, after, "glean_toplevel_destroyed", toplevel_docs);
+  assertRange(before, after, "docs", docs);
+  assertRange(before, after, "glean_docs_destroyed", docs);
+}
+
+add_task(async function test_page_counters() {
   const TESTS = [
     // Check that use counters are incremented by SVGs loaded directly in iframes.
     {
       type: "iframe",
       filename: "file_use_counter_svg_getElementById.svg",
-      counters: [{ name: "SVGSVGELEMENT_GETELEMENTBYID" }],
+      counters: [
+        {
+          name: "SVGSVGELEMENT_GETELEMENTBYID",
+          glean: ["", "svgsvgelementGetelementbyid"],
+        },
+      ],
     },
     {
       type: "iframe",
       filename: "file_use_counter_svg_currentScale.svg",
       counters: [
-        { name: "SVGSVGELEMENT_CURRENTSCALE_getter" },
-        { name: "SVGSVGELEMENT_CURRENTSCALE_setter" },
+        {
+          name: "SVGSVGELEMENT_CURRENTSCALE_getter",
+          glean: ["", "svgsvgelementCurrentscaleGetter"],
+        },
+        {
+          name: "SVGSVGELEMENT_CURRENTSCALE_setter",
+          glean: ["", "svgsvgelementCurrentscaleSetter"],
+        },
       ],
     },
 
@@ -64,13 +130,22 @@ add_task(async function () {
       filename: "file_use_counter_style.html",
       counters: [
         // Check for longhands.
-        { name: "CSS_PROPERTY_BackgroundImage" },
+        {
+          name: "CSS_PROPERTY_BackgroundImage",
+          glean: ["Css", "cssBackgroundImage"],
+        },
         // Check for shorthands.
-        { name: "CSS_PROPERTY_Padding" },
+        { name: "CSS_PROPERTY_Padding", glean: ["Css", "cssPadding"] },
         // Check for aliases.
-        { name: "CSS_PROPERTY_MozTransform" },
+        {
+          name: "CSS_PROPERTY_MozAppearance",
+          glean: ["Css", "cssMozAppearance"],
+        },
         // Check for counted unknown properties.
-        { name: "CSS_PROPERTY_WebkitPaddingStart" },
+        {
+          name: "CSS_PROPERTY_WebkitPaddingStart",
+          glean: ["Css", "webkitPaddingStart"],
+        },
       ],
     },
 
@@ -81,14 +156,25 @@ add_task(async function () {
     {
       type: "iframe",
       filename: "file_use_counter_svg_getElementById.svg",
-      counters: [{ name: "SVGSVGELEMENT_GETELEMENTBYID" }],
+      counters: [
+        {
+          name: "SVGSVGELEMENT_GETELEMENTBYID",
+          glean: ["", "svgsvgelementGetelementbyid"],
+        },
+      ],
     },
     {
       type: "iframe",
       filename: "file_use_counter_svg_currentScale.svg",
       counters: [
-        { name: "SVGSVGELEMENT_CURRENTSCALE_getter" },
-        { name: "SVGSVGELEMENT_CURRENTSCALE_setter" },
+        {
+          name: "SVGSVGELEMENT_CURRENTSCALE_getter",
+          glean: ["", "svgsvgelementCurrentscaleGetter"],
+        },
+        {
+          name: "SVGSVGELEMENT_CURRENTSCALE_setter",
+          glean: ["", "svgsvgelementCurrentscaleSetter"],
+        },
       ],
     },
 
@@ -98,12 +184,12 @@ add_task(async function () {
     {
       type: "img",
       filename: "file_use_counter_svg_getElementById.svg",
-      counters: [{ name: "CSS_PROPERTY_Fill" }],
+      counters: [{ name: "CSS_PROPERTY_Fill", glean: ["Css", "cssFill"] }],
     },
     {
       type: "img",
       filename: "file_use_counter_svg_currentScale.svg",
-      counters: [{ name: "CSS_PROPERTY_Fill" }],
+      counters: [{ name: "CSS_PROPERTY_Fill", glean: ["Css", "cssFill"] }],
     },
 
     // Check that use counters are incremented by directly loading SVGs
@@ -111,7 +197,13 @@ add_task(async function () {
     {
       type: "direct",
       filename: "file_use_counter_svg_fill_pattern.svg",
-      counters: [{ name: "CSS_PROPERTY_FillOpacity", xfail: true }],
+      counters: [
+        {
+          name: "CSS_PROPERTY_FillOpacity",
+          glean: ["Css", "cssFillOpacity"],
+          xfail: true,
+        },
+      ],
     },
 
     // Check that use counters are incremented by directly loading SVGs
@@ -119,14 +211,21 @@ add_task(async function () {
     {
       type: "direct",
       filename: "file_use_counter_svg_fill_pattern_internal.svg",
-      counters: [{ name: "CSS_PROPERTY_FillOpacity" }],
+      counters: [
+        { name: "CSS_PROPERTY_FillOpacity", glean: ["Css", "cssFillOpacity"] },
+      ],
     },
 
     // Check that use counters are incremented in a display:none iframe.
     {
       type: "undisplayed-iframe",
       filename: "file_use_counter_svg_currentScale.svg",
-      counters: [{ name: "SVGSVGELEMENT_CURRENTSCALE_getter" }],
+      counters: [
+        {
+          name: "SVGSVGELEMENT_CURRENTSCALE_getter",
+          glean: ["", "svgsvgelementCurrentscaleGetter"],
+        },
+      ],
     },
 
     // Check that a document that comes out of the bfcache reports any new use
@@ -135,7 +234,12 @@ add_task(async function () {
       type: "direct",
       filename: "file_use_counter_bfcache.html",
       waitForExplicitFinish: true,
-      counters: [{ name: "SVGSVGELEMENT_GETELEMENTBYID" }],
+      counters: [
+        {
+          name: "SVGSVGELEMENT_GETELEMENTBYID",
+          glean: ["", "svgsvgelementGetelementbyid"],
+        },
+      ],
     },
 
     // // data: URLs don't correctly propagate to their referring document yet.
@@ -152,149 +256,126 @@ add_task(async function () {
     let file = test.filename;
     info(`checking ${file} (${test.type})`);
 
-    // Hold on to the current values of the telemetry histograms we're
-    // interested in. Opening an about:blank tab shouldn't change those.
-    let before = await grabHistogramsFromContent(
-      test.counters.map(c => c.name)
-    );
+    let options = {
+      counters: test.counters,
+      // bfcache test navigates a bunch of times and thus creates multiple top
+      // level document entries, as expected. Whether the last document is
+      // destroyed is a bit racy, see bug 1842800, so for now we allow it
+      // with +/- 1.
+      toplevel_docs: file == "file_use_counter_bfcache.html" ? [5, 6] : 1,
+      docs: [test.type == "img" ? 2 : 1, Infinity],
+    };
 
-    // Load the test file in the new tab, either directly or via
-    // file_use_counter_outer{,_display_none}.html, depending on the test type.
-    let url, targetElement;
-    switch (test.type) {
-      case "iframe":
-        url = gHttpTestRoot + "file_use_counter_outer.html";
-        targetElement = "content";
-        break;
-      case "undisplayed-iframe":
-        url = gHttpTestRoot + "file_use_counter_outer_display_none.html";
-        targetElement = "content";
-        break;
-      case "img":
-        url = gHttpTestRoot + "file_use_counter_outer.html";
-        targetElement = "display";
-        break;
-      case "direct":
-        url = gHttpTestRoot + file;
-        targetElement = null;
-        break;
-      default:
-        throw `unexpected type ${test.type}`;
-    }
+    await test_once(options, async function () {
+      // Load the test file in the new tab, either directly or via
+      // file_use_counter_outer{,_display_none}.html, depending on the test type.
+      let url, targetElement;
+      switch (test.type) {
+        case "iframe":
+          url = gHttpTestRoot + "file_use_counter_outer.html";
+          targetElement = "content";
+          break;
+        case "undisplayed-iframe":
+          url = gHttpTestRoot + "file_use_counter_outer_display_none.html";
+          targetElement = "content";
+          break;
+        case "img":
+          url = gHttpTestRoot + "file_use_counter_outer.html";
+          targetElement = "display";
+          break;
+        case "direct":
+          url = gHttpTestRoot + file;
+          targetElement = null;
+          break;
+        default:
+          throw `unexpected type ${test.type}`;
+      }
 
-    let waitForFinish = null;
-    if (test.waitForExplicitFinish) {
-      is(
-        test.type,
-        "direct",
-        `cannot use waitForExplicitFinish with test type ${test.type}`
-      );
-      // Wait until the tab changes its hash to indicate it has finished.
-      waitForFinish = BrowserTestUtils.waitForLocationChange(
-        gBrowser,
-        url + "#finished"
-      );
-    }
-
-    let newTab = await BrowserTestUtils.openNewForegroundTab(gBrowser, url);
-    if (waitForFinish) {
-      await waitForFinish;
-    }
-
-    if (targetElement) {
-      // Inject our desired file into the target element of the newly-loaded page.
-      await SpecialPowers.spawn(
-        gBrowser.selectedBrowser,
-        [{ file, targetElement }],
-        function (opts) {
-          let target = content.document.getElementById(opts.targetElement);
-          target.src = opts.file;
-
-          return new Promise(resolve => {
-            let listener = event => {
-              event.target.removeEventListener("load", listener, true);
-              resolve();
-            };
-            target.addEventListener("load", listener, true);
-          });
-        }
-      );
-    }
-
-    // Tear down the page.
-    await BrowserTestUtils.removeTab(newTab);
-
-    // Grab histograms again.
-    let after = await grabHistogramsFromContent(
-      test.counters.map(c => c.name),
-      before.sentinel
-    );
-
-    // Compare before and after.
-    for (let counter of test.counters) {
-      let name = counter.name;
-      let value = counter.value ?? 1;
-      if (!counter.xfail) {
+      let waitForFinish = null;
+      if (test.waitForExplicitFinish) {
         is(
-          after.page[name],
-          before.page[name] + value,
-          `page counts for ${name} after are correct`
+          test.type,
+          "direct",
+          `cannot use waitForExplicitFinish with test type ${test.type}`
         );
-        is(
-          after.document[name],
-          before.document[name] + value,
-          `document counts for ${name} after are correct`
+        // Wait until the tab changes its hash to indicate it has finished.
+        waitForFinish = BrowserTestUtils.waitForLocationChange(
+          gBrowser,
+          url + "#finished"
         );
       }
-    }
 
-    if (test.filename == "file_use_counter_bfcache.html") {
-      // This test navigates a bunch of times and thus creates multiple top
-      // level document entries, as expected.
-      // Whether the last document is destroyed is a bit racy, see bug 1842800,
-      // so for now we allow it with +/- 1.
-      ok(
-        after.toplevel_docs == before.toplevel_docs + 5 ||
-          after.toplevel_docs == before.toplevel_docs + 6,
-        `top level destroyed document counts are correct: ${before.toplevel_docs} vs ${after.toplevel_docs}`
-      );
-    } else {
-      is(
-        after.toplevel_docs,
-        before.toplevel_docs + 1,
-        "top level destroyed document counts are correct"
-      );
-    }
+      let newTab = await BrowserTestUtils.openNewForegroundTab(gBrowser, url);
+      if (waitForFinish) {
+        await waitForFinish;
+      }
 
-    // 2 documents for "img" tests: one for the outer html page containing the
-    // <img> element, and one for the SVG image itself.
-    // FIXME: iframe tests and so on probably should get two at least.
-    ok(
-      after.docs >= before.docs + (test.type == "img" ? 2 : 1),
-      "destroyed document counts are correct"
-    );
+      if (targetElement) {
+        // Inject our desired file into the target element of the newly-loaded page.
+        await SpecialPowers.spawn(
+          gBrowser.selectedBrowser,
+          [{ file, targetElement }],
+          function (opts) {
+            let target = content.document.getElementById(opts.targetElement);
+            target.src = opts.file;
+
+            return new Promise(resolve => {
+              let listener = event => {
+                event.target.removeEventListener("load", listener, true);
+                resolve();
+              };
+              target.addEventListener("load", listener, true);
+            });
+          }
+        );
+      }
+
+      // Tear down the page.
+      await BrowserTestUtils.removeTab(newTab);
+    });
   }
 });
 
-add_task(async function () {
-  let Telemetry = Cc["@mozilla.org/base/telemetry;1"].getService(
-    Ci.nsITelemetry
-  );
-  Telemetry.canRecordExtended = gOldParentCanRecord;
+add_task(async function test_extension_counters() {
+  let options = {
+    counters: [],
+    docs: 0,
+    toplevel_docs: 0,
+    ignore_sentinel: true,
+  };
+  await test_once(options, async function () {
+    let extension = ExtensionTestUtils.loadExtension({
+      manifest: {
+        page_action: {
+          default_popup: "page.html",
+          browser_style: false,
+        },
+      },
+      async background() {
+        let [tab] = await browser.tabs.query({
+          active: true,
+          currentWindow: true,
+        });
+        await browser.pageAction.show(tab.id);
+        browser.test.sendMessage("ready");
+      },
+      files: {
+        "page.html": `<!DOCTYPE html>
+          <meta charset="utf-8">
+          <!-- Enough to trigger the use counter -->
+          <style>:root { opacity: .5 }</style>
+        `,
+      },
+    });
 
-  await SpecialPowers.spawn(
-    gBrowser.selectedBrowser,
-    [{ oldCanRecord: gOldContentCanRecord }],
-    async function (arg) {
-      await new Promise(resolve => {
-        let telemetry = Cc["@mozilla.org/base/telemetry;1"].getService(
-          Ci.nsITelemetry
-        );
-        telemetry.canRecordExtended = arg.oldCanRecord;
-        resolve();
-      });
-    }
-  );
+    await extension.startup();
+    info("Extension started up");
+
+    await extension.awaitMessage("ready");
+
+    await extension.unload();
+    info("Extension unloaded");
+  });
 });
 
 async function grabHistogramsFromContent(names, prev_sentinel = null) {

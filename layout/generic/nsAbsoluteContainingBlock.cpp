@@ -222,8 +222,7 @@ void nsAbsoluteContainingBlock::Reflow(nsContainerFrame* aDelegatingFrame,
                  "ShouldAvoidBreakInside should prevent this from happening");
       nsIFrame* nextFrame = kidFrame->GetNextInFlow();
       if (!kidStatus.IsFullyComplete() &&
-          aDelegatingFrame->IsFrameOfType(
-              nsIFrame::eCanContainOverflowContainers)) {
+          aDelegatingFrame->CanContainOverflowContainers()) {
         // Need a continuation
         if (!nextFrame) {
           nextFrame = aPresContext->PresShell()
@@ -840,11 +839,10 @@ void nsAbsoluteContainingBlock::ReflowAbsoluteFrame(
     }
 
     LogicalRect rect(outerWM,
-                     border.IStart(outerWM) + offsets.IStart(outerWM) +
-                         margin.IStart(outerWM),
-                     border.BStart(outerWM) + offsets.BStart(outerWM) +
-                         margin.BStart(outerWM),
-                     kidSize.ISize(outerWM), kidSize.BSize(outerWM));
+                     border.StartOffset(outerWM) +
+                         offsets.StartOffset(outerWM) +
+                         margin.StartOffset(outerWM),
+                     kidSize);
     nsRect r = rect.GetPhysicalRect(
         outerWM, logicalCBSize.GetPhysicalSize(wm) +
                      border.Size(outerWM).GetPhysicalSize(outerWM));

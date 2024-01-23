@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import {SchematicsException, Tree} from '@angular-devkit/schematics';
+import {SchematicsException, type Tree} from '@angular-devkit/schematics';
 
-import {AngularJson} from './types.js';
+import type {AngularJson, AngularProject} from './types.js';
 
 export function getJsonFileAsObject(
   tree: Tree,
@@ -37,4 +37,19 @@ export function getObjectAsJson(object: Record<string, any>): string {
 
 export function getAngularConfig(tree: Tree): AngularJson {
   return getJsonFileAsObject(tree, './angular.json') as AngularJson;
+}
+
+export function getApplicationProjects(
+  tree: Tree
+): Record<string, AngularProject> {
+  const {projects} = getAngularConfig(tree);
+
+  const applications: Record<string, AngularProject> = {};
+  for (const key in projects) {
+    const project = projects[key]!;
+    if (project.projectType === 'application') {
+      applications[key] = project;
+    }
+  }
+  return applications;
 }

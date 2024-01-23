@@ -27,7 +27,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   AsyncShutdown: "resource://gre/modules/AsyncShutdown.sys.mjs",
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
   Log: "resource://gre/modules/Log.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
 });
 
 XPCOMUtils.defineLazyServiceGetter(
@@ -379,7 +378,7 @@ function ConnectionData(connection, identifier, options = {}) {
 
   // Deferred whose promise is resolved when the connection closing procedure
   // is complete.
-  this._deferredClose = lazy.PromiseUtils.defer();
+  this._deferredClose = Promise.withResolvers();
   this._closeRequested = false;
 
   // An AsyncShutdown barrier used to make sure that we wait until clients
@@ -1011,7 +1010,7 @@ ConnectionData.prototype = Object.freeze({
 
     let index = this._statementCounter++;
 
-    let deferred = lazy.PromiseUtils.defer();
+    let deferred = Promise.withResolvers();
     let userCancelled = false;
     let errors = [];
     let rows = [];
@@ -1163,6 +1162,33 @@ ConnectionData.prototype = Object.freeze({
     this._timeoutPromiseExpires =
       Cu.now() + Sqlite.TRANSACTIONS_TIMEOUT_MS * 0.2;
     return this._timeoutPromise;
+  },
+
+  /**
+   * Asynchronously makes a copy of the SQLite database while there may still be
+   * open connections on it.
+   *
+   * @param {string} destFilePath
+   *   The path on the local filesystem to write the database copy. Any existing
+   *   file at this path will be overwritten.
+   * @return Promise<undefined, nsresult>
+   */
+  async backupToFile(destFilePath) {
+    if (!this._dbConn) {
+      return Promise.reject(
+        new Error("No opened database connection to create a backup from.")
+      );
+    }
+    let destFile = await IOUtils.getFile(destFilePath);
+    return new Promise((resolve, reject) => {
+      this._dbConn.backupToFileAsync(destFile, result => {
+        if (Components.isSuccessCode(result)) {
+          resolve();
+        } else {
+          reject(result);
+        }
+      });
+    });
   },
 });
 
@@ -1955,6 +1981,19 @@ OpenedConnection.prototype = Object.freeze({
    */
   interrupt() {
     this._connectionData.interrupt();
+  },
+
+  /**
+   * Asynchronously makes a copy of the SQLite database while there may still be
+   * open connections on it.
+   *
+   * @param {string} destFilePath
+   *   The path on the local filesystem to write the database copy. Any existing
+   *   file at this path will be overwritten.
+   * @return Promise<undefined, nsresult>
+   */
+  backup(destFilePath) {
+    return this._connectionData.backupToFile(destFilePath);
   },
 });
 

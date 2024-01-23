@@ -16,7 +16,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   ObjectUtils: "resource://gre/modules/ObjectUtils.sys.mjs",
   PartnerLinkAttribution: "resource:///modules/PartnerLinkAttribution.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
   ReaderMode: "resource://gre/modules/ReaderMode.sys.mjs",
   SearchUIUtils: "resource:///modules/SearchUIUtils.sys.mjs",
   SearchUtils: "resource://gre/modules/SearchUtils.sys.mjs",
@@ -24,6 +23,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   UrlbarEventBufferer: "resource:///modules/UrlbarEventBufferer.sys.mjs",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   UrlbarQueryContext: "resource:///modules/UrlbarUtils.sys.mjs",
+  UrlbarProviderOpenTabs: "resource:///modules/UrlbarProviderOpenTabs.sys.mjs",
   UrlbarSearchUtils: "resource:///modules/UrlbarSearchUtils.sys.mjs",
   UrlbarTokenizer: "resource:///modules/UrlbarTokenizer.sys.mjs",
   UrlbarUtils: "resource:///modules/UrlbarUtils.sys.mjs",
@@ -283,6 +283,10 @@ export class UrlbarInput {
 
     this.editor.newlineHandling =
       Ci.nsIEditor.eNewlinesStripSurroundingWhitespace;
+
+    ChromeUtils.defineLazyGetter(this, "logger", () =>
+      lazy.UrlbarUtils.getLogger({ prefix: "Input" })
+    );
   }
 
   /**
@@ -413,15 +417,14 @@ export class UrlbarInput {
         uri =
           this.window.gBrowser.selectedBrowser.currentAuthPromptURI ||
           uri ||
-          (this.window.gBrowser.selectedBrowser.browsingContext.sessionHistory
-            ?.count === 0 &&
-            this.window.gBrowser.selectedBrowser.browsingContext
-              .nonWebControlledBlankURI) ||
+          this.#isOpenedPageInBlankTargetLoading ||
           this.window.gBrowser.currentURI;
         // Strip off usernames and passwords for the location bar
         try {
           uri = Services.io.createExposableURI(uri);
         } catch (e) {}
+
+        let isInitialPageControlledByWebContent = false;
 
         // Replace initial page URIs with an empty string
         // only if there's no opener (bug 370555).
@@ -434,6 +437,8 @@ export class UrlbarInput {
         ) {
           value = "";
         } else {
+          isInitialPageControlledByWebContent = true;
+
           // We should deal with losslessDecodeURI throwing for exotic URIs
           try {
             value = losslessDecodeURI(uri);
@@ -447,7 +452,8 @@ export class UrlbarInput {
         valid =
           !dueToSessionRestore &&
           (!this.window.isBlankPageURL(uri.spec) ||
-            uri.schemeIs("moz-extension"));
+            uri.schemeIs("moz-extension") ||
+            isInitialPageControlledByWebContent);
       }
     } else if (
       this.window.isInitialPage(value) &&
@@ -637,10 +643,20 @@ export class UrlbarInput {
       result.payload.inPrivateWindow;
     let selectedPrivateEngineResult =
       selectedPrivateResult && result.payload.isPrivateEngine;
+    // Whether the user has been editing the value in the URL bar after selecting
+    // the result. However, if the result type is tip, pick as it is. The result
+    // heuristic is also kept the behavior as is for safety.
+    let safeToPickResult =
+      result &&
+      (result.heuristic ||
+        !this.valueIsTyped ||
+        result.type == lazy.UrlbarUtils.RESULT_TYPE.TIP ||
+        this.value == this._getValueFromResult(result));
     if (
       !isComposing &&
       element &&
-      (!oneOffParams?.engine || selectedPrivateEngineResult)
+      (!oneOffParams?.engine || selectedPrivateEngineResult) &&
+      safeToPickResult
     ) {
       this.pickElement(element, event);
       return;
@@ -688,7 +704,7 @@ export class UrlbarInput {
         oneOffParams.engine,
         searchString
       );
-      this._recordSearch(oneOffParams.engine, event, { url });
+      this._recordSearch(oneOffParams.engine, event);
 
       lazy.UrlbarUtils.addToFormHistory(
         this,
@@ -741,6 +757,9 @@ export class UrlbarInput {
       isValidUrl = true;
     } catch (ex) {}
     if (isValidUrl) {
+      // Annotate if the untrimmed value contained a scheme, to later potentially
+      // be upgraded by schemeless HTTPS-First.
+      openParams.wasSchemelessInput = this.#isSchemeless(this.untrimmedValue);
       this._loadURL(url, event, where, openParams);
       return;
     }
@@ -788,13 +807,24 @@ export class UrlbarInput {
           if (this.isPrivate) {
             flags |= Ci.nsIURIFixup.FIXUP_FLAG_PRIVATE_CONTEXT;
           }
-          let { preferredURI: uri, postData } =
-            Services.uriFixup.getFixupURIInfo(url, flags);
+          let {
+            preferredURI: uri,
+            postData,
+            keywordAsSent,
+          } = Services.uriFixup.getFixupURIInfo(url, flags);
           if (
             where != "current" ||
             browser.lastLocationChange == lastLocationChange
           ) {
             openParams.postData = postData;
+            if (!keywordAsSent) {
+              // `uri` is not a search engine url, so we annotate if the untrimmed
+              // value contained a scheme, to potentially be later upgraded by
+              // schemeless HTTPS-First.
+              openParams.wasSchemelessInput = this.#isSchemeless(
+                this.untrimmedValue
+              );
+            }
             this._loadURL(uri.spec, event, where, openParams, null, browser);
           }
         }
@@ -864,6 +894,9 @@ export class UrlbarInput {
    */
   pickElement(element, event) {
     let result = this.view.getResultFromElement(element);
+    this.logger.debug(
+      `pickElement ${element} with event ${event?.type}, result: ${result}`
+    );
     if (!result) {
       return;
     }
@@ -981,7 +1014,7 @@ export class UrlbarInput {
         selType: "canonized",
         searchString: this._lastSearchString,
       });
-      this._loadURL(this.value, event, where, openParams, browser);
+      this._loadURL(this._untrimmedValue, event, where, openParams, browser);
       return;
     }
 
@@ -992,30 +1025,36 @@ export class UrlbarInput {
 
     switch (result.type) {
       case lazy.UrlbarUtils.RESULT_TYPE.URL: {
-        // Bug 1578856: both the provider and the docshell run heuristics to
-        // decide how to handle a non-url string, either fixing it to a url, or
-        // searching for it.
-        // Some preferences can control the docshell behavior, for example
-        // if dns_first_for_single_words is true, the docshell looks up the word
-        // against the dns server, and either loads it as an url or searches for
-        // it, depending on the lookup result. The provider instead will always
-        // return a fixed url in this case, because URIFixup is synchronous and
-        // can't do a synchronous dns lookup. A possible long term solution
-        // would involve sharing the docshell logic with the provider, along
-        // with the dns lookup.
-        // For now, in this specific case, we'll override the result's url
-        // with the input value, and let it pass through to _loadURL(), and
-        // finally to the docshell.
-        // This also means that in some cases the heuristic result will show a
-        // Visit entry, but the docshell will instead execute a search. It's a
-        // rare case anyway, most likely to happen for enterprises customizing
-        // the urifixup prefs.
-        if (
-          result.heuristic &&
-          lazy.UrlbarPrefs.get("browser.fixup.dns_first_for_single_words") &&
-          lazy.UrlbarUtils.looksLikeSingleWordHost(originalUntrimmedValue)
-        ) {
-          url = originalUntrimmedValue;
+        if (result.heuristic) {
+          // Bug 1578856: both the provider and the docshell run heuristics to
+          // decide how to handle a non-url string, either fixing it to a url, or
+          // searching for it.
+          // Some preferences can control the docshell behavior, for example
+          // if dns_first_for_single_words is true, the docshell looks up the word
+          // against the dns server, and either loads it as an url or searches for
+          // it, depending on the lookup result. The provider instead will always
+          // return a fixed url in this case, because URIFixup is synchronous and
+          // can't do a synchronous dns lookup. A possible long term solution
+          // would involve sharing the docshell logic with the provider, along
+          // with the dns lookup.
+          // For now, in this specific case, we'll override the result's url
+          // with the input value, and let it pass through to _loadURL(), and
+          // finally to the docshell.
+          // This also means that in some cases the heuristic result will show a
+          // Visit entry, but the docshell will instead execute a search. It's a
+          // rare case anyway, most likely to happen for enterprises customizing
+          // the urifixup prefs.
+          if (
+            lazy.UrlbarPrefs.get("browser.fixup.dns_first_for_single_words") &&
+            lazy.UrlbarUtils.looksLikeSingleWordHost(originalUntrimmedValue)
+          ) {
+            url = originalUntrimmedValue;
+          }
+          // Annotate if the untrimmed value contained a scheme, to later potentially
+          // be upgraded by schemeless HTTPS-First.
+          openParams.wasSchemelessInput = this.#isSchemeless(
+            originalUntrimmedValue
+          );
         }
         break;
       }
@@ -1026,7 +1065,7 @@ export class UrlbarInput {
         break;
       }
       case lazy.UrlbarUtils.RESULT_TYPE.TAB_SWITCH: {
-        if (this.hasAttribute("actionoverride")) {
+        if (this.hasAttribute("action-override")) {
           where = "current";
           break;
         }
@@ -1053,8 +1092,11 @@ export class UrlbarInput {
 
         let switched = this.window.switchToTabHavingURI(
           Services.io.newURI(url),
-          false,
-          loadOpts
+          true,
+          loadOpts,
+          lazy.UrlbarPrefs.get("switchTabs.searchAllContainers")
+            ? result.payload.userContextId
+            : null
         );
         if (switched && prevTab.isEmpty) {
           this.window.gBrowser.removeTab(prevTab);
@@ -1065,6 +1107,18 @@ export class UrlbarInput {
           // the load. Just reportError it.
           lazy.UrlbarUtils.addToInputHistory(url, searchString).catch(
             console.error
+          );
+        }
+
+        // TODO (Bug 1865757): We should not show a "switchtotab" result for
+        // tabs that are not currently open. Find out why tabs are not being
+        // properly unregistered when they are being closed.
+        if (!switched) {
+          console.error(`Tried to switch to non existant tab: ${url}`);
+          lazy.UrlbarProviderOpenTabs.unregisterOpenTab(
+            url,
+            result.payload.userContextId,
+            this.isPrivate
           );
         }
 
@@ -1125,7 +1179,6 @@ export class UrlbarInput {
           isFormHistory:
             result.source == lazy.UrlbarUtils.RESULT_SOURCE.HISTORY,
           alias: result.payload.keyword,
-          url,
         };
         const engine = Services.search.getEngineByName(result.payload.engine);
         this._recordSearch(engine, event, actionDetails);
@@ -1141,7 +1194,6 @@ export class UrlbarInput {
       }
       case lazy.UrlbarUtils.RESULT_TYPE.TIP: {
         let scalarName =
-          element.classList.contains("urlbarView-button-help") ||
           element.dataset.command == "help"
             ? `${result.payload.type}-help`
             : `${result.payload.type}-picked`;
@@ -1546,11 +1598,11 @@ export class UrlbarInput {
    *   will record engagement event telemetry for the query.
    */
   startQuery({
-    allowAutofill = true,
+    allowAutofill,
     autofillIgnoresSelection = false,
-    searchString = null,
+    searchString,
     resetSearchState = true,
-    event = null,
+    event,
   } = {}) {
     if (!searchString) {
       searchString =
@@ -1559,8 +1611,14 @@ export class UrlbarInput {
       throw new Error("The current value doesn't start with the search string");
     }
 
+    let queryContext = this.#makeQueryContext({
+      allowAutofill,
+      event,
+      searchString,
+    });
+
     if (event) {
-      this.controller.engagementEvent.start(event, searchString);
+      this.controller.engagementEvent.start(event, queryContext, searchString);
     }
 
     if (this._suppressStartQuery) {
@@ -1572,39 +1630,17 @@ export class UrlbarInput {
       this._resetSearchState();
     }
 
-    this._lastSearchString = searchString;
-    this._valueOnLastSearch = this.value;
-
-    let options = {
-      allowAutofill,
-      isPrivate: this.isPrivate,
-      maxResults: lazy.UrlbarPrefs.get("maxRichResults"),
-      searchString,
-      userContextId:
-        this.window.gBrowser.selectedBrowser.getAttribute("usercontextid"),
-      currentPage: this.window.gBrowser.currentURI.spec,
-      formHistoryName: this.formHistoryName,
-      prohibitRemoteResults:
-        event &&
-        lazy.UrlbarUtils.isPasteEvent(event) &&
-        lazy.UrlbarPrefs.get("maxCharsForSearchSuggestions") <
-          event.data?.length,
-    };
-
     if (this.searchMode) {
       this.confirmSearchMode();
-      options.searchMode = this.searchMode;
-      if (this.searchMode.source) {
-        options.sources = [this.searchMode.source];
-      }
     }
+
+    this._lastSearchString = searchString;
+    this._valueOnLastSearch = this.value;
 
     // TODO (Bug 1522902): This promise is necessary for tests, because some
     // tests are not listening for completion when starting a query through
     // other methods than startQuery (input events for example).
-    this.lastQueryContextPromise = this.controller.startQuery(
-      new lazy.UrlbarQueryContext(options)
-    );
+    this.lastQueryContextPromise = this.controller.startQuery(queryContext);
   }
 
   /**
@@ -2364,14 +2400,6 @@ export class UrlbarInput {
     return true;
   }
 
-  _checkForRtlText(value) {
-    let directionality = this.window.windowUtils.getDirectionFromText(value);
-    if (directionality == this.window.windowUtils.DIRECTION_RTL) {
-      return true;
-    }
-    return false;
-  }
-
   /**
    * Invoked on overflow/underflow/scrollend events to update attributes
    * related to the input text directionality. Overflow fade masks use these
@@ -2385,7 +2413,7 @@ export class UrlbarInput {
 
     let isRTL =
       this.getAttribute("domaindir") === "rtl" &&
-      this._checkForRtlText(this.value);
+      lazy.UrlbarUtils.isTextDirectionRTL(this.value, this.window);
 
     this.window.promiseDocumentFlushed(() => {
       // Check overflow again to ensure it didn't change in the meanwhile.
@@ -2462,7 +2490,10 @@ export class UrlbarInput {
 
     let uri;
     if (this.getAttribute("pageproxystate") == "valid") {
-      uri = this.window.gBrowser.currentURI;
+      uri = this.#isOpenedPageInBlankTargetLoading
+        ? this.window.gBrowser.selectedBrowser.browsingContext
+            .nonWebControlledBlankURI
+        : this.window.gBrowser.currentURI;
     } else {
       // The value could be:
       // 1. a trimmed url, set by selecting a result
@@ -2543,8 +2574,8 @@ export class UrlbarInput {
     ) {
       if (event.type == "keydown") {
         this._actionOverrideKeyCount++;
-        this.setAttribute("actionoverride", "true");
-        this.view.panel.setAttribute("actionoverride", "true");
+        this.toggleAttribute("action-override", true);
+        this.view.panel.setAttribute("action-override", true);
       } else if (
         this._actionOverrideKeyCount &&
         --this._actionOverrideKeyCount == 0
@@ -2556,8 +2587,8 @@ export class UrlbarInput {
 
   _clearActionOverride() {
     this._actionOverrideKeyCount = 0;
-    this.removeAttribute("actionoverride");
-    this.view.panel.removeAttribute("actionoverride");
+    this.removeAttribute("action-override");
+    this.view.panel.removeAttribute("action-override");
   }
 
   /**
@@ -2607,8 +2638,7 @@ export class UrlbarInput {
       ? lazy.BrowserUIUtils.trimURL(val)
       : val;
     // Only trim value if the directionality doesn't change to RTL.
-    return this.window.windowUtils.getDirectionFromText(trimmedValue) ==
-      this.window.windowUtils.DIRECTION_RTL
+    return lazy.UrlbarUtils.isTextDirectionRTL(trimmedValue, this.window)
       ? val
       : trimmedValue;
   }
@@ -2727,6 +2757,8 @@ export class UrlbarInput {
    *   The POST data associated with a search submission.
    * @param {boolean} [params.allowInheritPrincipal]
    *   Whether the principal can be inherited.
+   * @param {boolean} [params.wasSchemelessInput]
+   *   Whether the search/URL term was without an explicit scheme.
    * @param {object} [resultDetails]
    *   Details of the selected result, if any.
    * @param {UrlbarUtils.RESULT_TYPE} [resultDetails.type]
@@ -2747,12 +2779,18 @@ export class UrlbarInput {
   ) {
     // No point in setting these because we'll handleRevert() a few rows below.
     if (openUILinkWhere == "current") {
+      // Make sure URL is formatted properly (don't show punycode).
+      let formattedURL = url;
+      try {
+        formattedURL = losslessDecodeURI(new URL(url).URI);
+      } catch {}
+
       this.value =
         lazy.UrlbarPrefs.get("showSearchTermsFeatureGate") &&
         lazy.UrlbarPrefs.get("showSearchTerms.enabled") &&
         resultDetails?.searchTerm
           ? resultDetails.searchTerm
-          : url;
+          : formattedURL;
       browser.userTypedValue = this.value;
     }
 
@@ -2935,8 +2973,9 @@ export class UrlbarInput {
   /**
    * Strips known tracking query parameters/ link decorators.
    *
-   * @returns {nsIURI|null}
-   *   The stripped URI or null
+   * @returns {nsIURI}
+   *   The stripped URI or original URI, if nothing can be
+   *   stripped
    */
   #stripURI() {
     let copyString = this._getSelectedValueForClipboard();
@@ -2944,18 +2983,36 @@ export class UrlbarInput {
       return null;
     }
     let strippedURI = null;
-    // throws if the selected string is not a valid URI
-    try {
-      let uri = Services.io.newURI(copyString);
-      strippedURI = lazy.QueryStringStripper.stripForCopyOrShare(uri);
-    } catch (e) {
-      console.debug(`stripURI: ${e.message}`);
-      return null;
-    }
+    let uri = null;
+
+    // Error check occurs during isClipboardURIValid
+    uri = Services.io.newURI(copyString);
+    strippedURI = lazy.QueryStringStripper.stripForCopyOrShare(uri);
+
     if (strippedURI) {
       return this.makeURIReadable(strippedURI);
     }
-    return null;
+    return uri;
+  }
+
+  /**
+   * Checks if the clipboard contains a valid URI
+   *
+   * @returns {true|false}
+   */
+  #isClipboardURIValid() {
+    let copyString = this._getSelectedValueForClipboard();
+    if (!copyString) {
+      return false;
+    }
+    // throws if the selected string is not a valid URI
+    try {
+      Services.io.newURI(copyString);
+    } catch (e) {
+      return false;
+    }
+
+    return true;
   }
 
   // The strip-on-share feature will strip known tracking/decorational
@@ -2977,19 +3034,14 @@ export class UrlbarInput {
 
     insertLocation.insertAdjacentElement("afterend", stripOnShare);
 
-    // register listener that returns the stripped version of the url
+    // Register listener that returns the stripped url or falls back
+    // to the original url if nothing can be stripped.
     stripOnShare.addEventListener("command", () => {
       let strippedURI = this.#stripURI();
-      if (!strippedURI) {
-        // If there is nothing to strip the menu item should not have been visible.
-        // We might end up here if there was an unexpected URI change.
-        console.warn("StripOnShare: Unexpected null value.");
-        return;
-      }
       lazy.ClipboardHelper.copyString(strippedURI.displaySpec);
     });
 
-    // register a listener that hides the menu item if there is nothing to copy or nothing to strip.
+    // Register a listener that hides the menu item if there is nothing to copy.
     contextMenu.addEventListener("popupshowing", () => {
       // feature is not enabled
       if (!lazy.QUERY_STRIPPING_STRIP_ON_SHARE) {
@@ -3003,8 +3055,8 @@ export class UrlbarInput {
         stripOnShare.setAttribute("hidden", true);
         return;
       }
-      // nothing to strip/selection is not a valid url
-      if (!this.#stripURI()) {
+      // selection is not a valid url
+      if (!this.#isClipboardURIValid()) {
         stripOnShare.setAttribute("hidden", true);
         return;
       }
@@ -3231,6 +3283,7 @@ export class UrlbarInput {
   }
 
   _on_blur(event) {
+    this.logger.debug("Blur Event");
     // We cannot count every blur events after a missed engagement as abandoment
     // because the user may have clicked on some view element that executes
     // a command causing a focus change. For example opening preferences from
@@ -3346,6 +3399,7 @@ export class UrlbarInput {
   }
 
   _on_focus(event) {
+    this.logger.debug("Focus Event");
     if (!this._hideFocus) {
       this.setAttribute("focused", "true");
     }
@@ -3749,6 +3803,47 @@ export class UrlbarInput {
     return lazy.UrlbarUtils.stripUnsafeProtocolOnPaste(pasteData);
   }
 
+  /**
+   * Generate a UrlbarQueryContext from the current context.
+   *
+   * @param {object} [options]               Optional params
+   * @param {boolean} options.allowAutofill  Whether autofill is enabled.
+   * @param {string}  options.searchString   The string being searched.
+   * @param {object}  options.event          The event triggering the query.
+   * @returns {UrlbarQueryContext}
+   *   The queryContext object.
+   */
+  #makeQueryContext({
+    allowAutofill = true,
+    searchString = null,
+    event = null,
+  } = {}) {
+    let options = {
+      allowAutofill,
+      isPrivate: this.isPrivate,
+      maxResults: lazy.UrlbarPrefs.get("maxRichResults"),
+      searchString,
+      userContextId:
+        this.window.gBrowser.selectedBrowser.getAttribute("usercontextid"),
+      currentPage: this.window.gBrowser.currentURI.spec,
+      formHistoryName: this.formHistoryName,
+      prohibitRemoteResults:
+        event &&
+        lazy.UrlbarUtils.isPasteEvent(event) &&
+        lazy.UrlbarPrefs.get("maxCharsForSearchSuggestions") <
+          event.data?.length,
+    };
+
+    if (this.searchMode) {
+      options.searchMode = this.searchMode;
+      if (this.searchMode.source) {
+        options.sources = [this.searchMode.source];
+      }
+    }
+
+    return new lazy.UrlbarQueryContext(options);
+  }
+
   _on_scrollend(event) {
     this.updateTextOverflow();
   }
@@ -3770,7 +3865,7 @@ export class UrlbarInput {
       if (this._keyDownEnterDeferred) {
         this._keyDownEnterDeferred.reject();
       }
-      this._keyDownEnterDeferred = lazy.PromiseUtils.defer();
+      this._keyDownEnterDeferred = Promise.withResolvers();
       event._disableCanonization = this._isKeyDownWithCtrl;
     } else if (event.keyCode !== KeyEvent.DOM_VK_CONTROL && event.ctrlKey) {
       this._isKeyDownWithCtrl = true;
@@ -3933,8 +4028,9 @@ export class UrlbarInput {
       this.focus();
       // To simplify tracking of events, register an initial event for event
       // telemetry, to replace the missing input event.
-      this.controller.engagementEvent.start(event);
-      this.controller.clearLastQueryContextCache();
+      let queryContext = this.#makeQueryContext({ searchString: droppedURL });
+      this.controller.setLastQueryContextCache(queryContext);
+      this.controller.engagementEvent.start(event, queryContext);
       this.handleNavigation({ triggeringPrincipal: principal });
       // For safety reasons, in the drop case we don't want to immediately show
       // the the dropped value, instead we want to keep showing the current page
@@ -3956,6 +4052,27 @@ export class UrlbarInput {
     this._initCopyCutController();
     this._initPasteAndGo();
     this._initStripOnShare();
+  }
+
+  /**
+   * @param {string} value A untrimmed address bar input.
+   * @returns {boolean}
+   *          `true` if the input doesn't start with a scheme relevant for
+   *          schemeless HTTPS-First (http://, https:// and file://).
+   */
+  #isSchemeless(value) {
+    return ["http://", "https://", "file://"].every(
+      scheme => !value.trim().startsWith(scheme)
+    );
+  }
+
+  get #isOpenedPageInBlankTargetLoading() {
+    return (
+      this.window.gBrowser.selectedBrowser.browsingContext.sessionHistory
+        ?.count === 0 &&
+      this.window.gBrowser.selectedBrowser.browsingContext
+        .nonWebControlledBlankURI
+    );
   }
 }
 

@@ -126,6 +126,11 @@ class JitRuntime {
   // long it's also freed in EnterBaseline and EnterJit (after returning from
   // JIT code).
   MainThreadData<js::UniquePtr<uint8_t>> ionOsrTempData_{nullptr};
+  MainThreadData<uint32_t> ionOsrTempDataSize_{0};
+
+  // List of Ion compile tasks that should be freed. Used to batch multiple
+  // tasks into a single IonFreeTask.
+  MainThreadData<IonFreeCompileTasks> ionFreeTaskBatch_;
 
   // Shared exception-handler tail.
   WriteOnceData<uint32_t> exceptionTailOffset_{0};
@@ -270,7 +275,7 @@ class JitRuntime {
 
   JitCode* generateDebugTrapHandler(JSContext* cx, DebugTrapHandlerKind kind);
 
-  bool generateVMWrapper(JSContext* cx, MacroAssembler& masm,
+  bool generateVMWrapper(JSContext* cx, MacroAssembler& masm, VMFunctionId id,
                          const VMFunctionData& f, DynFn nativeFun,
                          uint32_t* wrapperOffset);
 
@@ -311,6 +316,11 @@ class JitRuntime {
   IonCompilationId nextCompilationId() {
     return IonCompilationId(nextCompilationId_++);
   }
+
+  [[nodiscard]] bool addIonCompileToFreeTaskBatch(IonCompileTask* task) {
+    return ionFreeTaskBatch_.ref().append(task);
+  }
+  void maybeStartIonFreeTask(bool force);
 
 #ifdef DEBUG
   bool disallowArbitraryCode() const { return disallowArbitraryCode_; }

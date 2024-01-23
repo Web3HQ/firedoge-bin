@@ -28,7 +28,7 @@ using mozilla::dom::JSActorMessageKind from "mozilla/dom/JSActor.h";
 using mozilla::gfx::IntRect from "mozilla/gfx/Rect.h";
 [MoveOnly] using mozilla::gfx::PaintFragment from "mozilla/gfx/CrossProcessPaint.h";
 using nscolor from "nsColor.h";
-using mozilla::dom::XPCOMPermitUnloadAction from "nsIContentViewer.h";
+using mozilla::dom::XPCOMPermitUnloadAction from "nsIDocumentViewer.h";
 using mozilla::dom::TabId from "mozilla/dom/ipc/IdType.h";
 using mozilla::layers::LayersId from "mozilla/layers/LayersTypes.h";
 [RefCounted] using class nsITransportSecurityInfo from "nsITransportSecurityInfo.h";
@@ -109,7 +109,7 @@ parent:
   async InternalLoad(nsDocShellLoadState aLoadState);
 
   /// Update the URI of the document in this WindowGlobal.
-  [LazySend] async UpdateDocumentURI(nullable nsIURI aUri);
+  [LazySend] async UpdateDocumentURI(nsIURI aUri);
 
   // We expose frameAncestors to web-extensions and they extract URIs from the
   // principals collected. In order to be compatible with that API, we need to
@@ -155,7 +155,7 @@ parent:
 
   // Checks whether any "beforeunload" event listener in the document subtree
   // wants to block unload, and prompts the user to allow if any does (depending
-  // on the action specified, using nsIContentViewer::PermitUnloadAction
+  // on the action specified, using nsIDocumentViewer::PermitUnloadAction
   // values). The sender is responsible for checking documents in its own
   // process, and passing true for `aHasInProcessBlocker` if any exist. Windows
   // hosted outside of the caller process will be checked automatically.
@@ -196,7 +196,7 @@ parent:
    */
   async SetSingleChannelId(uint64_t? singleChannelId);
 
-  async SetDocumentDomain(nullable nsIURI aDomain);
+  async SetDocumentDomain(nsIURI aDomain);
 
   async Destroy();
 
@@ -210,10 +210,17 @@ parent:
   async DiscoverIdentityCredentialFromExternalSource(IdentityCredentialRequestOptions aOptions) 
       returns (IPCIdentityCredential? identityCredential);
 
-  async HasStorageAccessPermission() returns(bool granted);
+  async GetStorageAccessPermission() returns(uint32_t permission_action);
+
+
+  async SetCookies(nsCString baseDomain,
+                                      OriginAttributes attrs,
+                                      nullable nsIURI host,
+                                      bool fromHttp,
+                                      CookieStruct[] cookies);
 
 child:
-  async NotifyPermissionChange(nsCString type);
+  async NotifyPermissionChange(nsCString type, uint32_t permission);
 };
 
 } // namespace dom

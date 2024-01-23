@@ -93,8 +93,13 @@ export class _ExperimentManager {
    */
   createTargetingContext() {
     let context = {
-      isFirstStartup: lazy.FirstStartup.state === lazy.FirstStartup.IN_PROGRESS,
       ...this.extraContext,
+
+      isFirstStartup: lazy.FirstStartup.state === lazy.FirstStartup.IN_PROGRESS,
+
+      get currentDate() {
+        return new Date();
+      },
     };
     Object.defineProperty(context, "activeExperiments", {
       get: async () => {
@@ -130,6 +135,15 @@ export class _ExperimentManager {
       get: async () => {
         await this.store.ready();
         return this.store.getAll().map(enrollment => enrollment.slug);
+      },
+    });
+    Object.defineProperty(context, "enrollmentsMap", {
+      get: async () => {
+        await this.store.ready();
+        return this.store.getAll().reduce((acc, enrollment) => {
+          acc[enrollment.slug] = enrollment.branch.slug;
+          return acc;
+        }, {});
       },
     });
     return context;
@@ -433,7 +447,6 @@ export class _ExperimentManager {
       slug,
       branch,
       active: true,
-      enrollmentId: lazy.NormandyUtils.generateUuid(),
       experimentType,
       source,
       userFacingName,
@@ -638,9 +651,6 @@ export class _ExperimentManager {
         {
           reason,
           branch: enrollment.branch.slug,
-          enrollmentId:
-            enrollment.enrollmentId ||
-            lazy.TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
         },
         typeof changedPref !== "undefined"
           ? { changedPref: changedPref.name }
@@ -653,9 +663,6 @@ export class _ExperimentManager {
         {
           experiment: slug,
           branch: enrollment.branch.slug,
-          enrollment_id:
-            enrollment.enrollmentId ||
-            lazy.TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
           reason,
         },
         typeof changedPref !== "undefined"
@@ -730,18 +737,14 @@ export class _ExperimentManager {
    *
    * @param {Enrollment} experiment
    */
-  sendEnrollmentTelemetry({ slug, branch, experimentType, enrollmentId }) {
+  sendEnrollmentTelemetry({ slug, branch, experimentType }) {
     lazy.TelemetryEvents.sendEvent("enroll", TELEMETRY_EVENT_OBJECT, slug, {
       experimentType,
       branch: branch.slug,
-      enrollmentId:
-        enrollmentId || lazy.TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
     });
     Glean.nimbusEvents.enrollment.record({
       experiment: slug,
       branch: branch.slug,
-      enrollment_id:
-        enrollmentId || lazy.TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
       experiment_type: experimentType,
     });
   }
@@ -757,16 +760,11 @@ export class _ExperimentManager {
       experiment.branch.slug,
       {
         type: `${TELEMETRY_EXPERIMENT_ACTIVE_PREFIX}${experiment.experimentType}`,
-        enrollmentId:
-          experiment.enrollmentId ||
-          lazy.TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
       }
     );
     // Report the experiment to the Glean Experiment API
     Services.fog.setExperimentActive(experiment.slug, experiment.branch.slug, {
       type: `${TELEMETRY_EXPERIMENT_ACTIVE_PREFIX}${experiment.experimentType}`,
-      enrollmentId:
-        experiment.enrollmentId || lazy.TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
     });
   }
 
@@ -898,13 +896,12 @@ export class _ExperimentManager {
       // need to check if we have another enrollment for the same feature.
       const conflictingEnrollment = getConflictingEnrollment(featureId);
 
-      const prefBranch =
-        feature.manifest.isEarlyStartup ?? false ? "user" : "default";
-
       for (const [variable, value] of Object.entries(featureValue)) {
-        const prefName = feature.getSetPrefName(variable);
+        const setPref = feature.getSetPref(variable);
 
-        if (prefName) {
+        if (setPref) {
+          const { pref: prefName, branch: prefBranch } = setPref;
+
           let originalValue;
           const conflictingPref = conflictingEnrollment?.prefs?.find(
             p => p.name === prefName
@@ -937,7 +934,11 @@ export class _ExperimentManager {
 
           // An experiment takes precedence if there is already a pref set.
           if (!isRollout || !conflictingPref) {
-            prefsToSet.push({ name: prefName, value, prefBranch });
+            prefsToSet.push({
+              name: prefName,
+              value,
+              prefBranch,
+            });
           }
         }
       }
@@ -1136,7 +1137,12 @@ export class _ExperimentManager {
       }
 
       // If the variable is setting a different preference, unenroll.
-      if (variableDef.setPref !== name) {
+      const prefName =
+        typeof variableDef.setPref === "object"
+          ? variableDef.setPref.pref
+          : variableDef.setPref;
+
+      if (prefName !== name) {
         this._unenroll(enrollment, {
           reason: "pref-variable-changed",
           duringRestore: true,
@@ -1218,7 +1224,14 @@ export class _ExperimentManager {
       const { name } = pref;
 
       if (!this._prefs.has(name)) {
-        const observer = () => this._onExperimentPrefChanged(pref);
+        const observer = (aSubject, aTopic, aData) => {
+          // This observer will be called for changes to `name` as well as any
+          // other pref that begins with `name.`, so we have to filter to
+          // exactly the pref we care about.
+          if (aData === name) {
+            this._onExperimentPrefChanged(pref);
+          }
+        };
         const entry = {
           slugs: new Set([slug]),
           enrollmentChanging: false,

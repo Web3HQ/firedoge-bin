@@ -25,12 +25,8 @@ pub enum DrawError {
     MissingVertexBuffer { index: u32 },
     #[error("Index buffer must be set")]
     MissingIndexBuffer,
-    #[error("The pipeline layout, associated with the current render pipeline, contains a bind group layout at index {index} which is incompatible with the bind group layout associated with the bind group at {index}")]
-    IncompatibleBindGroup {
-        index: u32,
-        //expected: BindGroupLayoutId,
-        //provided: Option<(BindGroupLayoutId, BindGroupId)>,
-    },
+    #[error("Incompatible bind group at index {index} in the current render pipeline")]
+    IncompatibleBindGroup { index: u32, diff: Vec<String> },
     #[error("Vertex {last_vertex} extends beyond limit {vertex_limit} imposed by the buffer in slot {slot}. Did you bind the correct `Vertex` step-rate vertex buffer?")]
     VertexBeyondLimit {
         last_vertex: u32,
@@ -67,6 +63,8 @@ pub enum RenderCommandError {
     InvalidRenderBundle(id::RenderBundleId),
     #[error("Bind group index {index} is greater than the device's requested `max_bind_group` limit {max}")]
     BindGroupIndexOutOfRange { index: u32, max: u32 },
+    #[error("Vertex buffer index {index} is greater than the device's requested `max_vertex_buffers` limit {max}")]
+    VertexBufferIndexOutOfRange { index: u32, max: u32 },
     #[error("Dynamic buffer offset {0} does not respect device's requested `{1}` limit {2}")]
     UnalignedBufferOffset(u64, &'static str, u32),
     #[error("Number of buffer offsets ({actual}) does not match the number of dynamic bindings ({expected})")]

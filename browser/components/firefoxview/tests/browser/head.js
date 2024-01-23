@@ -2,12 +2,14 @@
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
 const {
+  getFirefoxViewURL,
   withFirefoxView,
   assertFirefoxViewTab,
   assertFirefoxViewTabSelected,
   openFirefoxViewTab,
   closeFirefoxViewTab,
   isFirefoxViewTabSelectedInWindow,
+  init: FirefoxViewTestUtilsInit,
 } = ChromeUtils.importESModule(
   "resource://testing-common/FirefoxViewTestUtils.sys.mjs"
 );
@@ -35,23 +37,14 @@ const { SessionStoreTestUtils } = ChromeUtils.importESModule(
   "resource://testing-common/SessionStoreTestUtils.sys.mjs"
 );
 SessionStoreTestUtils.init(this, window);
+FirefoxViewTestUtilsInit(this, window);
 
 ChromeUtils.defineESModuleGetters(this, {
+  AboutWelcomeParent: "resource:///actors/AboutWelcomeParent.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   SyncedTabs: "resource://services-sync/SyncedTabs.sys.mjs",
   TabStateFlusher: "resource:///modules/sessionstore/TabStateFlusher.sys.mjs",
 });
-
-XPCOMUtils.defineLazyModuleGetters(this, {
-  AboutWelcomeParent: "resource:///actors/AboutWelcomeParent.jsm",
-});
-
-const MOBILE_PROMO_DISMISSED_PREF =
-  "browser.tabs.firefox-view.mobilePromo.dismissed";
-const RECENTLY_CLOSED_STATE_PREF =
-  "browser.tabs.firefox-view.ui-state.recently-closed-tabs.open";
-const TAB_PICKUP_STATE_PREF =
-  "browser.tabs.firefox-view.ui-state.tab-pickup.open";
 
 const calloutId = "feature-callout";
 const calloutSelector = `#${calloutId}.featureCallout`;
@@ -142,11 +135,11 @@ function testVisibility(browser, expected) {
     const elem = document.querySelector(selector);
     if (shouldBeVisible) {
       ok(
-        BrowserTestUtils.is_visible(elem),
+        BrowserTestUtils.isVisible(elem),
         `Expected ${selector} to be visible`
       );
     } else {
-      ok(BrowserTestUtils.is_hidden(elem), `Expected ${selector} to be hidden`);
+      ok(BrowserTestUtils.isHidden(elem), `Expected ${selector} to be hidden`);
     }
   }
 }
@@ -166,8 +159,8 @@ async function waitForElementVisible(browser, selector, isVisible = true) {
     },
     () => {
       return isVisible
-        ? BrowserTestUtils.is_visible(elem)
-        : BrowserTestUtils.is_hidden(elem);
+        ? BrowserTestUtils.isVisible(elem)
+        : BrowserTestUtils.isHidden(elem);
     }
   );
 }
@@ -185,19 +178,19 @@ async function waitForVisibleSetupStep(browser, expected) {
       attributeFilter: ["selected-view"],
     },
     () => {
-      return BrowserTestUtils.is_visible(nextStepElem);
+      return BrowserTestUtils.isVisible(nextStepElem);
     }
   );
 
   for (let elem of stepElems) {
     if (elem == nextStepElem) {
       ok(
-        BrowserTestUtils.is_visible(elem),
+        BrowserTestUtils.isVisible(elem),
         `Expected ${elem.id || elem.className} to be visible`
       );
     } else {
       ok(
-        BrowserTestUtils.is_hidden(elem),
+        BrowserTestUtils.isHidden(elem),
         `Expected ${elem.id || elem.className} to be hidden`
       );
     }
@@ -288,37 +281,6 @@ async function setupListState(browser) {
   info("tabsContainer isn't loading anymore, returning");
 }
 
-function checkMobilePromo(browser, expected = {}) {
-  const { document } = browser.contentWindow;
-  const promoElem = document.querySelector(
-    "#tab-pickup-container > .promo-box"
-  );
-  const successElem = document.querySelector(
-    "#tab-pickup-container > .confirmation-message-box"
-  );
-
-  info("checkMobilePromo: " + JSON.stringify(expected));
-  if (expected.mobilePromo) {
-    ok(BrowserTestUtils.is_visible(promoElem), "Mobile promo is visible");
-  } else {
-    ok(
-      !promoElem || BrowserTestUtils.is_hidden(promoElem),
-      "Mobile promo is hidden"
-    );
-  }
-  if (expected.mobileConfirmation) {
-    ok(
-      BrowserTestUtils.is_visible(successElem),
-      "Success confirmation is visible"
-    );
-  } else {
-    ok(
-      !successElem || BrowserTestUtils.is_hidden(successElem),
-      "Success confirmation is hidden"
-    );
-  }
-}
-
 async function touchLastTabFetch() {
   // lastTabFetch stores a timestamp in *seconds*.
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -366,7 +328,6 @@ function setupMocks({ fxaDevices = null, state, syncEnabled = true }) {
 async function tearDown(sandbox) {
   sandbox?.restore();
   Services.prefs.clearUserPref("services.sync.lastTabFetch");
-  Services.prefs.clearUserPref(MOBILE_PROMO_DISMISSED_PREF);
 }
 
 const featureTourPref = "browser.firefox-view.feature-tour";
@@ -393,7 +354,7 @@ const launchFeatureTourIn = win => {
  * @see FeatureCalloutMessages.sys.mjs for valid values of "screen"
  *
  * @param {number} screen The full ID of the feature callout screen
- * @return {string} JSON string used to set
+ * @returns {string} JSON string used to set
  * `browser.firefox-view.feature-tour`
  */
 const getPrefValueByScreen = screen => {
@@ -405,8 +366,9 @@ const getPrefValueByScreen = screen => {
 
 /**
  * Wait for a feature callout screen of given parameters to be shown
+ *
  * @param {Document} doc the document where the callout appears.
- * @param {String} screenPostfix The full ID of the feature callout screen.
+ * @param {string} screenPostfix The full ID of the feature callout screen.
  */
 const waitForCalloutScreen = async (doc, screenPostfix) => {
   await BrowserTestUtils.waitForCondition(() =>
@@ -457,7 +419,8 @@ const closeCallout = async doc => {
 /**
  * Get a Feature Callout message by id.
  *
- * @param {string} Message id
+ * @param {string} id
+ *   The message id.
  */
 const getCalloutMessageById = id => {
   return {
@@ -511,7 +474,8 @@ class TelemetrySpy {
   }
   /**
    * Assert that AWSendEventTelemetry sent the expected telemetry object.
-   * @param {Object} expectedData
+   *
+   * @param {object} expectedData
    */
   assertCalledWith(expectedData) {
     let match = this.spy.calledWith("AWPage:TELEMETRY_EVENT", expectedData);
@@ -539,7 +503,7 @@ class TelemetrySpy {
  * closed tabs list can have data.
  *
  * @param {string} url
- * @return {Promise} Promise that resolves when the session store
+ * @returns {Promise} Promise that resolves when the session store
  * has been updated after closing the tab.
  */
 async function open_then_close(url, win = window) {
@@ -561,7 +525,6 @@ function clearHistory() {
 function cleanup_tab_pickup() {
   Services.prefs.clearUserPref("services.sync.engine.tabs");
   Services.prefs.clearUserPref("services.sync.lastTabFetch");
-  Services.prefs.clearUserPref(TAB_PICKUP_STATE_PREF);
 }
 
 function isFirefoxViewTabSelected(win = window) {
@@ -594,14 +557,93 @@ function navigateToCategory(document, category) {
   navButton.buttonEl.click();
 }
 
+async function navigateToCategoryAndWait(document, category) {
+  info(`navigateToCategoryAndWait, for ${category}`);
+  const navigation = document.querySelector("fxview-category-navigation");
+  const win = document.ownerGlobal;
+  SimpleTest.promiseFocus(win);
+  let navButton = Array.from(navigation.categoryButtons).find(
+    categoryButton => {
+      return categoryButton.name === category;
+    }
+  );
+  const namedDeck = document.querySelector("named-deck");
+
+  await BrowserTestUtils.waitForCondition(
+    () => navButton.getBoundingClientRect().height,
+    `Waiting for ${category} button to be clickable`
+  );
+
+  EventUtils.synthesizeMouseAtCenter(navButton, {}, win);
+
+  await BrowserTestUtils.waitForCondition(() => {
+    let selectedView = Array.from(namedDeck.children).find(
+      child => child.slot == "selected"
+    );
+    return (
+      namedDeck.selectedViewName == category &&
+      selectedView?.getBoundingClientRect().height
+    );
+  }, `Waiting for ${category} to be visible`);
+}
+
 /**
  * Switch to the Firefox View tab.
  *
  * @param {Window} [win]
  *   The window to use, if specified. Defaults to the global window instance.
- * @return {Promise<MozTabbrowserTab>}
+ * @returns {Promise<MozTabbrowserTab>}
  *   The tab switched to.
  */
 async function switchToFxViewTab(win = window) {
   return BrowserTestUtils.switchTab(win.gBrowser, win.FirefoxViewHandler.tab);
+}
+
+function isElInViewport(element) {
+  const boundingRect = element.getBoundingClientRect();
+  return (
+    boundingRect.top >= 0 &&
+    boundingRect.left >= 0 &&
+    boundingRect.bottom <=
+      (window.innerHeight || document.documentElement.clientHeight) &&
+    boundingRect.right <=
+      (window.innerWidth || document.documentElement.clientWidth)
+  );
+}
+
+// TODO once we port over old tests, helpers and cleanup old firefox view
+// we should decide whether to keep this or openFirefoxViewTab.
+async function clickFirefoxViewButton(win) {
+  await BrowserTestUtils.synthesizeMouseAtCenter(
+    "#firefox-view-button",
+    { type: "mousedown" },
+    win.browsingContext
+  );
+}
+
+/**
+ * Wait for and assert telemetry events.
+ *
+ * @param {Array} eventDetails
+ *   Nested array of event details
+ */
+async function telemetryEvent(eventDetails) {
+  await TestUtils.waitForCondition(
+    () => {
+      let events = Services.telemetry.snapshotEvents(
+        Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
+        false
+      ).parent;
+      return events && events.length >= 1;
+    },
+    "Waiting for firefoxview_next telemetry event.",
+    200,
+    100
+  );
+
+  TelemetryTestUtils.assertEvents(
+    eventDetails,
+    { category: "firefoxview_next" },
+    { clear: true, process: "parent" }
+  );
 }

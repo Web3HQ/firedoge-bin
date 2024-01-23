@@ -23,6 +23,7 @@ namespace mozilla::media {
   X(VP8)           \
   X(VP9)           \
   X(AV1)           \
+  X(HEVC)          \
   X(Theora)        \
   X(AAC)           \
   X(FLAC)          \
@@ -45,6 +46,10 @@ using MediaCodecSet = EnumSet<MediaCodec, uint64_t>;
 #define SW_DECODE(codec) codec##SoftwareDecode
 #define HW_DECODE(codec) codec##HardwareDecode
 
+// For codec which we can do hardware decoding once user installs the free
+// platform extension, eg. AV1 on Windows
+#define LACK_HW_EXTENSION(codec) codec##LackOfExtension
+
 // Generate the MediaCodecsSupport enum, containing
 // codec-specific SW/HW decode/encode information.
 // Entries for HW audio decode/encode should never be set as we
@@ -52,7 +57,7 @@ using MediaCodecSet = EnumSet<MediaCodec, uint64_t>;
 // for debug purposes / check for erroneous PDM return values.
 // Example: MediaCodecsSupport::AACSoftwareDecode
 enum class MediaCodecsSupport : int {
-#define X(name) SW_DECODE(name), HW_DECODE(name),
+#define X(name) SW_DECODE(name), HW_DECODE(name), LACK_HW_EXTENSION(name),
   CODEC_LIST
 #undef X
       SENTINEL
@@ -66,9 +71,9 @@ using MediaCodecsSupported = EnumSet<MediaCodecsSupport, uint64_t>;
 
 // Codec-agnostic SW/HW decode support information.
 enum class DecodeSupport : int {
-  Unsupported = 0,
   SoftwareDecode,
   HardwareDecode,
+  UnsureDueToLackOfExtension,
 };
 using DecodeSupportSet = EnumSet<DecodeSupport, uint64_t>;
 
@@ -80,6 +85,7 @@ struct CodecDefinition {
   const char* mimeTypeString = "Undefined MIME type string";
   MediaCodecsSupport swDecodeSupport = MediaCodecsSupport::SENTINEL;
   MediaCodecsSupport hwDecodeSupport = MediaCodecsSupport::SENTINEL;
+  MediaCodecsSupport lackOfHWExtenstion = MediaCodecsSupport::SENTINEL;
 };
 
 // Singleton class used to collect, manage, and report codec support data.
@@ -168,7 +174,7 @@ class MCSInfo final {
   static MediaCodec GetMediaCodecFromMimeType(const nsACString& aMimeType);
 
   // Returns array of hardcoded codec definitions.
-  static std::array<CodecDefinition, 12> GetAllCodecDefinitions();
+  static std::array<CodecDefinition, 13> GetAllCodecDefinitions();
 
   // Parses an array of MIME type strings and returns a MediaCodecSet.
   static MediaCodecSet GetMediaCodecSetFromMimeTypes(
@@ -177,7 +183,7 @@ class MCSInfo final {
   // Returns a MediaCodecsSupport enum corresponding to the provided
   // codec type and decode support level requested.
   static MediaCodecsSupport GetMediaCodecsSupportEnum(
-      const MediaCodec& aCodec, const DecodeSupport& aSupport);
+      const MediaCodec& aCodec, const DecodeSupportSet& aSupport);
 
   // Returns true if SW/HW decode enum for a given codec is present in the args.
   static bool SupportsSoftwareDecode(

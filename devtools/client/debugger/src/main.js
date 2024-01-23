@@ -21,7 +21,9 @@ import { initialSourcesState } from "./reducers/sources";
 import { initialUIState } from "./reducers/ui";
 import { initialSourceBlackBoxState } from "./reducers/source-blackbox";
 
-const { sanitizeBreakpoints } = require("devtools/client/shared/thread-utils");
+const {
+  sanitizeBreakpoints,
+} = require("resource://devtools/client/shared/thread-utils.js");
 
 async function syncBreakpoints() {
   const breakpoints = await asyncStore.pendingBreakpoints;
@@ -46,6 +48,13 @@ async function syncXHRBreakpoints() {
         firefox.clientCommands.setXHRBreakpoint(path, method);
       }
     })
+  );
+}
+
+function setPauseOnDebuggerStatement() {
+  const { pauseOnDebuggerStatement } = prefs;
+  return firefox.clientCommands.pauseOnDebuggerStatement(
+    pauseOnDebuggerStatement
   );
 }
 
@@ -113,6 +122,7 @@ export async function bootstrap({
 
   await syncBreakpoints();
   await syncXHRBreakpoints();
+  await setPauseOnDebuggerStatement();
   await setPauseOnExceptions();
 
   setupHelper({

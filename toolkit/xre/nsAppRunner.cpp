@@ -21,6 +21,7 @@
 #include "mozilla/MemoryChecking.h"
 #include "mozilla/Poison.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/PreferenceSheet.h"
 #include "mozilla/Printf.h"
 #include "mozilla/ProcessType.h"
 #include "mozilla/ResultExtensions.h"
@@ -119,6 +120,7 @@
 #  include "mozilla/DllPrefetchExperimentRegistryInfo.h"
 #  include "mozilla/WindowsBCryptInitialization.h"
 #  include "mozilla/WindowsDllBlocklist.h"
+#  include "mozilla/WindowsMsctfInitialization.h"
 #  include "mozilla/WindowsProcessMitigations.h"
 #  include "mozilla/WindowsVersion.h"
 #  include "mozilla/WinHeaderOnlyUtils.h"
@@ -261,6 +263,10 @@
 #  include "mozilla/GfxInfo.h"
 #endif
 
+#ifdef MOZ_WIDGET_GTK
+#  include "nsAppShell.h"
+#endif
+
 extern uint32_t gRestartMode;
 extern void InstallSignalHandlers(const char* ProgramName);
 
@@ -323,6 +329,8 @@ bool gIsGtest = false;
 bool gKioskMode = false;
 int gKioskMonitor = -1;
 
+bool gAllowContentAnalysis = false;
+
 nsString gAbsoluteArgv0Path;
 
 #if defined(XP_WIN)
@@ -336,16 +344,23 @@ nsString gProcessStartupShortcut;
 #  ifdef MOZ_WAYLAND
 #    include <gdk/gdkwayland.h>
 #    include "mozilla/widget/nsWaylandDisplay.h"
+#    include "wayland-proxy.h"
 #  endif
 #  ifdef MOZ_X11
 #    include <gdk/gdkx.h>
 #  endif /* MOZ_X11 */
 #endif
+
+#if defined(MOZ_WAYLAND)
+std::unique_ptr<WaylandProxy> gWaylandProxy;
+#endif
+
 #include "BinaryPath.h"
 
-#ifdef MOZ_LINKER
-extern "C" MFBT_API bool IsSignalHandlingBroken();
-#endif
+#ifdef MOZ_LOGGING
+#  include "mozilla/Logging.h"
+extern mozilla::LazyLogModule gWidgetWaylandLog;
+#endif /* MOZ_LOGGING */
 
 #ifdef FUZZING
 #  include "FuzzerRunner.h"
@@ -442,21 +457,13 @@ bool IsWaylandEnabled() {
         return true;
       }
     }
-#  ifdef EARLY_BETA_OR_EARLIER
     // Enable by default when we're running on a recent enough GTK version. We'd
     // like to check further details like compositor version and so on ideally
     // to make sure we don't enable it on old Mutter or what not, but we can't,
     // so let's assume that if the user is running on a Wayland session by
     // default we're ok, since either the distro has enabled Wayland by default,
     // or the user has gone out of their way to use Wayland.
-    //
-    // TODO(emilio): If users hit problems, we might be able to restrict it to
-    // GNOME / KDE  / known-good-desktop environments by checking
-    // XDG_CURRENT_DESKTOP or so...
     return !gtk_check_version(3, 24, 30);
-#  else
-    return false;
-#  endif
   }();
   return isWaylandEnabled;
 }
@@ -537,7 +544,6 @@ bool gFxREmbedded = false;
 
 enum E10sStatus {
   kE10sEnabledByDefault,
-  kE10sDisabledByUser,
   kE10sForceDisabled,
 };
 
@@ -559,43 +565,18 @@ bool BrowserTabsRemoteAutostart() {
     return gBrowserTabsRemoteAutostart;
   }
 
-#if defined(MOZILLA_OFFICIAL) && MOZ_BUILD_APP_IS_BROWSER
-  bool allowSingleProcessOutsideAutomation = false;
-#else
-  bool allowSingleProcessOutsideAutomation = true;
-#endif
-
+  gBrowserTabsRemoteAutostart = true;
   E10sStatus status = kE10sEnabledByDefault;
+
   // We use "are non-local connections disabled" as a proxy for
   // "are we running some kind of automated test". It would be nicer to use
   // xpc::IsInAutomation(), but that depends on some prefs being set, which
   // they are not in (at least) gtests (where we can't) and xpcshell.
-  // Long-term, hopefully we can make tests switch to environment variables
-  // to disable e10s and then we can get rid of this.
-  if (allowSingleProcessOutsideAutomation ||
-      xpc::AreNonLocalConnectionsDisabled()) {
-    bool optInPref =
-        Preferences::GetBool("browser.tabs.remote.autostart", true);
-
-    if (optInPref) {
-      gBrowserTabsRemoteAutostart = true;
-    } else {
-      status = kE10sDisabledByUser;
-    }
-  } else {
-    gBrowserTabsRemoteAutostart = true;
-  }
-
-  // Uber override pref for emergency blocking
-  if (gBrowserTabsRemoteAutostart) {
+  // Long-term, hopefully we can make all tests e10s-friendly,
+  // then we could remove this automation-only env variable.
+  if (gBrowserTabsRemoteAutostart && xpc::AreNonLocalConnectionsDisabled()) {
     const char* forceDisable = PR_GetEnv("MOZ_FORCE_DISABLE_E10S");
-#if defined(MOZ_WIDGET_ANDROID)
-    // We need this for xpcshell on Android
-    if (forceDisable && *forceDisable) {
-#else
-    // The environment variable must match the application version to apply.
-    if (forceDisable && gAppData && !strcmp(forceDisable, gAppData->version)) {
-#endif
+    if (forceDisable && *forceDisable == '1') {
       gBrowserTabsRemoteAutostart = false;
       status = kE10sForceDisabled;
     }
@@ -1591,15 +1572,15 @@ nsXULAppInfo::GetRestartedByOS(bool* aResult) {
 
 NS_IMETHODIMP
 nsXULAppInfo::GetChromeColorSchemeIsDark(bool* aResult) {
-  LookAndFeel::EnsureColorSchemesInitialized();
-  *aResult = LookAndFeel::ColorSchemeForChrome() == ColorScheme::Dark;
+  PreferenceSheet::EnsureInitialized();
+  *aResult = PreferenceSheet::ColorSchemeForChrome() == ColorScheme::Dark;
   return NS_OK;
 }
 
 NS_IMETHODIMP
 nsXULAppInfo::GetContentThemeDerivedColorSchemeIsDark(bool* aResult) {
   *aResult =
-      LookAndFeel::ThemeDerivedColorSchemeForContent() == ColorScheme::Dark;
+      PreferenceSheet::ThemeDerivedColorSchemeForContent() == ColorScheme::Dark;
   return NS_OK;
 }
 
@@ -1830,15 +1811,15 @@ nsXULAppInfo::RemoveCrashReportAnnotation(const nsACString& key) {
 }
 
 NS_IMETHODIMP
-nsXULAppInfo::IsAnnotationAllowlistedForPing(const nsACString& aValue,
-                                             bool* aIsAllowlisted) {
+nsXULAppInfo::IsAnnotationAllowedForPing(const nsACString& aValue,
+                                         bool* aIsAllowed) {
   CrashReporter::Annotation annotation;
 
   if (!AnnotationFromString(annotation, PromiseFlatCString(aValue).get())) {
     return NS_ERROR_INVALID_ARG;
   }
 
-  *aIsAllowlisted = CrashReporter::IsAnnotationAllowlistedForPing(annotation);
+  *aIsAllowed = CrashReporter::IsAnnotationAllowedForPing(annotation);
 
   return NS_OK;
 }
@@ -2543,6 +2524,7 @@ nsresult LaunchChild(bool aBlankCommandLine, bool aTryExec) {
 
 #if !defined(MOZ_WIDGET_ANDROID)  // Android has separate restart code.
 #  if defined(XP_MACOSX)
+  InitializeMacApp();
   CommandLineServiceMac::SetupMacCommandLine(gRestartArgc, gRestartArgv, true);
   LaunchChildMac(gRestartArgc, gRestartArgv);
 #  else
@@ -2827,6 +2809,7 @@ static ReturnAbortOnError ShowProfileManager(
     NS_ENSURE_SUCCESS(rv, NS_ERROR_FAILURE);
 
 #ifdef XP_MACOSX
+    InitializeMacApp();
     CommandLineServiceMac::SetupMacCommandLine(gRestartArgc, gRestartArgv,
                                                true);
 #endif
@@ -4000,6 +3983,9 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
     gKioskMonitor = atoi(kioskMonitorNumber);
   }
 
+  gAllowContentAnalysis = CheckArg("allow-content-analysis", nullptr,
+                                   CheckArgFlag::RemoveArg) == ARG_FOUND;
+
   nsresult rv;
   ArgResult ar;
 
@@ -4147,11 +4133,6 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
     nsDependentCString releaseChannel(MOZ_STRINGIFY(MOZ_UPDATE_CHANNEL));
     CrashReporter::AnnotateCrashReport(
         CrashReporter::Annotation::ReleaseChannel, releaseChannel);
-#ifdef MOZ_LINKER
-    CrashReporter::AnnotateCrashReport(
-        CrashReporter::Annotation::CrashAddressLikelyWrong,
-        IsSignalHandlingBroken());
-#endif
 
 #ifdef XP_WIN
     nsAutoString appInitDLLs;
@@ -4717,6 +4698,23 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
     const char* display_name = nullptr;
     bool saveDisplayArg = false;
 
+    bool waylandEnabled = IsWaylandEnabled();
+#  ifdef MOZ_WAYLAND
+    auto* proxyEnv = getenv("MOZ_DISABLE_WAYLAND_PROXY");
+    bool disableWaylandProxy = proxyEnv && *proxyEnv;
+    if (!disableWaylandProxy && XRE_IsParentProcess() && waylandEnabled) {
+#    ifdef MOZ_LOGGING
+      if (MOZ_LOG_TEST(gWidgetWaylandLog, mozilla::LogLevel::Debug)) {
+        WaylandProxy::SetVerbose(true);
+      }
+#    endif
+      gWaylandProxy = WaylandProxy::Create();
+      if (gWaylandProxy) {
+        gWaylandProxy->RunThread();
+      }
+    }
+#  endif
+
     // display_name is owned by gdk.
     display_name = gdk_get_display_arg_name();
     // if --display argument is given make sure it's
@@ -4726,7 +4724,6 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
       saveDisplayArg = true;
     }
 
-    bool waylandEnabled = IsWaylandEnabled();
     // On Wayland disabled builds read X11 DISPLAY env exclusively
     // and don't care about different displays.
     if (!waylandEnabled && !display_name) {
@@ -4888,6 +4885,35 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
 #endif
 
 #if defined(MOZ_UPDATER) && !defined(MOZ_WIDGET_ANDROID)
+#  ifdef XP_WIN
+  {
+    // When automatically restarting for a staged background update
+    // we want the child process to wait here so that the updater
+    // does not register two instances running and use that as a
+    // reason to not process updates. This function requires having
+    // -restart-pid <param> in the command line to function properly.
+    // Ensure we keep -restart-pid if we are running tests
+    if (ARG_FOUND == CheckArgExists("restart-pid") &&
+        !CheckArg("test-only-automatic-restart-no-wait")) {
+      // We're not testing and can safely remove it now and read the pid.
+      const char* restartPidString = nullptr;
+      CheckArg("restart-pid", &restartPidString, CheckArgFlag::RemoveArg);
+      // pid should be first parameter following -restart-pid.
+      uint32_t pid = nsDependentCString(restartPidString).ToInteger(&rv, 10U);
+      if (NS_SUCCEEDED(rv) && pid > 0) {
+        printf_stderr(
+            "*** MaybeWaitForProcessExit: launched pidDWORD = %u ***\n", pid);
+        RefPtr<nsUpdateProcessor> updater = new nsUpdateProcessor();
+        if (NS_FAILED(
+                updater->WaitForProcessExit(pid, MAYBE_WAIT_TIMEOUT_MS))) {
+          NS_WARNING("Failed to MaybeWaitForProcessExit.");
+        }
+      } else {
+        NS_WARNING("Failed to parse pid from -restart-pid.");
+      }
+    }
+  }
+#  endif
   Maybe<ShouldNotProcessUpdatesReason> shouldNotProcessUpdatesReason =
       ShouldNotProcessUpdates(mDirProvider);
   if (shouldNotProcessUpdatesReason.isNothing()) {
@@ -5161,6 +5187,9 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
       MOZ_UNUSED(WaylandDisplayGet());
     }
 #endif
+#ifdef MOZ_WIDGET_GTK
+    nsAppShell::InstallTermSignalHandler();
+#endif
   }
 
   return 0;
@@ -5336,6 +5365,10 @@ nsresult XREMain::XRE_mainRun() {
       }
     }
 
+#ifdef XP_MACOSX
+    InitializeMacApp();
+#endif
+
     // We'd like to initialize the JSContext *after* reading the user prefs.
     // Unfortunately that's not possible if we have to do profile migration
     // because that requires us to execute JS before reading user prefs.
@@ -5480,11 +5513,12 @@ nsresult XREMain::XRE_mainRun() {
     SaveToEnv("XRE_RESTARTED_BY_PROFILE_MANAGER=");
 
     if (!AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
+      // Don't create the hidden window during startup on
+      // platforms that don't always need it.
 #ifdef XP_MACOSX
       bool lazyHiddenWindow = false;
 #else
-      bool lazyHiddenWindow =
-          Preferences::GetBool("toolkit.lazyHiddenWindow", false);
+      bool lazyHiddenWindow = true;
 #endif
 
 #ifdef MOZ_BACKGROUNDTASKS
@@ -5832,6 +5866,14 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
     DebugOnly<bool> result = WindowsBCryptInitialization();
     MOZ_ASSERT(result);
   }
+
+#  if defined(_M_IX86) || defined(_M_X64)
+  {
+    DebugOnly<bool> result = WindowsMsctfInitialization();
+    MOZ_ASSERT(result);
+  }
+#  endif  // _M_IX86 || _M_X64
+
 #endif  // defined(XP_WIN)
 
   // Once we unset the exception handler, we lose the ability to properly
@@ -5912,17 +5954,18 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
   gLastAppVersion.Truncate();
   gLastAppBuildID.Truncate();
 
-  mozilla::AppShutdown::MaybeDoRestart();
-
 #ifdef MOZ_WIDGET_GTK
   // gdk_display_close also calls gdk_display_manager_set_default_display
   // appropriately when necessary.
   if (!gfxPlatform::IsHeadless()) {
 #  ifdef MOZ_WAYLAND
     WaylandDisplayRelease();
+    gWaylandProxy = nullptr;
 #  endif
   }
 #endif
+
+  mozilla::AppShutdown::MaybeDoRestart();
 
   XRE_DeinitCommandLine();
 
@@ -6039,9 +6082,12 @@ bool XRE_UseNativeEventProcessing() {
 #  if defined(XP_WIN)
       auto upc = mozilla::ipc::UtilityProcessChild::Get();
       MOZ_ASSERT(upc);
-      // WindowsUtils is for Windows APIs, which typically require a Windows
-      // native event loop.
-      return upc->mSandbox == mozilla::ipc::SandboxingKind::WINDOWS_UTILS;
+
+      using SboxKind = mozilla::ipc::SandboxingKind;
+      // These processes are used as external hosts for accessing Windows
+      // APIs which (may) require a Windows native event loop.
+      return upc->mSandbox == SboxKind::WINDOWS_UTILS ||
+             upc->mSandbox == SboxKind::WINDOWS_FILE_DIALOG;
 #  else
       return false;
 #  endif  // defined(XP_WIN)

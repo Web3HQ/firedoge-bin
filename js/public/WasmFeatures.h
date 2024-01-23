@@ -100,6 +100,11 @@
 #else
 #  define WASM_MULTI_MEMORY_ENABLED 0
 #endif
+#ifdef ENABLE_WASM_JS_STRING_BUILTINS
+#  define WASM_JS_STRING_BUILTINS_ENABLED 1
+#else
+#  define WASM_JS_STRING_BUILTINS_ENABLED 0
+#endif
 
 enum class WasmFeatureStage {
   Experimental = 0,
@@ -127,14 +132,25 @@ enum class WasmFeatureStage {
     /* compile predicate  */ true,                                      \
     /* compiler predicate */ AnyCompilerAvailable(cx),                  \
     /* flag predicate     */ true,                                      \
-    /* flag force enable  */ false,                                     \
+    /* flag force enable  */ WasmExnRefFlag(cx),                        \
     /* flag fuzz enable   */ true,                                      \
     /* shell flag         */ "exceptions",                              \
     /* preference name    */ "exceptions")                              \
   FEATURE(                                                              \
+    /* capitalized name   */ ExnRef,                                    \
+    /* lower case name    */ exnref,                                    \
+    /* stage              */ WasmFeatureStage::Experimental,            \
+    /* compile predicate  */ true,                                      \
+    /* compiler predicate */ AnyCompilerAvailable(cx),                  \
+    /* flag predicate     */ true,                                      \
+    /* flag force enable  */ false,                                     \
+    /* flag fuzz enable   */ true,                                      \
+    /* shell flag         */ "exnref",                                  \
+    /* preference name    */ "exnref ")                                 \
+  FEATURE(                                                              \
     /* capitalized name   */ FunctionReferences,                        \
     /* lower case name    */ functionReferences,                        \
-    /* stage              */ WasmFeatureStage::Experimental,            \
+    /* stage              */ WasmFeatureStage::Tentative,               \
     /* compile predicate  */ WASM_FUNCTION_REFERENCES_ENABLED,          \
     /* compiler predicate */ AnyCompilerAvailable(cx),                  \
     /* flag predicate     */ true,                                      \
@@ -145,7 +161,7 @@ enum class WasmFeatureStage {
   FEATURE(                                                              \
     /* capitalized name   */ Gc,                                        \
     /* lower case name    */ gc,                                        \
-    /* stage              */ WasmFeatureStage::Experimental,            \
+    /* stage              */ WasmFeatureStage::Tentative,               \
     /* compile predicate  */ WASM_GC_ENABLED,                           \
     /* compiler predicate */ AnyCompilerAvailable(cx),                  \
     /* flag predicate     */ true,                                      \
@@ -153,6 +169,17 @@ enum class WasmFeatureStage {
     /* flag fuzz enable   */ false,                                     \
     /* shell flag         */ "gc",                                      \
     /* preference name    */ "gc")                                      \
+  FEATURE(                                                              \
+    /* capitalized name   */ JSStringBuiltins,                          \
+    /* lower case name    */ jsStringBuiltins,                          \
+    /* stage              */ WasmFeatureStage::Experimental,            \
+    /* compile predicate  */ WASM_JS_STRING_BUILTINS_ENABLED,           \
+    /* compiler predicate */ AnyCompilerAvailable(cx),                  \
+    /* flag predicate     */ true,                                      \
+    /* flag force enable  */ false,                                     \
+    /* flag fuzz enable   */ true,                                      \
+    /* shell flag         */ "js-string-builtins",                      \
+    /* preference name    */ "js_string_builtins")                      \
   FEATURE(                                                              \
     /* capitalized name   */ RelaxedSimd,                               \
     /* lower case name    */ v128Relaxed,                               \
@@ -200,7 +227,7 @@ enum class WasmFeatureStage {
   FEATURE(                                                              \
     /* capitalized name   */ TailCalls,                                 \
     /* lower case name    */ tailCalls,                                 \
-    /* stage              */ WasmFeatureStage::Experimental,            \
+    /* stage              */ WasmFeatureStage::Tentative,            \
     /* compile predicate  */ WASM_TAIL_CALLS_ENABLED,                   \
     /* compiler predicate */ AnyCompilerAvailable(cx),                  \
     /* flag predicate     */ true,                                      \
@@ -231,16 +258,16 @@ enum class WasmFeatureStage {
     /* shell flag         */ "test-serialization",                      \
     /* preference name    */ "test-serialization")                      \
   FEATURE(                                                              \
-    /* capitalized name   */ FinalTypes,                                \
-    /* lower case name    */ finalTypes,                                \
+    /* capitalized name   */ TestMetadata,                              \
+    /* lower case name    */ testMetadata,                              \
     /* stage              */ WasmFeatureStage::Experimental,            \
     /* compile predicate  */ 1,                                         \
     /* compiler predicate */ AnyCompilerAvailable(cx),                  \
     /* flag predicate     */ true,                                      \
     /* flag force enable  */ false,                                     \
     /* flag fuzz enable   */ false,                                     \
-    /* shell flag         */ "final-types",                             \
-    /* preference name    */ "final_types")
+    /* shell flag         */ "test-metadata",                           \
+    /* preference name    */ "test_metadata")
 
 // clang-format on
 

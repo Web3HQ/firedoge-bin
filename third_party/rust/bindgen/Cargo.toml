@@ -13,7 +13,7 @@
 edition = "2018"
 rust-version = "1.60.0"
 name = "bindgen"
-version = "0.66.1"
+version = "0.69.2"
 authors = [
     "Jyun-Yan You <jyyou.tw@gmail.com>",
     "Emilio Cobos Álvarez <emilio@crisal.io>",
@@ -36,6 +36,29 @@ categories = [
 ]
 license = "BSD-3-Clause"
 repository = "https://github.com/rust-lang/rust-bindgen"
+
+[package.metadata.docs.rs]
+features = ["experimental"]
+
+[package.metadata.release]
+pre-release-hook = [
+    "../node_modules/doctoc/doctoc.js",
+    "../CHANGELOG.md",
+]
+release = true
+
+[[package.metadata.release.pre-release-replacements]]
+file = "../CHANGELOG.md"
+replace = """
+# Unreleased
+## Added
+## Changed
+## Removed
+## Fixed
+## Security
+
+# {{version}} ({{date}})"""
+search = "# Unreleased"
 
 [lib]
 name = "bindgen"
@@ -70,7 +93,8 @@ optional = true
 version = "0.1.2"
 
 [dependencies.prettyplease]
-version = "0.2.0"
+version = "0.2.7"
+features = ["verbatim"]
 optional = true
 
 [dependencies.proc-macro2]

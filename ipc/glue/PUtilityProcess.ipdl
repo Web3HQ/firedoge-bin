@@ -12,6 +12,7 @@ include protocol PJSOracle;
 
 #if defined(XP_WIN)
 include protocol PWindowsUtils;
+include protocol PWinFileDialog;
 #endif
 
 #if defined(MOZ_SANDBOX) && defined(MOZ_DEBUG) && defined(ENABLE_TESTS)
@@ -44,7 +45,8 @@ namespace ipc {
 // one instance of this protocol, with the UtilityProcessParent living on the main thread
 // of the main process and the UtilityProcessChild living on the main thread of the Utility
 // process.
-[NeedsOtherPid] protocol PUtilityProcess
+[NeedsOtherPid, ChildProc=Utility]
+protocol PUtilityProcess
 {
 parent:
   async InitCrashReporter(NativeThreadId threadId);
@@ -102,6 +104,7 @@ child:
 
 #if defined(XP_WIN)
   async StartWindowsUtilsService(Endpoint<PWindowsUtilsChild> aEndpoint);
+  async StartWinFileDialogService(Endpoint<PWinFileDialogChild> aEndpoint);
 
   async GetUntrustedModulesData() returns (UntrustedModulesData? data);
 

@@ -303,7 +303,6 @@ bool PeerConnectionInterface::RTCConfiguration::operator==(
     int max_ipv6_networks;
     bool disable_link_local_networks;
     absl::optional<int> screencast_min_bitrate;
-    absl::optional<bool> combined_audio_video_bwe;
 #if defined(WEBRTC_FUCHSIA)
     absl::optional<bool> enable_dtls_srtp;
 #endif
@@ -372,7 +371,6 @@ bool PeerConnectionInterface::RTCConfiguration::operator==(
          max_ipv6_networks == o.max_ipv6_networks &&
          disable_link_local_networks == o.disable_link_local_networks &&
          screencast_min_bitrate == o.screencast_min_bitrate &&
-         combined_audio_video_bwe == o.combined_audio_video_bwe &&
 #if defined(WEBRTC_FUCHSIA)
          enable_dtls_srtp == o.enable_dtls_srtp &&
 #endif
@@ -463,10 +461,11 @@ RTCErrorOr<rtc::scoped_refptr<PeerConnection>> PeerConnection::Create(
 
   // Interim code: If an AsyncResolverFactory is given, but not an
   // AsyncDnsResolverFactory, wrap it in a WrappingAsyncDnsResolverFactory
-  // If neither is given, create a WrappingAsyncDnsResolverFactory wrapping
-  // a BasicAsyncResolver.
+  // If neither is given, create a BasicAsyncDnsResolverFactory.
   // TODO(bugs.webrtc.org/12598): Remove code once all callers pass a
   // AsyncDnsResolverFactory.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
   if (dependencies.async_dns_resolver_factory &&
       dependencies.async_resolver_factory) {
     RTC_LOG(LS_ERROR)
@@ -474,15 +473,17 @@ RTCErrorOr<rtc::scoped_refptr<PeerConnection>> PeerConnection::Create(
     return RTCError(RTCErrorType::INVALID_PARAMETER,
                     "Both old and new type of DNS resolver given");
   }
-  if (dependencies.async_resolver_factory) {
-    dependencies.async_dns_resolver_factory =
-        std::make_unique<WrappingAsyncDnsResolverFactory>(
-            std::move(dependencies.async_resolver_factory));
-  } else {
-    dependencies.async_dns_resolver_factory =
-        std::make_unique<WrappingAsyncDnsResolverFactory>(
-            std::make_unique<BasicAsyncResolverFactory>());
+  if (!dependencies.async_dns_resolver_factory) {
+    if (dependencies.async_resolver_factory) {
+      dependencies.async_dns_resolver_factory =
+          std::make_unique<WrappingAsyncDnsResolverFactory>(
+              std::move(dependencies.async_resolver_factory));
+    } else {
+      dependencies.async_dns_resolver_factory =
+          std::make_unique<BasicAsyncDnsResolverFactory>();
+    }
   }
+#pragma clang diagnostic pop
 
   // The PeerConnection constructor consumes some, but not all, dependencies.
   auto pc = rtc::make_ref_counted<PeerConnection>(
@@ -1110,14 +1111,20 @@ PeerConnection::AddTransceiver(
   }
 
   std::vector<cricket::VideoCodec> codecs;
+  // Gather the current codec capabilities to allow checking scalabilityMode and
+  // codec selection against supported values.
   if (media_type == cricket::MEDIA_TYPE_VIDEO) {
-    // Gather the current codec capabilities to allow checking scalabilityMode
-    // against supported values.
     codecs = context_->media_engine()->video().send_codecs(false);
+  } else {
+    codecs = context_->media_engine()->voice().send_codecs();
   }
 
-  auto result = cricket::CheckRtpParametersValues(parameters, codecs);
+  auto result =
+      cricket::CheckRtpParametersValues(parameters, codecs, absl::nullopt);
   if (!result.ok()) {
+    if (result.type() == RTCErrorType::INVALID_MODIFICATION) {
+      result.set_type(RTCErrorType::UNSUPPORTED_OPERATION);
+    }
     LOG_AND_RETURN_ERROR(result.type(), result.message());
   }
 
@@ -1782,9 +1789,9 @@ bool PeerConnection::StartRtcEventLog(std::unique_ptr<RtcEventLogOutput> output,
 
 bool PeerConnection::StartRtcEventLog(
     std::unique_ptr<RtcEventLogOutput> output) {
-  int64_t output_period_ms = webrtc::RtcEventLog::kImmediateOutput;
-  if (trials().IsEnabled("WebRTC-RtcEventLogNewFormat")) {
-    output_period_ms = 5000;
+  int64_t output_period_ms = 5000;
+  if (trials().IsDisabled("WebRTC-RtcEventLogNewFormat")) {
+    output_period_ms = webrtc::RtcEventLog::kImmediateOutput;
   }
   return StartRtcEventLog(std::move(output), output_period_ms);
 }
@@ -2852,31 +2859,6 @@ void PeerConnection::ReportNegotiatedCiphers(
   if (srtp_crypto_suite == rtc::kSrtpInvalidCryptoSuite &&
       ssl_cipher_suite == rtc::kTlsNullWithNullNull) {
     return;
-  }
-
-  if (srtp_crypto_suite != rtc::kSrtpInvalidCryptoSuite) {
-    for (cricket::MediaType media_type : media_types) {
-      switch (media_type) {
-        case cricket::MEDIA_TYPE_AUDIO:
-          RTC_HISTOGRAM_ENUMERATION_SPARSE(
-              "WebRTC.PeerConnection.SrtpCryptoSuite.Audio", srtp_crypto_suite,
-              rtc::kSrtpCryptoSuiteMaxValue);
-          break;
-        case cricket::MEDIA_TYPE_VIDEO:
-          RTC_HISTOGRAM_ENUMERATION_SPARSE(
-              "WebRTC.PeerConnection.SrtpCryptoSuite.Video", srtp_crypto_suite,
-              rtc::kSrtpCryptoSuiteMaxValue);
-          break;
-        case cricket::MEDIA_TYPE_DATA:
-          RTC_HISTOGRAM_ENUMERATION_SPARSE(
-              "WebRTC.PeerConnection.SrtpCryptoSuite.Data", srtp_crypto_suite,
-              rtc::kSrtpCryptoSuiteMaxValue);
-          break;
-        default:
-          RTC_DCHECK_NOTREACHED();
-          continue;
-      }
-    }
   }
 
   if (ssl_cipher_suite != rtc::kTlsNullWithNullNull) {

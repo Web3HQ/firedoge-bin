@@ -19,17 +19,17 @@
 #include "ds/Sort.h"
 #include "frontend/BytecodeCompiler.h"  // js::frontend::CompileModule
 #include "frontend/FrontendContext.h"   // js::AutoReportFrontendContext
-#include "js/ColumnNumber.h"  // JS::ColumnNumberZeroOrigin, JS::ColumnNumberOneOrigin
-#include "js/Context.h"            // js::AssertHeapIsIdle
-#include "js/ErrorReport.h"        // JSErrorBase
-#include "js/RootingAPI.h"         // JS::MutableHandle
-#include "js/Value.h"              // JS::Value
-#include "vm/EnvironmentObject.h"  // js::ModuleEnvironmentObject
-#include "vm/JSAtomUtils.h"        // AtomizeString
-#include "vm/JSContext.h"          // CHECK_THREAD, JSContext
-#include "vm/JSObject.h"           // JSObject
-#include "vm/List.h"               // ListObject
-#include "vm/Runtime.h"            // JSRuntime
+#include "js/ColumnNumber.h"            // JS::ColumnNumberOneOrigin
+#include "js/Context.h"                 // js::AssertHeapIsIdle
+#include "js/ErrorReport.h"             // JSErrorBase
+#include "js/RootingAPI.h"              // JS::MutableHandle
+#include "js/Value.h"                   // JS::Value
+#include "vm/EnvironmentObject.h"       // js::ModuleEnvironmentObject
+#include "vm/JSAtomUtils.h"             // AtomizeString
+#include "vm/JSContext.h"               // CHECK_THREAD, JSContext
+#include "vm/JSObject.h"                // JSObject
+#include "vm/List.h"                    // ListObject
+#include "vm/Runtime.h"                 // JSRuntime
 
 #include "vm/JSAtomUtils-inl.h"  // AtomToId
 #include "vm/JSContext-inl.h"    // JSContext::{c,releaseC}heck
@@ -40,19 +40,6 @@ using mozilla::Utf8Unit;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Public API
-
-JS_PUBLIC_API void JS::SetSupportedImportAssertions(
-    JSRuntime* rt, const ImportAssertionVector& assertions) {
-  AssertHeapIsIdle();
-  MOZ_ASSERT(CurrentThreadCanAccessRuntime(rt));
-  MOZ_ASSERT(rt->supportedImportAssertions.ref().empty());
-
-  AutoEnterOOMUnsafeRegion oomUnsafe;
-  if (!rt->supportedImportAssertions.ref().appendAll(assertions)) {
-    oomUnsafe.crash("SetSupportedImportAssertions");
-  }
-}
-
 JS_PUBLIC_API JS::ModuleResolveHook JS::GetModuleResolveHook(JSRuntime* rt) {
   AssertHeapIsIdle();
 
@@ -197,7 +184,7 @@ JS_PUBLIC_API JSString* JS::GetRequestedModuleSpecifier(
 
 JS_PUBLIC_API void JS::GetRequestedModuleSourcePos(
     JSContext* cx, Handle<JSObject*> moduleRecord, uint32_t index,
-    uint32_t* lineNumber, JS::ColumnNumberZeroOrigin* columnNumber) {
+    uint32_t* lineNumber, JS::ColumnNumberOneOrigin* columnNumber) {
   AssertHeapIsIdle();
   CHECK_THREAD(cx);
   cx->check(moduleRecord);
@@ -290,14 +277,6 @@ JS_PUBLIC_API void JS::ClearModuleEnvironment(JSObject* moduleObj) {
   for (uint32_t i = numReserved; i < numSlots; i++) {
     env->setSlot(i, UndefinedValue());
   }
-}
-
-JS_PUBLIC_API void JS::AssertModuleUnlinked(JSObject* moduleObj) {
-  MOZ_ASSERT(moduleObj);
-  AssertHeapIsIdle();
-
-  MOZ_DIAGNOSTIC_ASSERT(moduleObj->as<ModuleObject>().status() ==
-                        ModuleStatus::Unlinked);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -859,14 +838,19 @@ static ModuleNamespaceObject* ModuleNamespaceCreate(
 static void ThrowResolutionError(JSContext* cx, Handle<ModuleObject*> module,
                                  Handle<Value> resolution, bool isDirectImport,
                                  Handle<JSAtom*> name, uint32_t line,
-                                 JS::ColumnNumberZeroOrigin column) {
+                                 JS::ColumnNumberOneOrigin column) {
   MOZ_ASSERT(line != 0);
 
   bool isAmbiguous = resolution == StringValue(cx->names().ambiguous);
 
+  // ErrorNumbers:
+  //          | MISSING | AMBIGUOUS |
+  // ---------+---------+-----------+
+  // INDIRECT |
+  // DIRECT   |
   static constexpr unsigned ErrorNumbers[2][2] = {
-      {JSMSG_AMBIGUOUS_IMPORT, JSMSG_MISSING_IMPORT},
-      {JSMSG_AMBIGUOUS_INDIRECT_EXPORT, JSMSG_MISSING_INDIRECT_EXPORT}};
+      {JSMSG_MISSING_INDIRECT_EXPORT, JSMSG_AMBIGUOUS_INDIRECT_EXPORT},
+      {JSMSG_MISSING_IMPORT, JSMSG_AMBIGUOUS_IMPORT}};
   unsigned errorNumber = ErrorNumbers[isDirectImport][isAmbiguous];
 
   const JSErrorFormatString* errorString =
@@ -906,9 +890,8 @@ static void ThrowResolutionError(JSContext* cx, Handle<ModuleObject*> module,
   }
 
   RootedValue error(cx);
-  if (!JS::CreateError(cx, JSEXN_SYNTAXERR, nullptr, filename, line,
-                       JS::ColumnNumberOneOrigin(column), nullptr, message,
-                       JS::NothingHandleValue, &error)) {
+  if (!JS::CreateError(cx, JSEXN_SYNTAXERR, nullptr, filename, line, column,
+                       nullptr, message, JS::NothingHandleValue, &error)) {
     return;
   }
 
@@ -926,13 +909,16 @@ bool js::ModuleInitializeEnvironment(JSContext* cx,
   Rooted<JSAtom*> exportName(cx);
   Rooted<Value> resolution(cx);
   for (const ExportEntry& e : module->indirectExportEntries()) {
-    // Step 1.a. Let resolution be ? module.ResolveExport(e.[[ExportName]]).
+    // Step 1.a. Assert: e.[[ExportName]] is not null.
+    MOZ_ASSERT(e.exportName());
+
+    // Step 1.b. Let resolution be ? module.ResolveExport(e.[[ExportName]]).
     exportName = e.exportName();
     if (!ModuleResolveExport(cx, module, exportName, &resolution)) {
       return false;
     }
 
-    // Step 1.b. If resolution is null or ambiguous, throw a SyntaxError
+    // Step 1.c. If resolution is either null or AMBIGUOUS, throw a SyntaxError
     //           exception.
     if (!IsResolvedBinding(cx, resolution)) {
       ThrowResolutionError(cx, module, resolution, false, exportName,

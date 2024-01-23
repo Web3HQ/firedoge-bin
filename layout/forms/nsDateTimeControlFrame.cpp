@@ -135,9 +135,8 @@ void nsDateTimeControlFrame::Reflow(nsPresContext* aPresContext,
     LogicalMargin childMargin = childReflowInput.ComputedLogicalMargin(myWM);
 
     // offsets of input area frame within this frame:
-    LogicalPoint childOffset(
-        myWM, borderPadding.IStart(myWM) + childMargin.IStart(myWM),
-        borderPadding.BStart(myWM) + childMargin.BStart(myWM));
+    LogicalPoint childOffset =
+        borderPadding.StartOffset(myWM) + childMargin.StartOffset(myWM);
 
     nsReflowStatus childStatus;
     // We initially reflow the child with a dummy containerSize; positioning
@@ -164,9 +163,7 @@ void nsDateTimeControlFrame::Reflow(nsPresContext* aPresContext,
       // aReflowInput.ComputedBSize()).  Note that we do this before
       // adjusting for borderpadding, since ComputedMaxBSize and
       // ComputedMinBSize are content heights.
-      contentBoxBSize =
-          NS_CSS_MINMAX(contentBoxBSize, aReflowInput.ComputedMinBSize(),
-                        aReflowInput.ComputedMaxBSize());
+      contentBoxBSize = aReflowInput.ApplyMinMaxBSize(contentBoxBSize);
 
       borderBoxBSize = contentBoxBSize + borderPadding.BStartEnd(myWM);
     }

@@ -77,14 +77,12 @@ nsComboboxControlFrame::RedisplayTextEvent::Run() {
 // drop-down mode.
 
 nsComboboxControlFrame* NS_NewComboboxControlFrame(PresShell* aPresShell,
-                                                   ComputedStyle* aStyle,
-                                                   nsFrameState aStateFlags) {
+                                                   ComputedStyle* aStyle) {
   nsComboboxControlFrame* it = new (aPresShell)
       nsComboboxControlFrame(aStyle, aPresShell->GetPresContext());
 
   if (it) {
-    // set the state flags (if any are provided)
-    it->AddStateBits(aStateFlags);
+    it->AddStateBits(NS_BLOCK_STATIC_BFC);
   }
 
   return it;
@@ -744,11 +742,6 @@ class nsComboboxDisplayFrame final : public nsBlockFrame {
   }
 #endif
 
-  bool IsFrameOfType(uint32_t aFlags) const final {
-    return nsBlockFrame::IsFrameOfType(aFlags &
-                                       ~(nsIFrame::eReplacedContainsBlock));
-  }
-
   void Reflow(nsPresContext* aPresContext, ReflowOutput& aDesiredSize,
               const ReflowInput& aReflowInput, nsReflowStatus& aStatus) final;
 
@@ -916,15 +909,9 @@ void nsComboboxControlFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
   }
 
   // draw a focus indicator only when focus rings should be drawn
-  if (mContent->AsElement()->State().HasState(dom::ElementState::FOCUSRING)) {
-    nsPresContext* pc = PresContext();
-    const nsStyleDisplay* disp = StyleDisplay();
-    if (IsThemed(disp) &&
-        pc->Theme()->ThemeWantsButtonInnerFocusRing(
-            this, disp->EffectiveAppearance()) &&
-        mDisplayFrame && IsVisibleForPainting()) {
-      aLists.Content()->AppendNewToTop<nsDisplayComboboxFocus>(aBuilder, this);
-    }
+  if (Select().State().HasState(dom::ElementState::FOCUSRING) && IsThemed() &&
+      PresContext()->Theme()->ThemeWantsButtonInnerFocusRing()) {
+    aLists.Content()->AppendNewToTop<nsDisplayComboboxFocus>(aBuilder, this);
   }
 
   DisplaySelectionOverlay(aBuilder, aLists.Content());

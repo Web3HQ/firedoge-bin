@@ -185,7 +185,7 @@ add_task(async function test_file_migration() {
         Assert.equal(messageText, expectedMessageText);
       } else {
         Assert.ok(
-          BrowserTestUtils.is_hidden(progressGroup),
+          BrowserTestUtils.isHidden(progressGroup),
           `Resource progress group for ${progressGroup.dataset.resourceType}` +
             ` should be hidden.`
         );
@@ -291,14 +291,8 @@ add_task(async function test_file_migration_error() {
     );
 
     let errorMessageContainer = shadow.querySelector(".file-import-error");
-
-    // Using BrowserTestUtils.is_visible to check for the visibility of the
-    // message seems to throw as it works its way up the ancestry and hits
-    // the shadowRoot. We'll work around this by making sure that the
-    // boundingClientRect has a width and height.
-    let errorRect = errorMessageContainer.getBoundingClientRect();
     Assert.ok(
-      errorRect.width && errorRect.height,
+      BrowserTestUtils.isVisible(errorMessageContainer),
       "Should be showing the error message container"
     );
 

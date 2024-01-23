@@ -17,7 +17,7 @@ namespace mozilla::default_agent {
 MOZ_DEFINE_ENUM_CLASS(Browser,
                       (Error, Unknown, Firefox, Chrome, EdgeWithEdgeHTML,
                        EdgeWithBlink, InternetExplorer, Opera, Brave, Yandex,
-                       QQBrowser, _360Browser, Sogou));
+                       QQBrowser, _360Browser, Sogou, DuckDuckGo));
 
 struct DefaultBrowserInfo {
   Browser currentDefaultBrowser;
@@ -27,8 +27,11 @@ struct DefaultBrowserInfo {
 using DefaultBrowserResult = mozilla::WindowsErrorResult<DefaultBrowserInfo>;
 
 DefaultBrowserResult GetDefaultBrowserInfo();
+Browser GetDefaultBrowser();
+Browser GetReplacePreviousDefaultBrowser(Browser currentBrowser);
 
 std::string GetStringForBrowser(Browser browser);
+Browser GetBrowserFromString(const std::string& browserString);
 void MaybeMigrateCurrentDefault();
 
 }  // namespace mozilla::default_agent

@@ -1,7 +1,5 @@
 use crate::crypto::{CryptoError, PinUvAuthParam, PinUvAuthToken};
-use crate::ctap2::commands::client_pin::{
-    ClientPinResponse, GetPinRetries, GetUvRetries, PinError,
-};
+use crate::ctap2::commands::client_pin::{GetPinRetries, GetUvRetries, PinError};
 use crate::ctap2::commands::get_info::AuthenticatorInfo;
 use crate::ctap2::server::UserVerificationRequirement;
 use crate::errors::AuthenticatorError;
@@ -50,7 +48,7 @@ impl<T> From<T> for Retryable<T> {
 }
 
 pub trait RequestCtap1: fmt::Debug {
-    type Output;
+    type Output: CtapResponse;
     // E.g.: For GetAssertion, which key-handle is currently being tested
     type AdditionalInfo;
 
@@ -60,8 +58,9 @@ pub trait RequestCtap1: fmt::Debug {
     fn ctap1_format(&self) -> Result<(Vec<u8>, Self::AdditionalInfo), HIDError>;
 
     /// Deserializes a response from FIDO v1.x / CTAP1 / U2Fv2 format.
-    fn handle_response_ctap1(
+    fn handle_response_ctap1<Dev: FidoDevice>(
         &self,
+        dev: &mut Dev,
         status: Result<(), ApduErrorStatus>,
         input: &[u8],
         add_info: &Self::AdditionalInfo,
@@ -74,7 +73,7 @@ pub trait RequestCtap1: fmt::Debug {
 }
 
 pub trait RequestCtap2: fmt::Debug {
-    type Output;
+    type Output: CtapResponse;
 
     fn command(&self) -> Command;
 
@@ -91,6 +90,10 @@ pub trait RequestCtap2: fmt::Debug {
         dev: &mut Dev,
     ) -> Result<Self::Output, HIDError>;
 }
+
+// Sadly, needs to be 'static to enable us in tests to collect them in a Vec
+// but all of them are 'static, so this is currently no problem.
+pub trait CtapResponse: std::fmt::Debug + 'static {}
 
 #[derive(Debug, Clone)]
 pub enum PinUvAuthResult {
@@ -157,7 +160,7 @@ pub(crate) fn repackage_pin_errors<D: FidoDevice>(
             let cmd = GetPinRetries::new();
             // Treat any error as if the device returned a valid response without a pinRetries
             // field.
-            let resp = dev.send_cbor(&cmd).unwrap_or(ClientPinResponse::default());
+            let resp = dev.send_cbor(&cmd).unwrap_or_default();
             AuthenticatorError::PinError(PinError::InvalidPin(resp.pin_retries))
         }
         HIDError::Command(CommandError::StatusCode(StatusCode::PinAuthBlocked, _)) => {
@@ -180,7 +183,7 @@ pub(crate) fn repackage_pin_errors<D: FidoDevice>(
             let cmd = GetUvRetries::new();
             // Treat any error as if the device returned a valid response without a uvRetries
             // field.
-            let resp = dev.send_cbor(&cmd).unwrap_or(ClientPinResponse::default());
+            let resp = dev.send_cbor(&cmd).unwrap_or_default();
             AuthenticatorError::PinError(PinError::InvalidUv(resp.uv_retries))
         }
         HIDError::Command(CommandError::StatusCode(StatusCode::UvBlocked, _)) => {

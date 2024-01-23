@@ -7,7 +7,6 @@
 #include "builtin/temporal/Instant.h"
 
 #include "mozilla/Assertions.h"
-#include "mozilla/Casting.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/FloatingPoint.h"
 #include "mozilla/Maybe.h"
@@ -27,6 +26,7 @@
 
 #include "builtin/temporal/Calendar.h"
 #include "builtin/temporal/Duration.h"
+#include "builtin/temporal/Int96.h"
 #include "builtin/temporal/PlainDateTime.h"
 #include "builtin/temporal/Temporal.h"
 #include "builtin/temporal/TemporalParser.h"
@@ -34,9 +34,9 @@
 #include "builtin/temporal/TemporalTypes.h"
 #include "builtin/temporal/TemporalUnit.h"
 #include "builtin/temporal/TimeZone.h"
+#include "builtin/temporal/ToString.h"
 #include "builtin/temporal/Wrapped.h"
 #include "builtin/temporal/ZonedDateTime.h"
-#include "gc/Allocator.h"
 #include "gc/AllocKind.h"
 #include "gc/Barrier.h"
 #include "js/CallArgs.h"
@@ -51,12 +51,12 @@
 #include "js/TypeDecls.h"
 #include "js/Value.h"
 #include "vm/BigIntType.h"
+#include "vm/BytecodeUtil.h"
 #include "vm/GlobalObject.h"
 #include "vm/JSAtomState.h"
 #include "vm/JSContext.h"
 #include "vm/JSObject.h"
 #include "vm/PlainObject.h"
-#include "vm/StaticStrings.h"
 #include "vm/StringType.h"
 
 #include "vm/JSObject-inl.h"
@@ -121,15 +121,6 @@ static constexpr auto NanosecondsMaxInstant() {
   }
 }
 
-// The epoch limit is 8.64 × 10^21 nanoseconds, which is 8.64 × 10^18 µs.
-static constexpr int64_t MicrosecondsMaxInstant = 8'640'000'000'000'000'000;
-
-// The epoch limit is 8.64 × 10^21 nanoseconds, which is 8.64 × 10^15 ms.
-static constexpr int64_t MillisecondsMaxInstant = 8'640'000'000'000'000;
-
-// The epoch limit is 8.64 × 10^21 nanoseconds, which is 8.64 × 10^12 seconds.
-static constexpr int64_t SecondsMaxInstant = 8'640'000'000'000;
-
 /**
  * IsValidEpochNanoseconds ( epochNanoseconds )
  */
@@ -145,18 +136,21 @@ static bool IsValidEpochMicroseconds(const BigInt* epochMicroseconds) {
     return false;
   }
 
+  constexpr int64_t MicrosecondsMaxInstant = Instant::max().toMicroseconds();
   return -MicrosecondsMaxInstant <= i && i <= MicrosecondsMaxInstant;
 }
 
 static bool IsValidEpochMilliseconds(double epochMilliseconds) {
   MOZ_ASSERT(IsInteger(epochMilliseconds));
 
+  constexpr int64_t MillisecondsMaxInstant = Instant::max().toMilliseconds();
   return std::abs(epochMilliseconds) <= double(MillisecondsMaxInstant);
 }
 
 static bool IsValidEpochSeconds(double epochSeconds) {
   MOZ_ASSERT(IsInteger(epochSeconds));
 
+  constexpr int64_t SecondsMaxInstant = Instant::max().toSeconds();
   return std::abs(epochSeconds) <= double(SecondsMaxInstant);
 }
 
@@ -167,10 +161,7 @@ bool js::temporal::IsValidEpochInstant(const Instant& instant) {
   MOZ_ASSERT(0 <= instant.nanoseconds && instant.nanoseconds <= 999'999'999);
 
   // Steps 1-3.
-  if (instant.seconds < SecondsMaxInstant) {
-    return instant.seconds >= -SecondsMaxInstant;
-  }
-  return instant.seconds == SecondsMaxInstant && instant.nanoseconds == 0;
+  return Instant::min() <= instant && instant <= Instant::max();
 }
 
 static constexpr auto NanosecondsMaxInstantSpan() {
@@ -207,20 +198,15 @@ bool js::temporal::IsValidInstantSpan(const BigInt* nanoseconds) {
 bool js::temporal::IsValidInstantSpan(const InstantSpan& span) {
   MOZ_ASSERT(0 <= span.nanoseconds && span.nanoseconds <= 999'999'999);
 
-  constexpr int64_t spanLimit = SecondsMaxInstant * 2;
-
   // Steps 1-3.
-  if (span.seconds < spanLimit) {
-    return span.seconds >= -spanLimit;
-  }
-  return span.seconds == spanLimit && span.nanoseconds == 0;
+  return InstantSpan::min() <= span && span <= InstantSpan::max();
 }
 
 /**
- * Return the BigInt digits of the input as uint32_t values. The BigInt digits
- * mustn't consist of more than three uint32_t values.
+ * Return the BigInt as a 96-bit integer. The BigInt digits must not consist of
+ * more than 96-bits.
  */
-static std::array<uint32_t, 3> BigIntDigits(const BigInt* ns) {
+static Int96 ToInt96(const BigInt* ns) {
   static_assert(BigInt::DigitBits == 64 || BigInt::DigitBits == 32);
 
   auto digits = ns->digits();
@@ -238,7 +224,9 @@ static std::array<uint32_t, 3> BigIntDigits(const BigInt* ns) {
       default:
         MOZ_ASSERT_UNREACHABLE("unexpected digit length");
     }
-    return {uint32_t(x), uint32_t(x >> 32), uint32_t(y)};
+    return Int96{
+        Int96::Digits{Int96::Digit(x), Int96::Digit(x >> 32), Int96::Digit(y)},
+        ns->isNegative()};
   } else {
     BigInt::Digit x = 0, y = 0, z = 0;
     switch (digits.size()) {
@@ -256,57 +244,26 @@ static std::array<uint32_t, 3> BigIntDigits(const BigInt* ns) {
       default:
         MOZ_ASSERT_UNREACHABLE("unexpected digit length");
     }
-    return {uint32_t(x), uint32_t(y), uint32_t(z)};
+    return Int96{
+        Int96::Digits{Int96::Digit(x), Int96::Digit(y), Int96::Digit(z)},
+        ns->isNegative()};
   }
-}
-
-/**
- * Return the Instant from the input digits. The least significant digit of the
- * input is stored at index 0. The most significant digit of the input must be
- * less than 1'000'000'000.
- */
-static Instant ToInstant(std::array<uint32_t, 3> digits, bool isNegative) {
-  constexpr uint32_t divisor = ToNanoseconds(TemporalUnit::Second);
-
-  MOZ_ASSERT(digits[2] < divisor);
-
-  uint32_t quotient[2] = {};
-  uint32_t remainder = digits[2];
-  for (int32_t i = 1; i >= 0; i--) {
-    uint64_t n = (uint64_t(remainder) << 32) | digits[i];
-    quotient[i] = n / divisor;
-    remainder = n % divisor;
-  }
-
-  int64_t seconds = (uint64_t(quotient[1]) << 32) | quotient[0];
-  if (isNegative) {
-    seconds *= -1;
-    if (remainder != 0) {
-      seconds -= 1;
-      remainder = divisor - remainder;
-    }
-  }
-  return {seconds, int32_t(remainder)};
-}
-
-static InstantSpan ToInstantSpan(std::array<uint32_t, 3> digits,
-                                 bool isNegative) {
-  auto instant = ToInstant(digits, isNegative);
-  return InstantSpan{instant.seconds, instant.nanoseconds};
 }
 
 Instant js::temporal::ToInstant(const BigInt* epochNanoseconds) {
   MOZ_ASSERT(IsValidEpochNanoseconds(epochNanoseconds));
 
-  auto digits = BigIntDigits(epochNanoseconds);
-  return ::ToInstant(digits, epochNanoseconds->isNegative());
+  auto [seconds, nanos] =
+      ToInt96(epochNanoseconds) / ToNanoseconds(TemporalUnit::Second);
+  return {seconds, nanos};
 }
 
 InstantSpan js::temporal::ToInstantSpan(const BigInt* nanoseconds) {
   MOZ_ASSERT(IsValidInstantSpan(nanoseconds));
 
-  auto digits = BigIntDigits(nanoseconds);
-  return ::ToInstantSpan(digits, nanoseconds->isNegative());
+  auto [seconds, nanos] =
+      ToInt96(nanoseconds) / ToNanoseconds(TemporalUnit::Second);
+  return {seconds, nanos};
 }
 
 static BigInt* CreateBigInt(JSContext* cx,
@@ -428,63 +385,21 @@ static mozilla::Maybe<InstantSpan> NanosecondsToInstantSpan(
     double nanoseconds) {
   MOZ_ASSERT(IsInteger(nanoseconds));
 
-  constexpr int64_t spanLimit = SecondsMaxInstant * 2;
-  constexpr int64_t secToNanos = ToNanoseconds(TemporalUnit::Second);
+  if (auto int96 = Int96::fromInteger(nanoseconds)) {
+    constexpr auto maximum = Int96{InstantSpan::max().toSeconds()} *
+                             ToNanoseconds(TemporalUnit::Second);
 
-  // Fast path for the common case.
-  if (nanoseconds == 0) {
-    return mozilla::Some(InstantSpan{});
-  }
+    // Accept if the value is less-or-equal to the maximum instant span.
+    if (int96->abs() <= maximum) {
+      // Split into seconds and nanoseconds.
+      auto [seconds, nanos] = *int96 / ToNanoseconds(TemporalUnit::Second);
 
-  // Reject if the value is larger than the maximum instant span.
-  if (std::abs(nanoseconds) > double(spanLimit) * double(secToNanos)) {
-    return mozilla::Nothing();
-  }
-
-  // Inlined version of |BigInt::createFromDouble()| for DigitBits=32. See the
-  // comments in |BigInt::createFromDouble()| for how this code works.
-  constexpr size_t DigitBits = 32;
-
-  // The number can't have more than three digits when it's below the maximum
-  // instant span.
-  std::array<uint32_t, 3> digits = {};
-
-  int exponent = mozilla::ExponentComponent(nanoseconds);
-  MOZ_ASSERT(0 <= exponent && exponent <= 73,
-             "exponent can't exceed exponent of maximum instant span");
-
-  int length = exponent / DigitBits + 1;
-  MOZ_ASSERT(1 <= length && length <= 3);
-
-  using Double = mozilla::FloatingPoint<double>;
-  uint64_t mantissa =
-      mozilla::BitwiseCast<uint64_t>(nanoseconds) & Double::kSignificandBits;
-
-  // Add implicit high bit.
-  mantissa |= 1ull << Double::kSignificandWidth;
-
-  // 0-indexed position of the double's most significant bit within the `msd`.
-  int msdTopBit = exponent % DigitBits;
-
-  // First, build the MSD by shifting the mantissa appropriately.
-  int remainingMantissaBits = Double::kSignificandWidth - msdTopBit;
-  digits[--length] = mantissa >> remainingMantissaBits;
-
-  // Fill in digits containing mantissa contributions.
-  mantissa = mantissa << (64 - remainingMantissaBits);
-  if (mantissa) {
-    MOZ_ASSERT(length > 0);
-    digits[--length] = uint32_t(mantissa >> 32);
-
-    if (uint32_t(mantissa)) {
-      MOZ_ASSERT(length > 0);
-      digits[--length] = uint32_t(mantissa);
+      auto result = InstantSpan{seconds, nanos};
+      MOZ_ASSERT(IsValidInstantSpan(result));
+      return mozilla::Some(result);
     }
   }
-
-  auto result = ToInstantSpan(digits, nanoseconds < 0);
-  MOZ_ASSERT(IsValidInstantSpan(result));
-  return mozilla::Some(result);
+  return mozilla::Nothing();
 }
 
 /**
@@ -495,7 +410,7 @@ static mozilla::Maybe<InstantSpan> MicrosecondsToInstantSpan(
     double microseconds) {
   MOZ_ASSERT(IsInteger(microseconds));
 
-  constexpr int64_t spanLimit = SecondsMaxInstant * 2;
+  constexpr int64_t spanLimit = InstantSpan::max().toSeconds();
   constexpr int64_t secToMicros = ToNanoseconds(TemporalUnit::Second) /
                                   ToNanoseconds(TemporalUnit::Microsecond);
   constexpr int32_t microToNanos = ToNanoseconds(TemporalUnit::Microsecond);
@@ -538,7 +453,7 @@ static mozilla::Maybe<InstantSpan> MicrosecondsToInstantSpan(
 
 /**
  * GetUTCEpochNanoseconds ( year, month, day, hour, minute, second, millisecond,
- * microsecond, nanosecond )
+ * microsecond, nanosecond [ , offsetNanoseconds ] )
  */
 Instant js::temporal::GetUTCEpochNanoseconds(const PlainDateTime& dateTime) {
   auto& [date, time] = dateTime;
@@ -556,53 +471,24 @@ Instant js::temporal::GetUTCEpochNanoseconds(const PlainDateTime& dateTime) {
   int32_t nanos =
       std::clamp(time.microsecond * 1'000 + time.nanosecond, 0, 999'999);
 
-  // Step 6.
+  // Steps 6-8.
   return Instant::fromMilliseconds(ms) + InstantSpan{0, nanos};
 }
 
 /**
- * ParseTemporalInstant ( isoString )
+ * GetUTCEpochNanoseconds ( year, month, day, hour, minute, second, millisecond,
+ * microsecond, nanosecond [ , offsetNanoseconds ] )
  */
-static bool ParseTemporalInstant(JSContext* cx, Handle<JSString*> isoString,
-                                 Instant* result) {
-  // Step 1. (Not applicable in our implementation)
+Instant js::temporal::GetUTCEpochNanoseconds(
+    const PlainDateTime& dateTime, const InstantSpan& offsetNanoseconds) {
+  MOZ_ASSERT(offsetNanoseconds.abs() <
+             InstantSpan::fromNanoseconds(ToNanoseconds(TemporalUnit::Day)));
 
-  // Steps 2-3.
-  PlainDateTime dateTime;
-  int64_t offset;
-  if (!ParseTemporalInstantString(cx, isoString, &dateTime, &offset)) {
-    return false;
-  }
-  MOZ_ASSERT(std::abs(offset) < ToNanoseconds(TemporalUnit::Day));
+  // Steps 1-6.
+  auto epochNanoseconds = GetUTCEpochNanoseconds(dateTime);
 
-  // Step 4. (Not applicable in our implementation.)
-
-  // Step 6. (Reordered)
-  if (!ISODateTimeWithinLimits(dateTime)) {
-    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
-                              JSMSG_TEMPORAL_INSTANT_INVALID);
-    return false;
-  }
-
-  // Step 5.
-  auto utc = GetUTCEpochNanoseconds(dateTime);
-
-  // Step 6.
-  auto offsetNanoseconds = InstantSpan::fromNanoseconds(offset);
-
-  // Step 7.
-  auto epochNanoseconds = utc - offsetNanoseconds;
-
-  // Step 8.
-  if (!IsValidEpochInstant(epochNanoseconds)) {
-    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
-                              JSMSG_TEMPORAL_INSTANT_INVALID);
-    return false;
-  }
-
-  // Step 9.
-  *result = epochNanoseconds;
-  return true;
+  // Steps 7-9.
+  return epochNanoseconds - offsetNanoseconds;
 }
 
 /**
@@ -691,46 +577,25 @@ Wrapped<InstantObject*> js::temporal::ToTemporalInstant(JSContext* cx,
     if (itemObj->canUnwrapAs<InstantObject>()) {
       return itemObj;
     }
-
-    // Step 1.b.
-    if (auto* zonedDateTime = itemObj->maybeUnwrapIf<ZonedDateTimeObject>()) {
-      auto epochInstant = ToInstant(zonedDateTime);
-      return CreateTemporalInstant(cx, epochInstant);
-    }
   }
 
-  // Step 2.
-  Rooted<JSString*> string(cx, JS::ToString(cx, item));
-  if (!string) {
-    return nullptr;
-  }
-
-  // The string representation of other types can never be parsed as an instant,
-  // so directly throw an error here. But still perform ToString first for
-  // possible side-effects.
-  if (!item.isString() && !item.isObject()) {
-    ReportValueError(cx, JSMSG_TEMPORAL_INSTANT_PARSE_BAD_TYPE,
-                     JSDVG_IGNORE_STACK, item, nullptr);
-    return nullptr;
-  }
-
-  // Step 3.
+  // Steps 1.b-d and 3-6
   Instant epochNanoseconds;
-  if (!ParseTemporalInstant(cx, string, &epochNanoseconds)) {
+  if (!ToTemporalInstant(cx, item, &epochNanoseconds)) {
     return nullptr;
   }
 
-  // Step 4.
+  // Step 7.
   return CreateTemporalInstant(cx, epochNanoseconds);
 }
 
 /**
  * ToTemporalInstant ( item )
  */
-bool js::temporal::ToTemporalInstantEpochInstant(JSContext* cx,
-                                                 Handle<Value> item,
-                                                 Instant* result) {
+bool js::temporal::ToTemporalInstant(JSContext* cx, Handle<Value> item,
+                                     Instant* result) {
   // Step 1.
+  Rooted<Value> primitiveValue(cx, item);
   if (item.isObject()) {
     JSObject* itemObj = &item.toObject();
 
@@ -745,33 +610,50 @@ bool js::temporal::ToTemporalInstantEpochInstant(JSContext* cx,
       *result = ToInstant(zonedDateTime);
       return true;
     }
+
+    // Steps 1.c-d.
+    if (!ToPrimitive(cx, JSTYPE_STRING, &primitiveValue)) {
+      return false;
+    }
   }
 
   // Step 2.
-  Rooted<JSString*> string(cx, JS::ToString(cx, item));
-  if (!string) {
+  if (!primitiveValue.isString()) {
+    // The value is always on the stack, so JSDVG_SEARCH_STACK can be used for
+    // better error reporting.
+    ReportValueError(cx, JSMSG_UNEXPECTED_TYPE, JSDVG_SEARCH_STACK,
+                     primitiveValue, nullptr, "not a string");
     return false;
   }
-
-  // The string representation of other types can never be parsed as an instant,
-  // so directly throw an error here. The value is always on the stack, so
-  // JSDVG_SEARCH_STACK can be used for even better error reporting. But still
-  // perform ToString first for possible side-effects.
-  if (!item.isString() && !item.isObject()) {
-    ReportValueError(cx, JSMSG_TEMPORAL_INSTANT_PARSE_BAD_TYPE,
-                     JSDVG_SEARCH_STACK, item, nullptr);
-    return false;
-  }
+  Rooted<JSString*> string(cx, primitiveValue.toString());
 
   // Steps 3-4.
-  Instant epochNanoseconds;
-  if (!ParseTemporalInstant(cx, string, &epochNanoseconds)) {
+  PlainDateTime dateTime;
+  int64_t offset;
+  if (!ParseTemporalInstantString(cx, string, &dateTime, &offset)) {
+    return false;
+  }
+  MOZ_ASSERT(std::abs(offset) < ToNanoseconds(TemporalUnit::Day));
+
+  // Step 6. (Reordered)
+  if (!ISODateTimeWithinLimits(dateTime)) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                              JSMSG_TEMPORAL_INSTANT_INVALID);
     return false;
   }
 
-  // CreateTemporalInstant, step 2.
-  MOZ_ASSERT(IsValidEpochInstant(epochNanoseconds));
+  // Step 5.
+  auto epochNanoseconds =
+      GetUTCEpochNanoseconds(dateTime, InstantSpan::fromNanoseconds(offset));
 
+  // Step 6.
+  if (!IsValidEpochInstant(epochNanoseconds)) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                              JSMSG_TEMPORAL_INSTANT_INVALID);
+    return false;
+  }
+
+  // Step 7.
   *result = epochNanoseconds;
   return true;
 }
@@ -904,16 +786,29 @@ bool js::temporal::DifferenceInstant(JSContext* cx, const Instant& ns1,
   MOZ_ASSERT(IsValidDuration(duration));
 
   // Step 6.
+  if (smallestUnit == TemporalUnit::Nanosecond &&
+      roundingIncrement == Increment{1}) {
+    TimeDuration balanced;
+    if (!BalanceTimeDuration(cx, duration, largestUnit, &balanced)) {
+      return false;
+    }
+    MOZ_ASSERT(balanced.days == 0);
+
+    *result = balanced.toDuration().time();
+    return true;
+  }
+
+  // Steps 7-8.
   Duration roundResult;
   if (!temporal::RoundDuration(cx, duration, roundingIncrement, smallestUnit,
                                roundingMode, &roundResult)) {
     return false;
   }
 
-  // Step 7.
+  // Step 9.
   MOZ_ASSERT(roundResult.days == 0);
 
-  // Step 8.
+  // Step 10.
   TimeDuration balanced;
   if (!BalanceTimeDuration(cx, roundResult, largestUnit, &balanced)) {
     return false;
@@ -960,64 +855,6 @@ bool js::temporal::RoundTemporalInstant(JSContext* cx, const Instant& ns,
 }
 
 /**
- * TemporalInstantToString ( instant, timeZone, precision )
- */
-static JSString* TemporalInstantToString(JSContext* cx,
-                                         Handle<InstantObject*> instant,
-                                         Handle<TimeZoneValue> timeZone,
-                                         Precision precision) {
-  // Steps 1-2. (Not applicable in our implementation.)
-
-  // Steps 3-4.
-  Rooted<TimeZoneValue> outputTimeZone(cx, timeZone);
-  if (!timeZone) {
-    auto* utcTimeZone = CreateTemporalTimeZoneUTC(cx);
-    if (!utcTimeZone) {
-      return nullptr;
-    }
-    outputTimeZone.set(TimeZoneValue(utcTimeZone));
-  }
-
-  // Step 5.
-  PlainDateTime dateTime;
-  if (!GetPlainDateTimeFor(cx, outputTimeZone, instant, &dateTime)) {
-    return nullptr;
-  }
-
-  // Step 6.
-  Rooted<CalendarValue> isoCalendar(cx, CalendarValue(cx->names().iso8601));
-  Rooted<JSString*> dateTimeString(
-      cx, TemporalDateTimeToString(cx, dateTime, isoCalendar, precision,
-                                   CalendarOption::Never));
-  if (!dateTimeString) {
-    return nullptr;
-  }
-
-  // Steps 7-8.
-  Rooted<JSString*> timeZoneString(cx);
-  if (!timeZone) {
-    // Step 7.a.
-    timeZoneString = cx->staticStrings().lookup("Z", 1);
-    MOZ_ASSERT(timeZoneString);
-  } else {
-    // Step 8.a.
-    int64_t offsetNs;
-    if (!GetOffsetNanosecondsFor(cx, timeZone, instant, &offsetNs)) {
-      return nullptr;
-    }
-
-    // Step 8.b.
-    timeZoneString = FormatISOTimeZoneOffsetString(cx, offsetNs);
-    if (!timeZoneString) {
-      return nullptr;
-    }
-  }
-
-  // Step 9.
-  return ConcatStrings<CanGC>(cx, dateTimeString, timeZoneString);
-}
-
-/**
  * DifferenceTemporalInstant ( operation, instant, other, options )
  */
 static bool DifferenceTemporalInstant(JSContext* cx,
@@ -1029,7 +866,7 @@ static bool DifferenceTemporalInstant(JSContext* cx,
 
   // Step 2.
   Instant other;
-  if (!ToTemporalInstantEpochInstant(cx, args.get(0), &other)) {
+  if (!ToTemporalInstant(cx, args.get(0), &other)) {
     return false;
   }
 
@@ -1180,7 +1017,7 @@ static bool Instant_from(JSContext* cx, unsigned argc, Value* vp) {
 
   // Steps 1-2.
   Instant epochInstant;
-  if (!ToTemporalInstantEpochInstant(cx, args.get(0), &epochInstant)) {
+  if (!ToTemporalInstant(cx, args.get(0), &epochInstant)) {
     return false;
   }
 
@@ -1349,13 +1186,13 @@ static bool Instant_compare(JSContext* cx, unsigned argc, Value* vp) {
 
   // Step 1.
   Instant one;
-  if (!ToTemporalInstantEpochInstant(cx, args.get(0), &one)) {
+  if (!ToTemporalInstant(cx, args.get(0), &one)) {
     return false;
   }
 
   // Step 2.
   Instant two;
-  if (!ToTemporalInstantEpochInstant(cx, args.get(1), &two)) {
+  if (!ToTemporalInstant(cx, args.get(1), &two)) {
     return false;
   }
 
@@ -1618,7 +1455,7 @@ static bool Instant_equals(JSContext* cx, const CallArgs& args) {
 
   // Step 3.
   Instant other;
-  if (!ToTemporalInstantEpochInstant(cx, args.get(0), &other)) {
+  if (!ToTemporalInstant(cx, args.get(0), &other)) {
     return false;
   }
 

@@ -44,7 +44,6 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_END_INHERITED(DocumentFragment)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(ShadowRoot)
   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIContent)
-  NS_INTERFACE_MAP_ENTRY(nsIRadioGroupContainer)
 NS_INTERFACE_MAP_END_INHERITING(DocumentFragment)
 
 NS_IMPL_ADDREF_INHERITED(ShadowRoot, DocumentFragment)
@@ -53,6 +52,7 @@ NS_IMPL_RELEASE_INHERITED(ShadowRoot, DocumentFragment)
 ShadowRoot::ShadowRoot(Element* aElement, ShadowRootMode aMode,
                        Element::DelegatesFocus aDelegatesFocus,
                        SlotAssignmentMode aSlotAssignment,
+                       IsClonable aIsClonable, Declarative aDeclarative,
                        already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
     : DocumentFragment(std::move(aNodeInfo)),
       DocumentOrShadowRoot(this),
@@ -60,7 +60,9 @@ ShadowRoot::ShadowRoot(Element* aElement, ShadowRootMode aMode,
       mDelegatesFocus(aDelegatesFocus),
       mSlotAssignment(aSlotAssignment),
       mIsDetailsShadowTree(aElement->IsHTMLElement(nsGkAtoms::details)),
-      mIsAvailableToElementInternals(false) {
+      mIsAvailableToElementInternals(false),
+      mIsDeclarative(aDeclarative),
+      mIsClonable(aIsClonable) {
   // nsINode.h relies on this.
   MOZ_ASSERT(static_cast<nsINode*>(this) == reinterpret_cast<nsINode*>(this));
   MOZ_ASSERT(static_cast<nsIContent*>(this) ==
@@ -874,4 +876,9 @@ ServoStyleRuleMap& ShadowRoot::ServoStyleRuleMap() {
 nsresult ShadowRoot::Clone(dom::NodeInfo* aNodeInfo, nsINode** aResult) const {
   *aResult = nullptr;
   return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
+}
+
+void ShadowRoot::SetHTMLUnsafe(const nsAString& aHTML) {
+  RefPtr<Element> host = GetHost();
+  nsContentUtils::SetHTMLUnsafe(this, host, aHTML);
 }

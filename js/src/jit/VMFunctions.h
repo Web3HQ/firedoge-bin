@@ -300,6 +300,8 @@ struct VMFunctionData {
     return count;
   }
 
+  size_t sizeOfOutParamStackSlot() const;
+
   constexpr VMFunctionData(const char* name, uint32_t explicitArgs,
                            uint32_t argumentProperties,
                            uint32_t argumentPassedInFloatRegs,
@@ -379,11 +381,15 @@ JSString* ArrayJoin(JSContext* cx, HandleObject array, HandleString sep);
 
 [[nodiscard]] bool CharCodeAt(JSContext* cx, HandleString str, int32_t index,
                               uint32_t* code);
-JSLinearString* StringFromCharCode(JSContext* cx, int32_t code);
+[[nodiscard]] bool CodePointAt(JSContext* cx, HandleString str, int32_t index,
+                               uint32_t* code);
 JSLinearString* StringFromCharCodeNoGC(JSContext* cx, int32_t code);
-JSString* StringFromCodePoint(JSContext* cx, int32_t codePoint);
 JSLinearString* LinearizeForCharAccessPure(JSString* str);
 JSLinearString* LinearizeForCharAccess(JSContext* cx, JSString* str);
+int32_t StringTrimStartIndex(const JSString* str);
+int32_t StringTrimEndIndex(const JSString* str, int32_t start);
+JSString* CharCodeToLowerCase(JSContext* cx, int32_t code);
+JSString* CharCodeToUpperCase(JSContext* cx, int32_t code);
 
 [[nodiscard]] bool SetProperty(JSContext* cx, HandleObject obj,
                                Handle<PropertyName*> name, HandleValue value,
@@ -510,6 +516,8 @@ void JitWasmAnyRefPreWriteBarrier(JSRuntime* rt, wasm::AnyRef* refp);
 
 bool ObjectIsCallable(JSObject* obj);
 bool ObjectIsConstructor(JSObject* obj);
+JSObject* ObjectKeys(JSContext* cx, HandleObject obj);
+bool ObjectKeysLength(JSContext* cx, HandleObject obj, int32_t* length);
 
 [[nodiscard]] bool ThrowRuntimeLexicalError(JSContext* cx,
                                             unsigned errorNumber);
@@ -691,6 +699,8 @@ void Printf1(const char* output, uintptr_t value);
 enum class VMFunctionId;
 
 extern const VMFunctionData& GetVMFunction(VMFunctionId id);
+
+extern size_t NumVMFunctions();
 
 }  // namespace jit
 }  // namespace js

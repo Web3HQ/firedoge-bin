@@ -4,14 +4,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <windows.h>
+#include <appmodel.h>
 #include <shlobj.h>  // for SHChangeNotify and IApplicationAssociationRegistration
+#include <functional>
+#include <timeapi.h>
 
 #include "mozilla/ArrayUtils.h"
+#include "mozilla/CmdLineAndEnvUtils.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/WindowsVersion.h"
 #include "mozilla/WinHeaderOnlyUtils.h"
 #include "WindowsUserChoice.h"
+#include "nsThreadUtils.h"
 
 #include "EventLog.h"
 #include "SetDefaultBrowser.h"
@@ -31,12 +36,13 @@ namespace mozilla::default_agent {
  * @param aExtraFileExtensions Optional array of extra file association pairs to
  * set as default, like `[ ".pdf", "FirefoxPDF" ]`.
  *
- * @returns S_OK           All associations set and checked successfully.
- *          MOZ_E_REJECTED UserChoice was set, but checking the default did not
- *                         return our ProgID.
- *          E_FAIL         Failed to set at least one association.
+ * @returns NS_OK                  All associations set and checked
+ *                                 successfully.
+ *          NS_ERROR_WDBA_REJECTED UserChoice was set, but checking the default
+ *                                 did not return our ProgID.
+ *          NS_ERROR_FAILURE       Failed to set at least one association.
  */
-static HRESULT SetDefaultExtensionHandlersUserChoiceImpl(
+static nsresult SetDefaultExtensionHandlersUserChoiceImpl(
     const wchar_t* aAumi, const wchar_t* const aSid,
     const nsTArray<nsString>& aFileExtensions);
 
@@ -85,50 +91,8 @@ static bool CheckEqualMinutes(SYSTEMTIME aSystemTime1,
          (fileTime1.dwHighDateTime == fileTime2.dwHighDateTime);
 }
 
-/*
- * Set an association with a UserChoice key
- *
- * Removes the old key, creates a new one with ProgID and Hash set to
- * enable a new asociation.
- *
- * @param aExt      File type or protocol to associate
- * @param aSid      Current user's string SID
- * @param aProgID   ProgID to use for the asociation
- *
- * @return true if successful, false on error.
- */
-static bool SetUserChoice(const wchar_t* aExt, const wchar_t* aSid,
-                          const wchar_t* aProgID) {
-  SYSTEMTIME hashTimestamp;
-  ::GetSystemTime(&hashTimestamp);
-  auto hash = GenerateUserChoiceHash(aExt, aSid, aProgID, hashTimestamp);
-  if (!hash) {
-    return false;
-  }
-
-  // The hash changes at the end of each minute, so check that the hash should
-  // be the same by the time we're done writing.
-  const ULONGLONG kWriteTimingThresholdMilliseconds = 100;
-  // Generating the hash could have taken some time, so start from now.
-  SYSTEMTIME writeEndTimestamp;
-  ::GetSystemTime(&writeEndTimestamp);
-  if (!AddMillisecondsToSystemTime(writeEndTimestamp,
-                                   kWriteTimingThresholdMilliseconds)) {
-    return false;
-  }
-  if (!CheckEqualMinutes(hashTimestamp, writeEndTimestamp)) {
-    LOG_ERROR_MESSAGE(
-        L"Hash is too close to expiration, sleeping until next hash.");
-    ::Sleep(kWriteTimingThresholdMilliseconds * 2);
-
-    // For consistency, use the current time.
-    ::GetSystemTime(&hashTimestamp);
-    hash = GenerateUserChoiceHash(aExt, aSid, aProgID, hashTimestamp);
-    if (!hash) {
-      return false;
-    }
-  }
-
+static bool SetUserChoiceRegistry(const wchar_t* aExt, const wchar_t* aProgID,
+                                  mozilla::UniquePtr<wchar_t[]> aHash) {
   auto assocKeyPath = GetAssociationKeyPath(aExt);
   if (!assocKeyPath) {
     return false;
@@ -173,9 +137,9 @@ static bool SetUserChoice(const wchar_t* aExt, const wchar_t* aSid,
     return false;
   }
 
-  DWORD hashByteCount = (::lstrlenW(hash.get()) + 1) * sizeof(wchar_t);
+  DWORD hashByteCount = (::lstrlenW(aHash.get()) + 1) * sizeof(wchar_t);
   ls = ::RegSetValueExW(userChoiceKey.get(), L"Hash", 0, REG_SZ,
-                        reinterpret_cast<const unsigned char*>(hash.get()),
+                        reinterpret_cast<const unsigned char*>(aHash.get()),
                         hashByteCount);
   if (ls != ERROR_SUCCESS) {
     LOG_ERROR(HRESULT_FROM_WIN32(ls));
@@ -183,6 +147,60 @@ static bool SetUserChoice(const wchar_t* aExt, const wchar_t* aSid,
   }
 
   return true;
+}
+
+/*
+ * Set an association with a UserChoice key
+ *
+ * Removes the old key, creates a new one with ProgID and Hash set to
+ * enable a new asociation.
+ *
+ * @param aExt      File type or protocol to associate
+ * @param aSid      Current user's string SID
+ * @param aProgID   ProgID to use for the asociation
+ * @param inMsix    Are we running from in an msix package?
+ *
+ * @return true if successful, false on error.
+ */
+static bool SetUserChoice(const wchar_t* aExt, const wchar_t* aSid,
+                          const wchar_t* aProgID, bool inMsix) {
+  if (inMsix) {
+    LOG_ERROR_MESSAGE(L"SetUserChoice does not work on MSIX builds.");
+    return false;
+  }
+
+  SYSTEMTIME hashTimestamp;
+  ::GetSystemTime(&hashTimestamp);
+  auto hash = GenerateUserChoiceHash(aExt, aSid, aProgID, hashTimestamp);
+  if (!hash) {
+    return false;
+  }
+
+  // The hash changes at the end of each minute, so check that the hash should
+  // be the same by the time we're done writing.
+  const ULONGLONG kWriteTimingThresholdMilliseconds = 1000;
+  // Generating the hash could have taken some time, so start from now.
+  SYSTEMTIME writeEndTimestamp;
+  ::GetSystemTime(&writeEndTimestamp);
+  if (!AddMillisecondsToSystemTime(writeEndTimestamp,
+                                   kWriteTimingThresholdMilliseconds)) {
+    return false;
+  }
+  if (!CheckEqualMinutes(hashTimestamp, writeEndTimestamp)) {
+    LOG_ERROR_MESSAGE(
+        L"Hash is too close to expiration, sleeping until next hash.");
+    ::Sleep(kWriteTimingThresholdMilliseconds * 2);
+
+    // For consistency, use the current time.
+    ::GetSystemTime(&hashTimestamp);
+    hash = GenerateUserChoiceHash(aExt, aSid, aProgID, hashTimestamp);
+    if (!hash) {
+      return false;
+    }
+  }
+
+  // We're outside of an MSIX package and can use the Win32 Registry API.
+  return SetUserChoiceRegistry(aExt, aProgID, std::move(hash));
 }
 
 static bool VerifyUserDefault(const wchar_t* aExt, const wchar_t* aProgID) {
@@ -224,144 +242,106 @@ static bool VerifyUserDefault(const wchar_t* aExt, const wchar_t* aProgID) {
   return true;
 }
 
-HRESULT SetDefaultBrowserUserChoice(
+nsresult SetDefaultBrowserUserChoice(
     const wchar_t* aAumi, const nsTArray<nsString>& aExtraFileExtensions) {
-  auto urlProgID = FormatProgID(L"FirefoxURL", aAumi);
-  if (!CheckProgIDExists(urlProgID.get())) {
-    LOG_ERROR_MESSAGE(L"ProgID %s not found", urlProgID.get());
-    return MOZ_E_NO_PROGID;
-  }
-
-  auto htmlProgID = FormatProgID(L"FirefoxHTML", aAumi);
-  if (!CheckProgIDExists(htmlProgID.get())) {
-    LOG_ERROR_MESSAGE(L"ProgID %s not found", htmlProgID.get());
-    return MOZ_E_NO_PROGID;
-  }
-
-  auto pdfProgID = FormatProgID(L"FirefoxPDF", aAumi);
-  if (!CheckProgIDExists(pdfProgID.get())) {
-    LOG_ERROR_MESSAGE(L"ProgID %s not found", pdfProgID.get());
-    return MOZ_E_NO_PROGID;
-  }
-
+  // Verify that the implementation of UserChoice hashing has not changed by
+  // computing the current default hash and comparing with the existing value.
   if (!CheckBrowserUserChoiceHashes()) {
     LOG_ERROR_MESSAGE(L"UserChoice Hash mismatch");
-    return MOZ_E_HASH_CHECK;
+    return NS_ERROR_WDBA_HASH_CHECK;
   }
 
   if (!mozilla::IsWin10CreatorsUpdateOrLater()) {
     LOG_ERROR_MESSAGE(L"UserChoice hash matched, but Windows build is too old");
-    return MOZ_E_BUILD;
+    return NS_ERROR_WDBA_BUILD;
   }
 
   auto sid = GetCurrentUserStringSid();
   if (!sid) {
-    return E_FAIL;
+    return NS_ERROR_FAILURE;
   }
 
-  bool ok = true;
-  bool defaultRejected = false;
+  nsTArray<nsString> browserDefaults = {
+      u"https"_ns, u"FirefoxURL"_ns,  u"http"_ns, u"FirefoxURL"_ns,
+      u".html"_ns, u"FirefoxHTML"_ns, u".htm"_ns, u"FirefoxHTML"_ns};
 
-  struct {
-    const wchar_t* ext;
-    const wchar_t* progID;
-  } associations[] = {{L"https", urlProgID.get()},
-                      {L"http", urlProgID.get()},
-                      {L".html", htmlProgID.get()},
-                      {L".htm", htmlProgID.get()}};
-  for (size_t i = 0; i < mozilla::ArrayLength(associations); ++i) {
-    if (!SetUserChoice(associations[i].ext, sid.get(),
-                       associations[i].progID)) {
-      ok = false;
-      break;
-    } else if (!VerifyUserDefault(associations[i].ext,
-                                  associations[i].progID)) {
-      defaultRejected = true;
-      ok = false;
-      break;
-    }
-  }
+  browserDefaults.AppendElements(aExtraFileExtensions);
 
-  if (ok) {
-    HRESULT hr = SetDefaultExtensionHandlersUserChoiceImpl(
-        aAumi, sid.get(), aExtraFileExtensions);
-    if (hr == MOZ_E_REJECTED) {
-      ok = false;
-      defaultRejected = true;
-    } else if (hr == E_FAIL) {
-      ok = false;
-    }
+  nsresult rv = SetDefaultExtensionHandlersUserChoiceImpl(aAumi, sid.get(),
+                                                          browserDefaults);
+  if (!NS_SUCCEEDED(rv)) {
+    LOG_ERROR_MESSAGE(L"Failed setting default with %s", aAumi);
   }
 
   // Notify shell to refresh icons
   ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 
-  if (!ok) {
-    LOG_ERROR_MESSAGE(L"Failed setting default with %s", aAumi);
-    if (defaultRejected) {
-      return MOZ_E_REJECTED;
-    }
-    return E_FAIL;
-  }
-
-  return S_OK;
+  return rv;
 }
 
-HRESULT SetDefaultExtensionHandlersUserChoice(
+nsresult SetDefaultExtensionHandlersUserChoice(
     const wchar_t* aAumi, const nsTArray<nsString>& aFileExtensions) {
   auto sid = GetCurrentUserStringSid();
   if (!sid) {
-    return E_FAIL;
+    return NS_ERROR_FAILURE;
   }
 
-  bool ok = true;
-  bool defaultRejected = false;
-
-  HRESULT hr = SetDefaultExtensionHandlersUserChoiceImpl(aAumi, sid.get(),
-                                                         aFileExtensions);
-  if (hr == MOZ_E_REJECTED) {
-    ok = false;
-    defaultRejected = true;
-  } else if (hr == E_FAIL) {
-    ok = false;
+  nsresult rv = SetDefaultExtensionHandlersUserChoiceImpl(aAumi, sid.get(),
+                                                          aFileExtensions);
+  if (!NS_SUCCEEDED(rv)) {
+    LOG_ERROR_MESSAGE(L"Failed setting default with %s", aAumi);
   }
 
   // Notify shell to refresh icons
   ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 
-  if (!ok) {
-    LOG_ERROR_MESSAGE(L"Failed setting default with %s", aAumi);
-    if (defaultRejected) {
-      return MOZ_E_REJECTED;
-    }
-    return E_FAIL;
-  }
-
-  return S_OK;
+  return rv;
 }
 
-HRESULT SetDefaultExtensionHandlersUserChoiceImpl(
+nsresult SetDefaultExtensionHandlersUserChoiceImpl(
     const wchar_t* aAumi, const wchar_t* const aSid,
     const nsTArray<nsString>& aFileExtensions) {
+  UINT32 pfnLen = 0;
+  bool inMsix =
+      GetCurrentPackageFullName(&pfnLen, nullptr) != APPMODEL_ERROR_NO_PACKAGE;
+
+  if (inMsix) {
+    // MSIX packages can not meaningfully modify the registry keys related to
+    // default handlers
+    return NS_ERROR_FAILURE;
+  }
+
   for (size_t i = 0; i + 1 < aFileExtensions.Length(); i += 2) {
-    const wchar_t* extraFileExtension =
-        PromiseFlatString(aFileExtensions[i]).get();
-    const wchar_t* extraProgIDRoot =
-        PromiseFlatString(aFileExtensions[i + 1]).get();
+    const wchar_t* extraFileExtension = aFileExtensions[i].get();
+    const wchar_t* extraProgIDRoot = aFileExtensions[i + 1].get();
     // Formatting the ProgID here prevents using this helper to target arbitrary
     // ProgIDs.
-    auto extraProgID = FormatProgID(extraProgIDRoot, aAumi);
+    mozilla::UniquePtr<wchar_t[]> extraProgID;
+    if (inMsix) {
+      nsresult rv = GetMsixProgId(extraFileExtension, extraProgID);
+      if (NS_FAILED(rv)) {
+        LOG_ERROR_MESSAGE(L"Failed to retrieve MSIX progID for %s",
+                          extraFileExtension);
+        return rv;
+      }
+    } else {
+      extraProgID = FormatProgID(extraProgIDRoot, aAumi);
+      if (!CheckProgIDExists(extraProgID.get())) {
+        LOG_ERROR_MESSAGE(L"ProgID %s not found", extraProgID.get());
+        return NS_ERROR_WDBA_NO_PROGID;
+      }
+    }
 
-    if (!SetUserChoice(extraFileExtension, aSid, extraProgID.get())) {
-      return E_FAIL;
+    if (!SetUserChoice(extraFileExtension, aSid, extraProgID.get(), inMsix)) {
+      return NS_ERROR_FAILURE;
     }
 
     if (!VerifyUserDefault(extraFileExtension, extraProgID.get())) {
-      return MOZ_E_REJECTED;
+      return NS_ERROR_WDBA_REJECTED;
     }
   }
 
-  return S_OK;
+  return NS_OK;
 }
 
 }  // namespace mozilla::default_agent

@@ -10,9 +10,11 @@
 #include "mozilla/Atomics.h"
 #include "mozilla/dom/BlobImpl.h"
 #include "mozilla/dom/GetFilesHelper.h"
+#include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/PContentChild.h"
 #include "mozilla/dom/ProcessActor.h"
 #include "mozilla/dom/RemoteType.h"
+#include "mozilla/Hal.h"
 #include "mozilla/ipc/InputStreamUtils.h"
 #include "mozilla/ipc/ProtocolUtils.h"
 #include "mozilla/StaticPtr.h"
@@ -105,7 +107,8 @@ class ContentChild final : public PContentChild,
   MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult ProvideWindowCommon(
       NotNull<BrowserChild*> aTabOpener, nsIOpenWindowInfo* aOpenWindowInfo,
       uint32_t aChromeFlags, bool aCalledFromJS, nsIURI* aURI,
-      const nsAString& aName, const nsACString& aFeatures, bool aForceNoOpener,
+      const nsAString& aName, const nsACString& aFeatures,
+      const UserActivation::Modifiers& aModifiers, bool aForceNoOpener,
       bool aForceNoReferrer, bool aIsPopupRequested,
       nsDocShellLoadState* aLoadState, bool* aWindowIsNew,
       BrowsingContext** aReturn);
@@ -200,19 +203,15 @@ class ContentChild final : public PContentChild,
       PCycleCollectWithLogsChild* aChild, const bool& aDumpAllTraces,
       const FileDescriptor& aGCLog, const FileDescriptor& aCCLog) override;
 
-  PWebBrowserPersistDocumentChild* AllocPWebBrowserPersistDocumentChild(
+  already_AddRefed<PWebBrowserPersistDocumentChild>
+  AllocPWebBrowserPersistDocumentChild(
       PBrowserChild* aBrowser, const MaybeDiscarded<BrowsingContext>& aContext);
 
   virtual mozilla::ipc::IPCResult RecvPWebBrowserPersistDocumentConstructor(
       PWebBrowserPersistDocumentChild* aActor, PBrowserChild* aBrowser,
       const MaybeDiscarded<BrowsingContext>& aContext) override;
 
-  bool DeallocPWebBrowserPersistDocumentChild(
-      PWebBrowserPersistDocumentChild* aActor);
-
-  PTestShellChild* AllocPTestShellChild();
-
-  bool DeallocPTestShellChild(PTestShellChild*);
+  already_AddRefed<PTestShellChild> AllocPTestShellChild();
 
   virtual mozilla::ipc::IPCResult RecvPTestShellConstructor(
       PTestShellChild*) override;
@@ -228,6 +227,9 @@ class ContentChild final : public PContentChild,
 
   PRemotePrintJobChild* AllocPRemotePrintJobChild();
 
+  already_AddRefed<PClipboardReadRequestChild> AllocPClipboardReadRequestChild(
+      const nsTArray<nsCString>& aTypes);
+
   PMediaChild* AllocPMediaChild();
 
   bool DeallocPMediaChild(PMediaChild* aActor);
@@ -237,11 +239,6 @@ class ContentChild final : public PContentChild,
   bool DeallocPBenchmarkStorageChild(PBenchmarkStorageChild* aActor);
 
   mozilla::ipc::IPCResult RecvNotifyEmptyHTTPCache();
-
-#ifdef MOZ_WEBSPEECH
-  PSpeechSynthesisChild* AllocPSpeechSynthesisChild();
-  bool DeallocPSpeechSynthesisChild(PSpeechSynthesisChild* aActor);
-#endif
 
   mozilla::ipc::IPCResult RecvRegisterChrome(
       nsTArray<ChromePackage>&& packages,
@@ -496,7 +493,7 @@ class ContentChild final : public PContentChild,
 
   mozilla::ipc::IPCResult RecvBlobURLRegistration(
       const nsCString& aURI, const IPCBlob& aBlob, nsIPrincipal* aPrincipal,
-      const Maybe<nsID>& aAgentClusterId, const nsCString& aPartitionKey);
+      const nsCString& aPartitionKey);
 
   mozilla::ipc::IPCResult RecvBlobURLUnregistration(const nsCString& aURI);
 
@@ -559,10 +556,6 @@ class ContentChild final : public PContentChild,
   PURLClassifierLocalChild* AllocPURLClassifierLocalChild(
       nsIURI* aUri, Span<const IPCURLClassifierFeature> aFeatures);
   bool DeallocPURLClassifierLocalChild(PURLClassifierLocalChild* aActor);
-
-  PLoginReputationChild* AllocPLoginReputationChild(nsIURI* aUri);
-
-  bool DeallocPLoginReputationChild(PLoginReputationChild* aActor);
 
   PSessionStorageObserverChild* AllocPSessionStorageObserverChild();
 
@@ -797,6 +790,18 @@ class ContentChild final : public PContentChild,
 
   hal::ProcessPriority GetProcessPriority() const { return mProcessPriority; }
 
+  hal::PerformanceHintSession* PerformanceHintSession() const {
+    return mPerformanceHintSession.get();
+  }
+
+  // Returns the target work duration for the PerformanceHintSession, based on
+  // the refresh interval. Estimate that we want the tick to complete in at most
+  // half of the refresh period. This is fairly arbitrary and can be tweaked
+  // later.
+  static TimeDuration GetPerformanceHintTarget(TimeDuration aRefreshInterval) {
+    return aRefreshInterval / int64_t(2);
+  }
+
  private:
   void AddProfileToProcessName(const nsACString& aProfile);
   mozilla::ipc::IPCResult RecvFlushFOGData(FlushFOGDataResolver&& aResolver);
@@ -812,6 +817,8 @@ class ContentChild final : public PContentChild,
   virtual PContentChild::Result OnMessageReceived(
       const Message& aMsg, UniquePtr<Message>& aReply) override;
 #endif
+
+  void ConfigureThreadPerformanceHints(const hal::ProcessPriority& aPriority);
 
   nsTArray<mozilla::UniquePtr<AlertObserver>> mAlertObservers;
   RefPtr<ConsoleListener> mConsoleListener;
@@ -883,6 +890,11 @@ class ContentChild final : public PContentChild,
   uint64_t mBrowsingContextFieldEpoch = 0;
 
   hal::ProcessPriority mProcessPriority = hal::PROCESS_PRIORITY_UNKNOWN;
+
+  // Session created when the process priority is FOREGROUND to ensure high
+  // priority scheduling of important threads. (Currently main thread and style
+  // threads.) The work duration is reported by the RefreshDriverTimer.
+  UniquePtr<hal::PerformanceHintSession> mPerformanceHintSession;
 };
 
 inline nsISupports* ToSupports(mozilla::dom::ContentChild* aContentChild) {

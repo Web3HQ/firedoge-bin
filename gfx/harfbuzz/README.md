@@ -12,8 +12,11 @@
 
 HarfBuzz is a text shaping engine. It primarily supports [OpenType][1], but also
 [Apple Advanced Typography][2]. HarfBuzz is used in Android, Chrome,
-ChromeOS, Firefox, GNOME, GTK+, KDE, LibreOffice, OpenJDK, PlayStation, Qt,
-XeTeX, and other places.
+ChromeOS, Firefox, GNOME, GTK+, KDE, Qt, LibreOffice, OpenJDK, XeTeX,
+PlayStation, Microsoft Edge, Adobe Photoshop, Illustrator, InDesign,
+Godot Engine, and other places.
+
+[![xkcd-derived image](xkcd.png)](https://xkcd.com/2347/)
 
 For bug reports, mailing list, and other information please visit:
 
@@ -28,8 +31,8 @@ For user manual as well as API documentation, check: https://harfbuzz.github.io
 ## Download
 
 For tarball releases of HarfBuzz, look [here][3]. At the same place you
-will also find Win32/Win64 binary bundles that include libharfbuzz DLL,
-hb-view.exe, hb-shape.exe, and all dependencies.
+will also find Win32/Win64 binary bundles that include `libharfbuzz` DLL,
+`hb-view.exe`, `hb-shape.exe`, and all dependencies.
 
 The canonical source tree is available on [github][4].
 

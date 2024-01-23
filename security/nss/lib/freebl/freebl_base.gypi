@@ -38,12 +38,16 @@
     'ecl/ecp_secp384r1.c',
     'ecl/ecp_secp521r1.c',
     'verified/Hacl_P256.c',
+    'verified/Hacl_P384.c',
+    'verified/Hacl_P521.c',
     'fipsfreebl.c',
     'blinit.c',
     'freeblver.c',
     'gcm.c',
     'hmacct.c',
     'jpake.c',
+    'kyber.c',
+    'kyber-pqcrystals-ref.c',
     'ldvector.c',
     'md2.c',
     'md5.c',
@@ -57,6 +61,7 @@
     'rawhash.c',
     'rijndael.c',
     'rsa.c',
+    'rsa_blind.c',
     'rsapkcs.c',
     'sha_fast.c',
     'shvfy.c',
@@ -66,6 +71,12 @@
     'verified/Hacl_Hash_SHA3.c',
     'sha3.c',
     'shake.c',
+  ],
+  'defines': [
+    # For kyber-pqcrystals-ref.c. If we ever decide to support Kyber512 or
+    # Kyber1024, we'll need to build separate static libraries with different
+    # values of KYBER_K.
+    'KYBER_K=3',
   ],
   'conditions': [
     [ 'OS=="linux" or OS=="android"', {

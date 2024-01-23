@@ -2,12 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import PropTypes from "prop-types";
-import React, { PureComponent } from "react";
-import { div } from "react-dom-factories";
-import { bindActionCreators } from "redux";
-import ReactDOM from "react-dom";
-import { connect } from "../../utils/connect";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import React, { PureComponent } from "devtools/client/shared/vendor/react";
+import { div } from "devtools/client/shared/vendor/react-dom-factories";
+import { bindActionCreators } from "devtools/client/shared/vendor/redux";
+import ReactDOM from "devtools/client/shared/vendor/react-dom";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 
 import { getLineText, isLineBlackboxed } from "./../../utils/source";
 import { createLocation } from "./../../utils/location";
@@ -29,14 +29,15 @@ import {
   getHighlightedLineRangeForSelectedSource,
   isSourceMapIgnoreListEnabled,
   isSourceOnSourceMapIgnoreList,
-} from "../../selectors";
+  isMapScopesEnabled,
+} from "../../selectors/index";
 
 // Redux actions
-import actions from "../../actions";
+import actions from "../../actions/index";
 
 import SearchInFileBar from "./SearchInFileBar";
 import HighlightLines from "./HighlightLines";
-import Preview from "./Preview";
+import Preview from "./Preview/index";
 import Breakpoints from "./Breakpoints";
 import ColumnBreakpoints from "./ColumnBreakpoints";
 import DebugLine from "./DebugLine";
@@ -58,19 +59,19 @@ import {
   lineAtHeight,
   toSourceLine,
   getDocument,
-  scrollToColumn,
+  scrollToPosition,
   toEditorPosition,
   getSourceLocationFromMouseEvent,
   hasDocument,
   onMouseOver,
   startOperation,
   endOperation,
-} from "../../utils/editor";
+} from "../../utils/editor/index";
 
 import { resizeToggleButton, resizeBreakpointGutter } from "../../utils/ui";
 
-const { debounce } = require("devtools/shared/debounce");
-const classnames = require("devtools/client/shared/classnames.js");
+const { debounce } = require("resource://devtools/shared/debounce.js");
+const classnames = require("resource://devtools/client/shared/classnames.js");
 
 const { appinfo } = Services;
 const isMacOS = appinfo.OS === "Darwin";
@@ -82,10 +83,6 @@ function isSecondary(ev) {
 function isCmd(ev) {
   return isMacOS ? ev.metaKey : ev.ctrlKey;
 }
-
-import "./Editor.css";
-import "./Breakpoints.css";
-import "./InlinePreview.css";
 
 const cssVars = {
   searchbarHeight: "var(--editor-searchbar-height)",
@@ -119,6 +116,7 @@ class Editor extends PureComponent {
       breakableLines: PropTypes.object.isRequired,
       highlightedLineRange: PropTypes.object,
       isSourceOnIgnoreList: PropTypes.bool,
+      mapScopesEnabled: PropTypes.bool,
     };
   }
 
@@ -141,8 +139,8 @@ class Editor extends PureComponent {
 
     const shouldUpdateText =
       nextProps.selectedSource !== this.props.selectedSource ||
-      nextProps.selectedSourceTextContent !==
-        this.props.selectedSourceTextContent ||
+      nextProps.selectedSourceTextContent?.value !==
+        this.props.selectedSourceTextContent?.value ||
       nextProps.symbols !== this.props.symbols;
 
     const shouldUpdateSize =
@@ -186,10 +184,24 @@ class Editor extends PureComponent {
     }
 
     const { codeMirror } = editor;
-    const codeMirrorWrapper = codeMirror.getWrapperElement();
+
+    this.abortController = new window.AbortController();
+
+    // CodeMirror refreshes its internal state on window resize, but we need to also
+    // refresh it when the side panels are resized.
+    // We could have a ResizeObserver instead, but we wouldn't be able to differentiate
+    // between window resize and side panel resize and as a result, might refresh
+    // codeMirror twice, which is wasteful.
+    window.document
+      .querySelector(".editor-pane")
+      .addEventListener("resizeend", () => codeMirror.refresh(), {
+        signal: this.abortController.signal,
+      });
 
     codeMirror.on("gutterClick", this.onGutterClick);
+    codeMirror.on("cursorActivity", this.onCursorChange);
 
+    const codeMirrorWrapper = codeMirror.getWrapperElement();
     // Set code editor wrapper to be focusable
     codeMirrorWrapper.tabIndex = 0;
     codeMirrorWrapper.addEventListener("keydown", e => this.onKeyDown(e));
@@ -260,6 +272,11 @@ class Editor extends PureComponent {
     shortcuts.off(L10N.getStr("toggleBreakpoint.key"));
     shortcuts.off(L10N.getStr("toggleCondPanel.breakpoint.key"));
     shortcuts.off(L10N.getStr("toggleCondPanel.logPoint.key"));
+
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
   }
 
   getCurrentLine() {
@@ -417,6 +434,29 @@ class Editor extends PureComponent {
     this.props.showEditorContextMenu(event, editor, location);
   }
 
+  /**
+   * CodeMirror event handler, called whenever the cursor moves
+   * for user-driven or programatic reasons.
+   */
+  onCursorChange = event => {
+    const { line, ch } = event.doc.getCursor();
+    this.props.selectLocation(
+      createLocation({
+        source: this.props.selectedSource,
+        // CodeMirror cursor location is all 0-based.
+        // Whereast in DevTools frontend and backend,
+        // only colunm is 0-based, the line is 1 based.
+        line: line + 1,
+        column: ch,
+      }),
+      {
+        // Reset the context, so that we don't switch to original
+        // while moving the cursor within a bundle
+        keepContext: false,
+      }
+    );
+  };
+
   onGutterClick = (cm, line, gutter, ev) => {
     const {
       selectedSource,
@@ -500,25 +540,21 @@ class Editor extends PureComponent {
   }
 
   shouldScrollToLocation(nextProps, editor) {
-    const { selectedLocation, selectedSource, selectedSourceTextContent } =
-      this.props;
     if (
-      !editor ||
-      !nextProps.selectedSource ||
-      !nextProps.selectedLocation ||
-      !nextProps.selectedLocation.line ||
+      !nextProps.selectedLocation?.line ||
       !nextProps.selectedSourceTextContent
     ) {
       return false;
     }
 
-    const isFirstLoad =
-      (!selectedSource || !selectedSourceTextContent) &&
-      nextProps.selectedSourceTextContent;
+    const { selectedLocation, selectedSourceTextContent } = this.props;
+    const contentChanged =
+      !selectedSourceTextContent?.value &&
+      nextProps.selectedSourceTextContent?.value;
     const locationChanged = selectedLocation !== nextProps.selectedLocation;
     const symbolsChanged = nextProps.symbols != this.props.symbols;
 
-    return isFirstLoad || locationChanged || symbolsChanged;
+    return contentChanged || locationChanged || symbolsChanged;
   }
 
   scrollToLocation(nextProps, editor) {
@@ -532,7 +568,7 @@ class Editor extends PureComponent {
       column = Math.max(column, getIndentation(lineText));
     }
 
-    scrollToColumn(editor.codeMirror, line, column);
+    scrollToPosition(editor.codeMirror, line, column);
   }
 
   setText(props, editor) {
@@ -608,6 +644,7 @@ class Editor extends PureComponent {
       blackboxedRanges,
       isSourceOnIgnoreList,
       selectedSourceIsBlackBoxed,
+      mapScopesEnabled,
     } = this.props;
     const { editor } = this.state;
 
@@ -624,10 +661,15 @@ class Editor extends PureComponent {
       React.createElement(Breakpoints, {
         editor,
       }),
-      React.createElement(Preview, {
-        editor,
-        editorRef: this.$editorWrapper,
-      }),
+      isPaused &&
+        selectedSource.isOriginal &&
+        !selectedSource.isPrettyPrinted &&
+        !mapScopesEnabled
+        ? null
+        : React.createElement(Preview, {
+            editor,
+            editorRef: this.$editorWrapper,
+          }),
       highlightedLineRange
         ? React.createElement(HighlightLines, {
             editor,
@@ -652,7 +694,11 @@ class Editor extends PureComponent {
       React.createElement(ColumnBreakpoints, {
         editor,
       }),
-      isPaused && inlinePreviewEnabled
+      isPaused &&
+        inlinePreviewEnabled &&
+        (!selectedSource.isOriginal ||
+          (selectedSource.isOriginal && selectedSource.isPrettyPrinted) ||
+          (selectedSource.isOriginal && mapScopesEnabled))
         ? React.createElement(InlinePreviews, {
             editor,
             selectedSource,
@@ -717,6 +763,9 @@ const mapStateToProps = state => {
     blackboxedRanges: getBlackBoxRanges(state),
     breakableLines: getSelectedBreakableLines(state),
     highlightedLineRange: getHighlightedLineRangeForSelectedSource(state),
+    mapScopesEnabled: selectedSource?.isOriginal
+      ? isMapScopesEnabled(state)
+      : null,
   };
 };
 
@@ -734,6 +783,7 @@ const mapDispatchToProps = dispatch => ({
       closeTab: actions.closeTab,
       showEditorContextMenu: actions.showEditorContextMenu,
       showEditorGutterContextMenu: actions.showEditorGutterContextMenu,
+      selectLocation: actions.selectLocation,
     },
     dispatch
   ),

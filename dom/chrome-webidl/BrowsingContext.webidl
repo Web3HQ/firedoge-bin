@@ -130,6 +130,12 @@ interface BrowsingContext {
   [SetterThrows] attribute boolean isActive;
 
   /**
+   * When set to true all channels in this browsing context or its children will report navigator.onLine = false,
+   * and HTTP requests created from these browsing context will fail with NS_ERROR_OFFLINE.
+   */
+  [SetterThrows] attribute boolean forceOffline;
+
+  /**
    * Sets whether this is an app tab. Non-same-origin link navigations from app
    * tabs may be forced to open in new contexts, rather than in the same context.
    */
@@ -167,7 +173,7 @@ interface BrowsingContext {
 
   [SetterThrows] attribute boolean suspendMediaWhenInactive;
 
-  // Default value for nsIContentViewer::authorStyleDisabled in any new
+  // Default value for nsIDocumentViewer::authorStyleDisabled in any new
   // browsing contexts created as a descendant of this one.
   //
   // Valid only for top browsing contexts.

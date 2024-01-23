@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-import {JsonObject} from '@angular-devkit/core';
+import type {JsonObject} from '@angular-devkit/core';
 
-type Command = [string, ...string[]];
+import type {TestRunner} from '../../schematics/utils/types.js';
 
 export interface PuppeteerBuilderOptions extends JsonObject {
-  commands: Command[];
+  testRunner: TestRunner;
   devServerTarget: string;
   port: number | null;
 }

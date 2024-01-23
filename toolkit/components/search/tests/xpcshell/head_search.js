@@ -7,7 +7,6 @@ const { XPCOMUtils } = ChromeUtils.importESModule(
 
 ChromeUtils.defineESModuleGetters(this, {
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
   Region: "resource://gre/modules/Region.sys.mjs",
   RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
   RemoteSettingsClient:
@@ -402,13 +401,13 @@ async function assertGleanDefaultEngine(expected) {
 class SearchObserver {
   constructor(expectedNotifications, returnEngineForNotification = false) {
     this.observer = this.observer.bind(this);
-    this.deferred = PromiseUtils.defer();
+    this.deferred = Promise.withResolvers();
     this.expectedNotifications = expectedNotifications;
     this.returnEngineForNotification = returnEngineForNotification;
 
     Services.obs.addObserver(this.observer, SearchUtils.TOPIC_ENGINE_MODIFIED);
 
-    this.timeout = setTimeout(this.handleTimeout.bind(this), 1000);
+    this.timeout = setTimeout(this.handleTimeout.bind(this), 5000);
   }
 
   get promise() {
@@ -476,11 +475,6 @@ let consoleAllowList = [
   // Harness issues.
   'property "localProfileDir" is non-configurable and can\'t be deleted',
   'property "profileDir" is non-configurable and can\'t be deleted',
-  // These can be emitted by `resource://services-settings/Utils.jsm` when
-  // remote settings is fetched (e.g. via IgnoreLists).
-  "NetworkError: Network request failed",
-  // Also remote settings, see bug 1812040.
-  "Unexpected content-type",
 ];
 
 let endConsoleListening = TestUtils.listenForConsoleMessages();

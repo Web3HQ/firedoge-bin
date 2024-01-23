@@ -340,13 +340,17 @@ void TraceCrossCompartmentEdge(JSTracer* trc, JSObject* src,
 // GC peer first.
 template <typename T>
 void TraceSameZoneCrossCompartmentEdge(JSTracer* trc,
-                                       const WriteBarriered<T>* dst,
+                                       const BarrieredBase<T>* dst,
                                        const char* name);
 
 // Trace a weak map key. For debugger weak maps these may be cross compartment,
 // but the compartment must always be within the current sweep group.
 template <typename T>
 void TraceWeakMapKeyEdgeInternal(JSTracer* trc, Zone* weakMapZone, T** thingp,
+                                 const char* name);
+
+template <typename T>
+void TraceWeakMapKeyEdgeInternal(JSTracer* trc, Zone* weakMapZone, T* thingp,
                                  const char* name);
 
 template <typename T>

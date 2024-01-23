@@ -629,7 +629,6 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
             return;
         }
 
-        debug_assert_eq!(self.style.get_box().clone_display(), Display::Block);
         // TODO We actually want style from parent rather than layout
         // parent, so that this fixup doesn't happen incorrectly when
         // when <fieldset> has "display: contents".
@@ -864,7 +863,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         };
 
         if appearance == Appearance::Menulist {
-            if self.style.get_inherited_text().clone_line_height() == LineHeight::normal() {
+            if self.style.get_font().clone_line_height() == LineHeight::normal() {
                 return;
             }
             if self.style.pseudo.is_some() {
@@ -877,7 +876,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
                 return;
             }
             self.style
-                .mutate_inherited_text()
+                .mutate_font()
                 .set_line_height(LineHeight::normal());
         }
     }

@@ -71,7 +71,7 @@
 #include "nsContentUtils.h"
 #include "nsJSUtils.h"
 #include "nsILoadInfo.h"
-#include "js/ColumnNumber.h"  // JS::ColumnNumberZeroOrigin
+#include "js/ColumnNumber.h"  // JS::ColumnNumberOneOrigin
 
 // This should be probably defined on some other place... but I couldn't find it
 #define WEBAPPS_PERM_NAME "webapps-manage"
@@ -79,7 +79,7 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 
-nsIIOService* nsScriptSecurityManager::sIOService = nullptr;
+StaticRefPtr<nsIIOService> nsScriptSecurityManager::sIOService;
 std::atomic<bool> nsScriptSecurityManager::sStrictFileOriginPolicy = true;
 
 namespace {
@@ -533,7 +533,7 @@ bool nsScriptSecurityManager::ContentSecurityPolicyPermitsJSAction(
     JS::AutoFilename scriptFilename;
     nsAutoString fileName;
     uint32_t lineNum = 0;
-    JS::ColumnNumberZeroOrigin columnNum;
+    JS::ColumnNumberOneOrigin columnNum;
     if (JS::DescribeScriptedCaller(cx, &scriptFilename, &lineNum, &columnNum)) {
       if (const char* file = scriptFilename.get()) {
         CopyUTF8toUTF16(nsDependentCString(file), fileName);
@@ -555,7 +555,7 @@ bool nsScriptSecurityManager::ContentSecurityPolicyPermitsJSAction(
     csp->LogViolationDetails(violationType,
                              nullptr,  // triggering element
                              cspEventListener, fileName, scriptSample, lineNum,
-                             columnNum.zeroOriginValue(), u""_ns, u""_ns);
+                             columnNum.oneOriginValue(), u""_ns, u""_ns);
   }
 
   return evalOK;
@@ -1549,9 +1549,12 @@ nsScriptSecurityManager::nsScriptSecurityManager(void)
 }
 
 nsresult nsScriptSecurityManager::Init() {
-  nsresult rv = CallGetService(NS_IOSERVICE_CONTRACTID, &sIOService);
-  NS_ENSURE_SUCCESS(rv, rv);
-
+  nsresult rv;
+  RefPtr<nsIIOService> io = mozilla::components::IO::Service(&rv);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  sIOService = std::move(io);
   InitPrefs();
 
   // Create our system principal singleton
@@ -1597,7 +1600,7 @@ nsScriptSecurityManager::~nsScriptSecurityManager(void) {
 }
 
 void nsScriptSecurityManager::Shutdown() {
-  NS_IF_RELEASE(sIOService);
+  sIOService = nullptr;
   BundleHelper::Shutdown();
   SystemPrincipal::Shutdown();
 }

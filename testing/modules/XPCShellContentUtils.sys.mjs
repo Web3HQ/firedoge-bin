@@ -144,7 +144,7 @@ class ContentPage {
       Ci.nsIWebNavigation
     );
 
-    chromeShell.createAboutBlankContentViewer(system, system);
+    chromeShell.createAboutBlankDocumentViewer(system, system);
     this.windowlessBrowser.browsingContext.useGlobalHistory = false;
     let loadURIOptions = {
       triggeringPrincipal: system,
@@ -419,14 +419,6 @@ export var XPCShellContentUtils = {
       response.setHeader("content-type", "application/json", true);
       response.write(JSON.stringify(obj));
     });
-  },
-
-  get remoteContentScripts() {
-    return gRemoteContentScripts;
-  },
-
-  set remoteContentScripts(val) {
-    gRemoteContentScripts = !!val;
   },
 
   async fetch(origin, url, options) {

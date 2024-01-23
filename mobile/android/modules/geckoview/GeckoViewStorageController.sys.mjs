@@ -36,7 +36,9 @@ const ClearFlags = [
     // COOKIES
     1 << 0,
     Ci.nsIClearDataService.CLEAR_COOKIES |
-      Ci.nsIClearDataService.CLEAR_MEDIA_DEVICES,
+      Ci.nsIClearDataService.CLEAR_MEDIA_DEVICES |
+      Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXECUTED_RECORD |
+      Ci.nsIClearDataService.CLEAR_FINGERPRINTING_PROTECTION_STATE,
   ],
   [
     // NETWORK_CACHE
@@ -59,7 +61,9 @@ const ClearFlags = [
     1 << 4,
     Ci.nsIClearDataService.CLEAR_DOM_QUOTA |
       Ci.nsIClearDataService.CLEAR_DOM_PUSH_NOTIFICATIONS |
-      Ci.nsIClearDataService.CLEAR_REPORTS,
+      Ci.nsIClearDataService.CLEAR_REPORTS |
+      Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXECUTED_RECORD |
+      Ci.nsIClearDataService.CLEAR_FINGERPRINTING_PROTECTION_STATE,
   ],
   [
     // AUTH_SESSIONS
@@ -78,7 +82,8 @@ const ClearFlags = [
     Ci.nsIClearDataService.CLEAR_CONTENT_PREFERENCES |
       Ci.nsIClearDataService.CLEAR_DOM_PUSH_NOTIFICATIONS |
       // former a part of SECURITY_SETTINGS_CLEANER
-      Ci.nsIClearDataService.CLEAR_CLIENT_AUTH_REMEMBER_SERVICE,
+      Ci.nsIClearDataService.CLEAR_CLIENT_AUTH_REMEMBER_SERVICE |
+      Ci.nsIClearDataService.CLEAR_FINGERPRINTING_PROTECTION_STATE,
   ],
   [
     // SITE_DATA
@@ -168,7 +173,7 @@ export const GeckoViewStorageController = {
         const principal = lazy.E10SUtils.deserializePrincipal(aData.principal);
         let key = aData.perm;
         if (key == "storage-access") {
-          key = "3rdPartyStorage^" + aData.thirdPartyOrigin;
+          key = "3rdPartyFrameStorage^" + aData.thirdPartyOrigin;
         }
         if (aData.allowPermanentPrivateBrowsing) {
           Services.perms.addFromPrincipalAndPersistInPrivateBrowsing(

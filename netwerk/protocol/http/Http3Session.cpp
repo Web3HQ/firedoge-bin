@@ -71,10 +71,18 @@ Http3Session::Http3Session() {
   mThroughCaptivePortal = gHttpHandler->GetThroughCaptivePortal();
 }
 
-static nsresult StringAndPortToNetAddr(nsACString& remoteAddrStr,
-                                       uint16_t remotePort, NetAddr* netAddr) {
-  if (NS_FAILED(netAddr->InitFromString(remoteAddrStr, remotePort))) {
-    return NS_ERROR_FAILURE;
+static nsresult RawBytesToNetAddr(uint16_t aFamily, const uint8_t* aRemoteAddr,
+                                  uint16_t remotePort, NetAddr* netAddr) {
+  if (aFamily == AF_INET) {
+    netAddr->inet.family = AF_INET;
+    netAddr->inet.port = htons(remotePort);
+    memcpy(&netAddr->inet.ip, aRemoteAddr, 4);
+  } else if (aFamily == AF_INET6) {
+    netAddr->inet6.family = AF_INET6;
+    netAddr->inet6.port = htons(remotePort);
+    memcpy(&netAddr->inet6.ip.u8, aRemoteAddr, 16);
+  } else {
+    return NS_ERROR_UNEXPECTED;
   }
 
   return NS_OK;
@@ -133,6 +141,7 @@ nsresult Http3Session::Init(const nsHttpConnectionInfo* aConnInfo,
       StaticPrefs::network_http_http3_max_stream_data(),
       StaticPrefs::network_http_http3_version_negotiation_enabled(),
       mConnInfo->GetWebTransport(), gHttpHandler->Http3QlogDir(), datagramSize,
+      StaticPrefs::network_http_http3_max_accumlated_time_ms(),
       getter_AddRefs(mHttp3Connection));
   if (NS_FAILED(rv)) {
     return rv;
@@ -142,6 +151,8 @@ nsresult Http3Session::Init(const nsHttpConnectionInfo* aConnInfo,
   mSocketControl->GetPeerId(peerId);
   nsTArray<uint8_t> token;
   SessionCacheInfo info;
+  udpConn->ChangeConnectionState(ConnectionState::TLS_HANDSHAKING);
+
   if (StaticPrefs::network_http_http3_enable_0rtt() &&
       NS_SUCCEEDED(SSLTokensCache::Get(peerId, token, info))) {
     LOG(("Found a resumption token in the cache."));
@@ -151,6 +162,7 @@ nsresult Http3Session::Init(const nsHttpConnectionInfo* aConnInfo,
       LOG(("Can send ZeroRtt data"));
       RefPtr<Http3Session> self(this);
       mState = ZERORTT;
+      udpConn->ChangeConnectionState(ConnectionState::ZERORTT);
       mZeroRttStarted = TimeStamp::Now();
       // Let the nsHttpConnectionMgr know that the connection can accept
       // transactions.
@@ -261,17 +273,13 @@ void Http3Session::Shutdown() {
           mNetAddr->GetNetAddr(&addr);
           gHttpHandler->ConnMgr()->SetRetryDifferentIPFamilyForHttp3(
               mConnInfo, addr.raw.family);
-          nsHttpTransaction* trans =
-              stream->Transaction()->QueryHttpTransaction();
-          if (trans) {
-            // This is a bit hacky. We redispatch the transaction here to avoid
-            // touching the complicated retry logic in nsHttpTransaction.
-            trans->RemoveConnection();
-            Unused << gHttpHandler->InitiateTransaction(trans,
-                                                        trans->Priority());
-          } else {
-            stream->Close(NS_ERROR_NET_RESET);
-          }
+          // We want the transaction to be restarted with the same connection
+          // info.
+          stream->Transaction()->DoNotRemoveAltSvc();
+          // We already set the preference in SetRetryDifferentIPFamilyForHttp3,
+          // so we want to keep it for the next retry.
+          stream->Transaction()->DoNotResetIPFamilyPreference();
+          stream->Close(NS_ERROR_NET_RESET);
           // Since Http3Session::Shutdown can be called multiple times, we set
           // mDontExclude for not putting this domain into the excluded list.
           mDontExclude = true;
@@ -469,6 +477,8 @@ nsresult Http3Session::ProcessEvents() {
                static_cast<uint32_t>(rv)));
           return rv;
         }
+
+        mUdpConn->NotifyDataRead();
         break;
       }
       case Http3Event::Tag::DataReadable: {
@@ -595,6 +605,7 @@ nsresult Http3Session::ProcessEvents() {
       } break;
       case Http3Event::Tag::GoawayReceived:
         LOG(("Http3Session::ProcessEvents - GoawayReceived"));
+        mUdpConn->SetCloseReason(ConnectionCloseReason::GO_AWAY);
         mGoawayReceived = true;
         break;
       case Http3Event::Tag::ConnectionClosing:
@@ -642,6 +653,7 @@ nsresult Http3Session::ProcessEvents() {
         LOG(("Http3Session::ProcessEvents - ConnectionClosed"));
         if (NS_SUCCEEDED(mError)) {
           mError = NS_ERROR_NET_TIMEOUT;
+          mUdpConn->SetCloseReason(ConnectionCloseReason::IDLE_TIMEOUT);
           CloseConnectionTelemetry(event.connection_closed.error, false);
         }
         mIsClosedByNeqo = true;
@@ -875,46 +887,46 @@ nsresult Http3Session::ProcessOutput(nsIUDPSocket* socket) {
   LOG(("Http3Session::ProcessOutput reader=%p, [this=%p]", mUdpConn.get(),
        this));
 
-  // Check if we have a packet that could not have been sent in a previous
-  // iteration or maybe get new packets to send.
-  while (true) {
-    nsTArray<uint8_t> packetToSend;
-    nsAutoCString remoteAddrStr;
-    uint16_t port = 0;
-    uint64_t timeout = 0;
-    if (!mHttp3Connection->ProcessOutput(&remoteAddrStr, &port, packetToSend,
-                                         &timeout)) {
-      SetupTimer(timeout);
-      break;
-    }
-    MOZ_ASSERT(packetToSend.Length());
-    LOG(
-        ("Http3Session::ProcessOutput sending packet with %u bytes to %s "
-         "port=%d [this=%p].",
-         (uint32_t)packetToSend.Length(),
-         PromiseFlatCString(remoteAddrStr).get(), port, this));
+  mSocket = socket;
+  nsresult rv = mHttp3Connection->ProcessOutputAndSend(
+      this,
+      [](void* aContext, uint16_t aFamily, const uint8_t* aAddr, uint16_t aPort,
+         const uint8_t* aData, uint32_t aLength) {
+        Http3Session* self = (Http3Session*)aContext;
 
-    uint32_t written = 0;
-    NetAddr addr;
-    if (NS_FAILED(StringAndPortToNetAddr(remoteAddrStr, port, &addr))) {
-      continue;
-    }
-    nsresult rv = socket->SendWithAddress(&addr, packetToSend, &written);
+        uint32_t written = 0;
+        NetAddr addr;
+        if (NS_FAILED(RawBytesToNetAddr(aFamily, aAddr, aPort, &addr))) {
+          return NS_OK;
+        }
 
-    LOG(("Http3Session::ProcessOutput sending packet rv=%d osError=%d",
-         static_cast<int32_t>(rv), NS_FAILED(rv) ? PR_GetOSError() : 0));
-    if (NS_FAILED(rv) && (rv != NS_BASE_STREAM_WOULD_BLOCK)) {
-      mSocketError = rv;
-      // If there was an error that is not NS_BASE_STREAM_WOULD_BLOCK
-      // return from here. We do not need to set a timer, because we
-      // will close the connection.
-      return rv;
-    }
-    mTotalBytesWritten += packetToSend.Length();
-    mLastWriteTime = PR_IntervalNow();
-  }
+        LOG3(
+            ("Http3Session::ProcessOutput sending packet with %u bytes to %s "
+             "port=%d [this=%p].",
+             aLength, addr.ToString().get(), aPort, self));
 
-  return NS_OK;
+        nsresult rv =
+            self->mSocket->SendWithAddress(&addr, aData, aLength, &written);
+
+        LOG(("Http3Session::ProcessOutput sending packet rv=%d osError=%d",
+             static_cast<int32_t>(rv), NS_FAILED(rv) ? PR_GetOSError() : 0));
+        if (NS_FAILED(rv) && (rv != NS_BASE_STREAM_WOULD_BLOCK)) {
+          self->mSocketError = rv;
+          // If there was an error that is not NS_BASE_STREAM_WOULD_BLOCK
+          // return from here. We do not need to set a timer, because we
+          // will close the connection.
+          return rv;
+        }
+        self->mTotalBytesWritten += aLength;
+        self->mLastWriteTime = PR_IntervalNow();
+        return NS_OK;
+      },
+      [](void* aContext, uint64_t timeout) {
+        Http3Session* self = (Http3Session*)aContext;
+        self->SetupTimer(timeout);
+      });
+  mSocket = nullptr;
+  return rv;
 }
 
 // This is only called when timer expires.
@@ -933,7 +945,7 @@ nsresult Http3Session::ProcessOutputAndEvents(nsIUDPSocket* socket) {
 
   mTimerShouldTrigger = TimeStamp();
 
-  nsresult rv = ProcessOutput(socket);
+  nsresult rv = SendData(socket);
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -948,7 +960,8 @@ void Http3Session::SetupTimer(uint64_t aTimeout) {
     return;
   }
 
-  LOG(("Http3Session::SetupTimer to %" PRIu64 "ms [this=%p].", aTimeout, this));
+  LOG3(
+      ("Http3Session::SetupTimer to %" PRIu64 "ms [this=%p].", aTimeout, this));
 
   // Remember the time when the timer should trigger.
   mTimerShouldTrigger =
@@ -1534,6 +1547,11 @@ nsresult Http3Session::SendData(nsIUDPSocket* socket) {
     rv = NS_OK;
   }
 
+  // Let the connection know we sent some app data successfully.
+  if (stream && NS_SUCCEEDED(rv)) {
+    mUdpConn->NotifyDataWrite();
+  }
+
   return rv;
 }
 
@@ -1589,7 +1607,7 @@ nsresult Http3Session::RecvData(nsIUDPSocket* socket) {
     return rv;
   }
 
-  rv = ProcessOutput(socket);
+  rv = SendData(socket);
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -2151,6 +2169,7 @@ void Http3Session::Authenticated(int32_t aError) {
     NS_DispatchToCurrentThread(
         NewRunnableMethod("net::HttpConnectionUDP::OnQuicTimeoutExpired",
                           mUdpConn, &HttpConnectionUDP::OnQuicTimeoutExpired));
+    mUdpConn->ChangeConnectionState(ConnectionState::TRANSFERING);
   }
 }
 
@@ -2489,7 +2508,8 @@ uint64_t Http3Session::MaxDatagramSize(uint64_t aSessionId) {
   return size;
 }
 
-void Http3Session::SetSendOrder(Http3StreamBase* aStream, int64_t aSendOrder) {
+void Http3Session::SetSendOrder(Http3StreamBase* aStream,
+                                Maybe<int64_t> aSendOrder) {
   if (!IsClosing()) {
     nsresult rv = mHttp3Connection->WebTransportSetSendOrder(
         aStream->StreamId(), aSendOrder);

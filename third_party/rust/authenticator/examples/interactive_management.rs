@@ -533,7 +533,7 @@ fn handle_bio_enrollments(
             ))
             .expect("Failed to send GetEnrollments request.");
         }
-        Some(BioEnrollmentResult::DeleteSucess(info)) => {
+        Some(BioEnrollmentResult::DeleteSuccess(info)) => {
             *auth_info = Some(info.clone());
             if BioOperation::parse_possible_operations(&info).contains(&BioOperation::List) {
                 tx.send(InteractiveRequest::BioEnrollment(
@@ -726,6 +726,9 @@ fn interactive_status_callback(status_rx: Receiver<StatusUpdate>) {
             }
             Ok(StatusUpdate::PinUvError(e)) => {
                 panic!("Unexpected error: {:?}", e)
+            }
+            Ok(StatusUpdate::SelectResultNotice(_, _)) => {
+                panic!("Unexpected select device notice")
             }
             Err(RecvError) => {
                 println!("STATUS: end");

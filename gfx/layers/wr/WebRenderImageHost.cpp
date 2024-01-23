@@ -13,6 +13,7 @@
 #include "mozilla/layers/AsyncImagePipelineManager.h"
 #include "mozilla/layers/CompositorThread.h"
 #include "mozilla/layers/CompositorVsyncScheduler.h"  // for CompositorVsyncScheduler
+#include "mozilla/layers/KnowsCompositor.h"
 #include "mozilla/layers/RemoteTextureHostWrapper.h"
 #include "mozilla/layers/RemoteTextureMap.h"
 #include "mozilla/layers/WebRenderBridgeParent.h"
@@ -23,6 +24,11 @@
 #include "nsPrintfCString.h"  // for nsPrintfCString
 #include "nsString.h"         // for nsAutoCString
 
+#if XP_WIN
+#  include "mozilla/layers/GpuProcessD3D11TextureMap.h"
+#  include "mozilla/layers/TextureHostWrapperD3D11.h"
+#endif
+
 namespace mozilla {
 
 using namespace gfx;
@@ -32,9 +38,7 @@ namespace layers {
 class ISurfaceAllocator;
 
 WebRenderImageHost::WebRenderImageHost(const TextureInfo& aTextureInfo)
-    : CompositableHost(aTextureInfo),
-      ImageComposite(),
-      mCurrentAsyncImageManager(nullptr) {}
+    : CompositableHost(aTextureInfo), mCurrentAsyncImageManager(nullptr) {}
 
 WebRenderImageHost::~WebRenderImageHost() {
   MOZ_ASSERT(mPendingRemoteTextureWrappers.empty());
@@ -139,7 +143,13 @@ void WebRenderImageHost::PushPendingRemoteTexture(
       // Clear when RemoteTextureOwner is different.
       mPendingRemoteTextureWrappers.clear();
       mWaitingReadyCallback = false;
+      mWaitForRemoteTextureOwner = true;
     }
+  }
+
+  // Check if waiting for remote texture owner is allowed.
+  if (!(aFlags & TextureFlags::WAIT_FOR_REMOTE_TEXTURE_OWNER)) {
+    mWaitForRemoteTextureOwner = false;
   }
 
   RefPtr<TextureHost> texture =
@@ -155,12 +165,8 @@ void WebRenderImageHost::UseRemoteTexture() {
     return;
   }
 
-  const bool useAsyncRemoteTexture =
-      gfx::gfxVars::UseCanvasRenderThread() &&
-      StaticPrefs::webgl_out_of_process_async_present() &&
-      !gfx::gfxVars::WebglOopAsyncPresentForceSync();
-  const bool useReadyCallback = GetAsyncRef() && useAsyncRemoteTexture &&
-                                mRemoteTextureOwnerIdOfPushCallback.isNothing();
+  const bool useReadyCallback =
+      GetAsyncRef() && mRemoteTextureOwnerIdOfPushCallback.isNothing();
   CompositableTextureHostRef texture;
 
   if (useReadyCallback) {
@@ -200,9 +206,8 @@ void WebRenderImageHost::UseRemoteTexture() {
     while (!mPendingRemoteTextureWrappers.empty()) {
       auto* wrapper =
           mPendingRemoteTextureWrappers.front()->AsRemoteTextureHostWrapper();
-      mWaitingReadyCallback =
-          RemoteTextureMap::Get()->GetRemoteTextureForDisplayList(
-              wrapper, readyCallback);
+      mWaitingReadyCallback = RemoteTextureMap::Get()->GetRemoteTexture(
+          wrapper, readyCallback, mWaitForRemoteTextureOwner);
       MOZ_ASSERT_IF(mWaitingReadyCallback, !wrapper->IsReadyForRendering());
       if (!wrapper->IsReadyForRendering()) {
         break;
@@ -217,12 +222,14 @@ void WebRenderImageHost::UseRemoteTexture() {
     MOZ_ASSERT(mPendingRemoteTextureWrappers.empty());
 
     std::function<void(const RemoteTextureInfo&)> function;
-    RemoteTextureMap::Get()->GetRemoteTextureForDisplayList(
-        wrapper, std::move(function));
+    RemoteTextureMap::Get()->GetRemoteTexture(wrapper, std::move(function),
+                                              mWaitForRemoteTextureOwner);
+    mWaitForRemoteTextureOwner = false;
   }
 
   if (!texture ||
-      !texture->AsRemoteTextureHostWrapper()->IsReadyForRendering()) {
+      (GetAsyncRef() &&
+       !texture->AsRemoteTextureHostWrapper()->IsReadyForRendering())) {
     return;
   }
 
@@ -314,6 +321,8 @@ void WebRenderImageHost::AppendImageCompositeNotification(
 
 TextureHost* WebRenderImageHost::GetAsTextureHostForComposite(
     AsyncImagePipelineManager* aAsyncImageManager) {
+  MOZ_ASSERT(aAsyncImageManager);
+
   if (mCurrentTextureHost &&
       mCurrentTextureHost->AsRemoteTextureHostWrapper()) {
     return mCurrentTextureHost;
@@ -336,7 +345,31 @@ TextureHost* WebRenderImageHost::GetAsTextureHostForComposite(
   }
 
   const TimedImage* img = GetImage(imageIndex);
-  SetCurrentTextureHost(img->mTextureHost);
+
+  RefPtr<TextureHost> texture = img->mTextureHost.get();
+#if XP_WIN
+  // Convert YUV BufferTextureHost to TextureHostWrapperD3D11 if possible
+  if (texture->AsBufferTextureHost()) {
+    auto identifier = aAsyncImageManager->GetTextureFactoryIdentifier();
+    const bool convertToNV12 =
+        StaticPrefs::gfx_video_convert_yuv_to_nv12_image_host_win() &&
+        identifier.mSupportsD3D11NV12 &&
+        KnowsCompositor::SupportsD3D11(identifier) &&
+        texture->GetFormat() == gfx::SurfaceFormat::YUV;
+    if (convertToNV12) {
+      if (!mTextureAllocator) {
+        mTextureAllocator = new TextureWrapperD3D11Allocator();
+      }
+      RefPtr<TextureHost> textureWrapper =
+          TextureHostWrapperD3D11::CreateFromBufferTexture(mTextureAllocator,
+                                                           texture);
+      if (textureWrapper) {
+        texture = textureWrapper;
+      }
+    }
+  }
+#endif
+  SetCurrentTextureHost(texture);
 
   if (mCurrentAsyncImageManager->GetCompositionTime()) {
     // We are in a composition. Send ImageCompositeNotifications.

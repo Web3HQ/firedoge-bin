@@ -28,6 +28,16 @@ WINDOWS_WORKER_TYPES = {
         "virtual-with-gpu": "t-win10-64-gpu-s",
         "hardware": "t-win10-64-ref-hw",
     },
+    "windows11-64-2009-hw-ref-shippable": {
+        "virtual": "win11-64-2009-hw-ref",
+        "virtual-with-gpu": "win11-64-2009-hw-ref",
+        "hardware": "win11-64-2009-hw-ref",
+    },
+    "windows11-64-2009-hw-ref": {
+        "virtual": "win11-64-2009-hw-ref",
+        "virtual-with-gpu": "win11-64-2009-hw-ref",
+        "hardware": "win11-64-2009-hw-ref",
+    },
     "windows10-64-2009-qr": {
         "virtual": "win10-64-2009",
         "virtual-with-gpu": "win10-64-2009-gpu",
@@ -125,6 +135,10 @@ def set_worker_type(config, tasks):
                     win_worker_type_platform = WINDOWS_WORKER_TYPES[
                         "windows10-64-ref-hw-2017"
                     ]
+                elif test_platform.startswith("windows11-64-2009-hw-ref"):
+                    win_worker_type_platform = WINDOWS_WORKER_TYPES[
+                        "windows11-64-2009-hw-ref"
+                    ]
                 else:
                     win_worker_type_platform = WINDOWS_WORKER_TYPES["windows10-64"]
             else:
@@ -140,16 +154,16 @@ def set_worker_type(config, tasks):
 
             # now we have the right platform set the worker type accordingly
             task["worker-type"] = win_worker_type_platform[task["virtualization"]]
-        elif test_platform.startswith("android-hw-g5"):
-            if task["suite"] != "raptor":
-                task["worker-type"] = "t-bitbar-gw-unit-g5"
-            else:
-                task["worker-type"] = "t-bitbar-gw-perf-g5"
         elif test_platform.startswith("android-hw-p5"):
             if task["suite"] != "raptor":
                 task["worker-type"] = "t-bitbar-gw-unit-p5"
             else:
                 task["worker-type"] = "t-bitbar-gw-perf-p5"
+        elif test_platform.startswith("android-hw-p6"):
+            if task["suite"] != "raptor":
+                task["worker-type"] = "t-bitbar-gw-unit-p6"
+            else:
+                task["worker-type"] = "t-bitbar-gw-perf-p6"
         elif test_platform.startswith("android-hw-a51"):
             if task["suite"] != "raptor":
                 task["worker-type"] = "t-bitbar-gw-unit-a51"

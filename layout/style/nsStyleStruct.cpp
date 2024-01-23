@@ -193,7 +193,7 @@ void Gecko_LoadData_Drop(StyleLoadData* aData) {
     // We want to dispatch this async to prevent reentrancy issues, as
     // imgRequestProxy going away can destroy documents, etc, see bug 1677555.
     auto task = MakeRefPtr<StyleImageRequestCleanupTask>(*aData);
-    SchedulerGroup::Dispatch(TaskCategory::Other, task.forget());
+    SchedulerGroup::Dispatch(task.forget());
   }
 
   // URIs are safe to refcount from any thread.
@@ -211,6 +211,7 @@ nsStyleFont::nsStyleFont(const nsStyleFont& aSrc)
       mFontSizeKeyword(aSrc.mFontSizeKeyword),
       mFontPalette(aSrc.mFontPalette),
       mMathDepth(aSrc.mMathDepth),
+      mLineHeight(aSrc.mLineHeight),
       mMathVariant(aSrc.mMathVariant),
       mMathStyle(aSrc.mMathStyle),
       mMinFontSizeRatio(aSrc.mMinFontSizeRatio),
@@ -239,6 +240,7 @@ nsStyleFont::nsStyleFont(const Document& aDocument)
       mFontSizeKeyword(StyleFontSizeKeyword::Medium),
       mFontPalette(StyleFontPalette::Normal()),
       mMathDepth(0),
+      mLineHeight(StyleLineHeight::Normal()),
       mMathVariant(StyleMathVariant::None),
       mMathStyle(StyleMathStyle::Normal),
       mXTextScale(InitialTextScale(aDocument)),
@@ -265,7 +267,8 @@ nsChangeHint nsStyleFont::CalcDifference(const nsStyleFont& aNewData) const {
       mExplicitLanguage != aNewData.mExplicitLanguage ||
       mMathVariant != aNewData.mMathVariant ||
       mMathStyle != aNewData.mMathStyle ||
-      mMinFontSizeRatio != aNewData.mMinFontSizeRatio) {
+      mMinFontSizeRatio != aNewData.mMinFontSizeRatio ||
+      mLineHeight != aNewData.mLineHeight) {
     return NS_STYLE_HINT_REFLOW;
   }
 
@@ -625,8 +628,8 @@ void nsStyleList::TriggerImageLoads(Document& aDocument,
       aDocument, aOldStyle ? &aOldStyle->mListStyleImage : nullptr);
 }
 
-nsChangeHint nsStyleList::CalcDifference(
-    const nsStyleList& aNewData, const nsStyleDisplay& aOldDisplay) const {
+nsChangeHint nsStyleList::CalcDifference(const nsStyleList& aNewData,
+                                         const ComputedStyle& aOldStyle) const {
   // If the quotes implementation is ever going to change we might not need
   // a framechange here and a reflow should be sufficient.  See bug 35768.
   if (mQuotes != aNewData.mQuotes) {
@@ -634,25 +637,18 @@ nsChangeHint nsStyleList::CalcDifference(
   }
   nsChangeHint hint = nsChangeHint(0);
   // Only elements whose display value is list-item can be affected by
-  // list-style-position and list-style-type. If the old display struct
-  // doesn't exist, assume it isn't affected by display value at all,
-  // and thus these properties should not affect it either. This also
-  // relies on that when the display value changes from something else
-  // to list-item, that change itself would cause ReconstructFrame.
-  if (aOldDisplay.IsListItem()) {
-    if (mListStylePosition != aNewData.mListStylePosition ||
-        mCounterStyle != aNewData.mCounterStyle ||
-        mListStyleImage != aNewData.mListStyleImage) {
+  // list-style-{position,type,image}. This also relies on that when the display
+  // value changes from something else to list-item, that change itself would
+  // cause ReconstructFrame.
+  if (mListStylePosition != aNewData.mListStylePosition ||
+      mCounterStyle != aNewData.mCounterStyle ||
+      mListStyleImage != aNewData.mListStyleImage) {
+    if (aOldStyle.StyleDisplay()->IsListItem()) {
       return nsChangeHint_ReconstructFrame;
     }
-  } else if (mListStylePosition != aNewData.mListStylePosition ||
-             mCounterStyle != aNewData.mCounterStyle) {
+    // list-style-image may affect nsImageFrame for XUL elements, but that is
+    // dealt with explicitly in nsImageFrame::DidSetComputedStyle.
     hint = nsChangeHint_NeutralChange;
-  }
-  // list-style-image and -moz-image-region may affect some XUL elements
-  // regardless of display value, so we still need to check them.
-  if (mListStyleImage != aNewData.mListStyleImage) {
-    return NS_STYLE_HINT_REFLOW;
   }
   return hint;
 }
@@ -1149,8 +1145,7 @@ static bool IsAutonessEqual(const StyleRect<LengthPercentageOrAuto>& aSides1,
 }
 
 nsChangeHint nsStylePosition::CalcDifference(
-    const nsStylePosition& aNewData,
-    const nsStyleVisibility& aOldStyleVisibility) const {
+    const nsStylePosition& aNewData, const ComputedStyle& aOldStyle) const {
   if (mGridTemplateColumns.IsMasonry() !=
           aNewData.mGridTemplateColumns.IsMasonry() ||
       mGridTemplateRows.IsMasonry() != aNewData.mGridTemplateRows.IsMasonry()) {
@@ -1268,17 +1263,18 @@ nsChangeHint nsStylePosition::CalcDifference(
                        mMinHeight != aNewData.mMinHeight ||
                        mMaxHeight != aNewData.mMaxHeight;
 
-  // It doesn't matter whether we're looking at the old or new visibility
-  // struct, since a change between vertical and horizontal writing-mode will
-  // cause a reframe.
-  bool isVertical = aOldStyleVisibility.mWritingMode !=
-                    StyleWritingModeProperty::HorizontalTb;
-  if (isVertical ? widthChanged : heightChanged) {
-    hint |= nsChangeHint_ReflowHintsForBSizeChange;
-  }
-
-  if (isVertical ? heightChanged : widthChanged) {
-    hint |= nsChangeHint_ReflowHintsForISizeChange;
+  if (widthChanged || heightChanged) {
+    // It doesn't matter whether we're looking at the old or new visibility
+    // struct, since a change between vertical and horizontal writing-mode will
+    // cause a reframe.
+    const bool isVertical = aOldStyle.StyleVisibility()->mWritingMode !=
+                            StyleWritingModeProperty::HorizontalTb;
+    if (isVertical ? widthChanged : heightChanged) {
+      hint |= nsChangeHint_ReflowHintsForBSizeChange;
+    }
+    if (isVertical ? heightChanged : widthChanged) {
+      hint |= nsChangeHint_ReflowHintsForISizeChange;
+    }
   }
 
   if (mAspectRatio != aNewData.mAspectRatio) {
@@ -1437,58 +1433,6 @@ bool StyleGradient::IsOpaque() const {
   return GradientItemsAreOpaque(AsConic().items.AsSpan());
 }
 
-static int32_t ConvertToPixelCoord(const StyleNumberOrPercentage& aCoord,
-                                   int32_t aPercentScale) {
-  double pixelValue;
-  if (aCoord.IsNumber()) {
-    pixelValue = aCoord.AsNumber();
-  } else {
-    MOZ_ASSERT(aCoord.IsPercentage());
-    pixelValue = aCoord.AsPercentage()._0 * aPercentScale;
-  }
-  MOZ_ASSERT(pixelValue >= 0, "we ensured non-negative while parsing");
-  pixelValue = std::min(pixelValue, double(INT32_MAX));  // avoid overflow
-  return NS_lround(pixelValue);
-}
-
-template <>
-Maybe<StyleImage::ActualCropRect> StyleImage::ComputeActualCropRect() const {
-  MOZ_ASSERT(IsRect(),
-             "This function is designed to be used only image-rect images");
-
-  imgRequestProxy* req = GetImageRequest();
-  if (!req) {
-    return Nothing();
-  }
-
-  nsCOMPtr<imgIContainer> imageContainer;
-  req->GetImage(getter_AddRefs(imageContainer));
-  if (!imageContainer) {
-    return Nothing();
-  }
-
-  nsIntSize imageSize;
-  imageContainer->GetWidth(&imageSize.width);
-  imageContainer->GetHeight(&imageSize.height);
-  if (imageSize.width <= 0 || imageSize.height <= 0) {
-    return Nothing();
-  }
-
-  const auto& rect = AsRect();
-
-  int32_t left = ConvertToPixelCoord(rect->left, imageSize.width);
-  int32_t top = ConvertToPixelCoord(rect->top, imageSize.height);
-  int32_t right = ConvertToPixelCoord(rect->right, imageSize.width);
-  int32_t bottom = ConvertToPixelCoord(rect->bottom, imageSize.height);
-
-  // IntersectRect() returns an empty rect if we get negative width or height
-  nsIntRect cropRect(left, top, right - left, bottom - top);
-  nsIntRect imageRect(nsIntPoint(0, 0), imageSize);
-  auto finalRect = imageRect.Intersect(cropRect);
-  bool isEntireImage = finalRect.IsEqualInterior(imageRect);
-  return Some(ActualCropRect{finalRect, isEntireImage});
-}
-
 template <>
 bool StyleImage::IsOpaque() const {
   if (IsImageSet()) {
@@ -1514,19 +1458,7 @@ bool StyleImage::IsOpaque() const {
   GetImageRequest()->GetImage(getter_AddRefs(imageContainer));
   MOZ_ASSERT(imageContainer, "IsComplete() said image container is ready");
 
-  // Check if the crop region of the image is opaque.
-  if (imageContainer->WillDrawOpaqueNow()) {
-    if (!IsRect()) {
-      return true;
-    }
-
-    // Must make sure if the crop rect contains at least a pixel.
-    // XXX Is this optimization worth it? Maybe I should just return false.
-    auto croprect = ComputeActualCropRect();
-    return croprect && !croprect->mRect.IsEmpty();
-  }
-
-  return false;
+  return imageContainer->WillDrawOpaqueNow();
 }
 
 template <>
@@ -1537,8 +1469,7 @@ bool StyleImage::IsComplete() const {
     case Tag::Gradient:
     case Tag::Element:
       return true;
-    case Tag::Url:
-    case Tag::Rect: {
+    case Tag::Url: {
       if (!IsResolved()) {
         return false;
       }
@@ -1569,8 +1500,7 @@ bool StyleImage::IsSizeAvailable() const {
     case Tag::Gradient:
     case Tag::Element:
       return true;
-    case Tag::Url:
-    case Tag::Rect: {
+    case Tag::Url: {
       imgRequestProxy* req = GetImageRequest();
       if (!req) {
         return false;
@@ -1603,7 +1533,7 @@ void StyleImage::ResolveImage(Document& aDoc, const StyleImage* aOld) {
 }
 
 template <>
-ImageResolution StyleImage::GetResolution() const {
+ImageResolution StyleImage::GetResolution(const ComputedStyle& aStyle) const {
   ImageResolution resolution;
   if (imgRequestProxy* request = GetImageRequest()) {
     RefPtr<imgIContainer> image;
@@ -1620,28 +1550,10 @@ ImageResolution StyleImage::GetResolution() const {
       resolution.ScaleBy(r);
     }
   }
+  if (aStyle.EffectiveZoom() != StyleZoom::ONE) {
+    resolution.ScaleBy(1.0f / aStyle.EffectiveZoom().ToFloat());
+  }
   return resolution;
-}
-
-template <>
-Maybe<CSSIntSize> StyleImage::GetIntrinsicSize() const {
-  imgRequestProxy* request = GetImageRequest();
-  if (!request) {
-    return Nothing();
-  }
-  RefPtr<imgIContainer> image;
-  request->GetImage(getter_AddRefs(image));
-  if (!image) {
-    return Nothing();
-  }
-  // FIXME(emilio): Seems like this should be smarter about unspecified width /
-  // height, aspect ratio, etc, but this preserves the current behavior of our
-  // only caller for now...
-  int32_t w = 0, h = 0;
-  image->GetWidth(&w);
-  image->GetHeight(&h);
-  GetResolution().ApplyTo(w, h);
-  return Some(CSSIntSize{w, h});
 }
 
 // --------------------
@@ -1937,8 +1849,6 @@ nsStyleImageLayers::Layer::~Layer() = default;
 
 void nsStyleImageLayers::Layer::Initialize(
     nsStyleImageLayers::LayerType aType) {
-  mRepeat.SetInitialValues();
-
   mPosition = Position::FromPercentage(0.);
 
   if (aType == LayerType::Background) {
@@ -2107,37 +2017,13 @@ bool nsStyleBackground::IsTransparent(const ComputedStyle* aStyle) const {
 
 StyleTransition::StyleTransition(const StyleTransition& aCopy) = default;
 
-void StyleTransition::SetInitialValues() {
-  mTimingFunction =
-      StyleComputedTimingFunction::Keyword(StyleTimingKeyword::Ease);
-  mDuration = {0.0};
-  mDelay = {0.0};
-  mProperty = eCSSPropertyExtra_all_properties;
-}
-
 bool StyleTransition::operator==(const StyleTransition& aOther) const {
   return mTimingFunction == aOther.mTimingFunction &&
          mDuration == aOther.mDuration && mDelay == aOther.mDelay &&
-         mProperty == aOther.mProperty &&
-         (mProperty != eCSSProperty_UNKNOWN ||
-          mUnknownProperty == aOther.mUnknownProperty);
+         mProperty == aOther.mProperty;
 }
 
 StyleAnimation::StyleAnimation(const StyleAnimation& aCopy) = default;
-
-void StyleAnimation::SetInitialValues() {
-  mTimingFunction =
-      StyleComputedTimingFunction::Keyword(StyleTimingKeyword::Ease);
-  mDuration = {0.0};
-  mDelay = {0.0};
-  mName = nsGkAtoms::_empty;
-  mDirection = dom::PlaybackDirection::Normal;
-  mFillMode = dom::FillMode::None;
-  mPlayState = StyleAnimationPlayState::Running;
-  mIterationCount = {1.0f};
-  mComposition = dom::CompositeOperation::Replace;
-  mTimeline = StyleAnimationTimeline::Auto();
-}
 
 bool StyleAnimation::operator==(const StyleAnimation& aOther) const {
   return mTimingFunction == aOther.mTimingFunction &&
@@ -2361,22 +2247,10 @@ static bool AppearanceValueAffectsFrames(StyleAppearance aAppearance,
 }
 
 nsChangeHint nsStyleDisplay::CalcDifference(
-    const nsStyleDisplay& aNewData, const nsStylePosition& aOldPosition) const {
-  if (mDisplay != aNewData.mDisplay || mContain != aNewData.mContain ||
+    const nsStyleDisplay& aNewData, const ComputedStyle& aOldStyle) const {
+  if (mDisplay != aNewData.mDisplay ||
       (mFloat == StyleFloat::None) != (aNewData.mFloat == StyleFloat::None) ||
       mTopLayer != aNewData.mTopLayer || mResize != aNewData.mResize) {
-    return nsChangeHint_ReconstructFrame;
-  }
-
-  // `content-visibility` can impact whether or not this frame has containment,
-  // so we reconstruct the frame like we do above.
-  // TODO: We should avoid reconstruction here, per bug 1765615.
-  if (mContentVisibility != aNewData.mContentVisibility) {
-    return nsChangeHint_ReconstructFrame;
-  }
-
-  // Same issue as above for now.
-  if (mContainerType != aNewData.mContainerType) {
     return nsChangeHint_ReconstructFrame;
   }
 
@@ -2393,6 +2267,21 @@ nsChangeHint nsStyleDisplay::CalcDifference(
   }
 
   auto hint = nsChangeHint(0);
+  const auto containmentDiff =
+      mEffectiveContainment ^ aNewData.mEffectiveContainment;
+  if (containmentDiff) {
+    if (containmentDiff & StyleContain::STYLE) {
+      // Style containment affects counters so we need to re-frame.
+      return nsChangeHint_ReconstructFrame;
+    }
+    if (containmentDiff & (StyleContain::PAINT | StyleContain::LAYOUT)) {
+      // Paint and layout containment boxes are absolutely/fixed positioning
+      // containers and establishes an independent formatting context.
+      hint |= nsChangeHint_UpdateContainingBlock | nsChangeHint_UpdateBFC;
+    }
+    // The other container types only need a reflow.
+    hint |= nsChangeHint_AllReflowHints | nsChangeHint_RepaintFrame;
+  }
   if (mPosition != aNewData.mPosition) {
     if (IsAbsolutelyPositionedStyle() ||
         aNewData.IsAbsolutelyPositionedStyle()) {
@@ -2434,8 +2323,11 @@ nsChangeHint nsStyleDisplay::CalcDifference(
     const bool isScrollable = IsScrollableOverflow();
     if (isScrollable != aNewData.IsScrollableOverflow()) {
       // We may need to construct or destroy a scroll frame as a result of this
-      // change.
-      hint |= nsChangeHint_ScrollbarChange;
+      // change. If we don't, we still need to update our overflow in some cases
+      // (like svg:foreignObject), which ignore the scrollable-ness of our
+      // overflow.
+      hint |= nsChangeHint_ScrollbarChange | nsChangeHint_UpdateOverflow |
+              nsChangeHint_RepaintFrame;
     } else if (isScrollable) {
       if (ScrollbarGenerationChanged(*this, aNewData)) {
         // We might need to reframe in the case of hidden -> non-hidden case
@@ -2458,12 +2350,13 @@ nsChangeHint nsStyleDisplay::CalcDifference(
   }
 
   if (mScrollbarGutter != aNewData.mScrollbarGutter) {
-    if (IsScrollableOverflow()) {
+    if (IsScrollableOverflow() || aOldStyle.IsRootElementStyle()) {
       // Changing scrollbar-gutter affects available inline-size of a inner
-      // scrolled frame, so we need a reflow for scrollbar change.
+      // scrolled frame, so we need a reflow for scrollbar change. Note that the
+      // root is always scrollable in HTML, even if its style doesn't say so.
       hint |= nsChangeHint_ReflowHintsForScrollbarChange;
     } else {
-      // scrollbar-gutter only applies to the scroll containers.
+      // scrollbar-gutter only applies to scroll containers.
       hint |= nsChangeHint_NeutralChange;
     }
   }
@@ -2593,7 +2486,7 @@ nsChangeHint nsStyleDisplay::CalcDifference(
     // since a change on whether we need a hypothetical position would trigger
     // reflow anyway.
     if (IsAbsolutelyPositionedStyle() &&
-        aOldPosition.NeedsHypotheticalPositionIfAbsPos()) {
+        aOldStyle.StylePosition()->NeedsHypotheticalPositionIfAbsPos()) {
       hint |=
           nsChangeHint_NeedReflow | nsChangeHint_ReflowChangesSizeOrPosition;
     } else {
@@ -2621,8 +2514,13 @@ nsChangeHint nsStyleDisplay::CalcDifference(
   // TODO(emilio): Figure out change hints for container-name, maybe it needs to
   // be handled by the style system as a special-case (since it changes
   // container-query selection on descendants).
+  // container-type / contain / content-visibility are handled by the
+  // mEffectiveContainment check.
   if (!hint && (mWillChange != aNewData.mWillChange ||
                 mOverflowAnchor != aNewData.mOverflowAnchor ||
+                mContentVisibility != aNewData.mContentVisibility ||
+                mContainerType != aNewData.mContainerType ||
+                mContain != aNewData.mContain ||
                 mContainerName != aNewData.mContainerName)) {
     hint |= nsChangeHint_NeutralChange;
   }
@@ -2823,8 +2721,7 @@ void nsStyleContent::TriggerImageLoads(Document& aDoc,
 //
 
 nsStyleTextReset::nsStyleTextReset()
-    : mTextOverflow(),
-      mTextDecorationLine(StyleTextDecorationLine::NONE),
+    : mTextDecorationLine(StyleTextDecorationLine::NONE),
       mTextDecorationStyle(StyleTextDecorationStyle::Solid),
       mUnicodeBidi(StyleUnicodeBidi::Normal),
       mInitialLetterSink(0),
@@ -2911,8 +2808,6 @@ nsStyleText::nsStyleText(const Document& aDocument)
       mTabSize(StyleNonNegativeLengthOrNumber::Number(8.f)),
       mWordSpacing(LengthPercentage::Zero()),
       mLetterSpacing({0.}),
-      mLineHeight(StyleLineHeight::Normal()),
-      mTextIndent(LengthPercentage::Zero()),
       mTextUnderlineOffset(LengthPercentageOrAuto::Auto()),
       mTextDecorationSkipInk(StyleTextDecorationSkipInk::Auto),
       mTextUnderlinePosition(StyleTextUnderlinePosition::AUTO),
@@ -2951,7 +2846,6 @@ nsStyleText::nsStyleText(const nsStyleText& aSource)
       mTabSize(aSource.mTabSize),
       mWordSpacing(aSource.mWordSpacing),
       mLetterSpacing(aSource.mLetterSpacing),
-      mLineHeight(aSource.mLineHeight),
       mTextIndent(aSource.mTextIndent),
       mTextUnderlineOffset(aSource.mTextUnderlineOffset),
       mTextDecorationSkipInk(aSource.mTextDecorationSkipInk),
@@ -2960,7 +2854,8 @@ nsStyleText::nsStyleText(const nsStyleText& aSource)
       mTextShadow(aSource.mTextShadow),
       mTextEmphasisStyle(aSource.mTextEmphasisStyle),
       mHyphenateCharacter(aSource.mHyphenateCharacter),
-      mWebkitTextSecurity(aSource.mWebkitTextSecurity) {
+      mWebkitTextSecurity(aSource.mWebkitTextSecurity),
+      mTextWrap(aSource.mTextWrap) {
   MOZ_COUNT_CTOR(nsStyleText);
 }
 
@@ -2988,13 +2883,13 @@ nsChangeHint nsStyleText::CalcDifference(const nsStyleText& aNewData) const {
       (mRubyPosition != aNewData.mRubyPosition) ||
       (mTextSizeAdjust != aNewData.mTextSizeAdjust) ||
       (mLetterSpacing != aNewData.mLetterSpacing) ||
-      (mLineHeight != aNewData.mLineHeight) ||
       (mTextIndent != aNewData.mTextIndent) ||
       (mTextJustify != aNewData.mTextJustify) ||
       (mWordSpacing != aNewData.mWordSpacing) ||
       (mTabSize != aNewData.mTabSize) ||
       (mHyphenateCharacter != aNewData.mHyphenateCharacter) ||
-      (mWebkitTextSecurity != aNewData.mWebkitTextSecurity)) {
+      (mWebkitTextSecurity != aNewData.mWebkitTextSecurity) ||
+      (mTextWrap != aNewData.mTextWrap)) {
     return NS_STYLE_HINT_REFLOW;
   }
 
@@ -3074,7 +2969,7 @@ nsStyleUI::nsStyleUI()
       mMozTheme(StyleMozTheme::Auto),
       mUserInput(StyleUserInput::Auto),
       mUserModify(StyleUserModify::ReadOnly),
-      mUserFocus(StyleUserFocus::None),
+      mUserFocus(StyleUserFocus::Normal),
       mPointerEvents(StylePointerEvents::Auto),
       mCursor{{}, StyleCursorKind::Auto},
       mAccentColor(StyleColorOrAuto::Auto()),
@@ -3171,7 +3066,7 @@ nsStyleUIReset::nsStyleUIReset()
       mMozSubtreeHiddenOnlyVisually(false),
       mIMEMode(StyleImeMode::Auto),
       mWindowDragging(StyleWindowDragging::Default),
-      mWindowShadow(StyleWindowShadow::Default),
+      mWindowShadow(StyleWindowShadow::Auto),
       mWindowOpacity(1.0),
       mMozWindowInputRegionMargin(StyleLength::Zero()),
       mWindowTransformOrigin{LengthPercentage::FromPercentage(0.5),
@@ -3205,8 +3100,6 @@ nsStyleUIReset::nsStyleUIReset()
       mViewTimelineAxisCount(1),
       mViewTimelineInsetCount(1) {
   MOZ_COUNT_CTOR(nsStyleUIReset);
-  mTransitions[0].SetInitialValues();
-  mAnimations[0].SetInitialValues();
 }
 
 nsStyleUIReset::nsStyleUIReset(const nsStyleUIReset& aSource)
@@ -3575,10 +3468,23 @@ nscoord StyleCalcLengthPercentage::Resolve(nscoord aBasis,
 
 bool nsStyleDisplay::PrecludesSizeContainmentOrContentVisibilityWithFrame(
     const nsIFrame& aFrame) const {
-  // Note: The spec for size containment says it should have no effect on
-  // non-atomic, inline-level boxes.
-  bool isNonReplacedInline = aFrame.IsFrameOfType(nsIFrame::eLineParticipant) &&
-                             !aFrame.IsFrameOfType(nsIFrame::eReplaced);
+  // The spec says that in the case of SVG, the contain property only applies
+  // to <svg> elements that have an associated CSS layout box.
+  // https://drafts.csswg.org/css-contain/#contain-property
+  // Internal SVG elements do not use the standard CSS box model, and wouldn't
+  // be affected by size containment. By disabling it we prevent them from
+  // becoming query containers for size features.
+  if (aFrame.HasAnyStateBits(NS_FRAME_SVG_LAYOUT)) {
+    return true;
+  }
+
+  // Note: The spec for size containment says it should have no effect
+  // - on non-atomic, inline-level boxes.
+  // - on internal ruby boxes.
+  // - if inner display type is table.
+  // - on internal table boxes.
+  // https://drafts.csswg.org/css-contain/#containment-size
+  bool isNonReplacedInline = aFrame.IsLineParticipant() && !aFrame.IsReplaced();
   return isNonReplacedInline || IsInternalRubyDisplayType() ||
          DisplayInside() == mozilla::StyleDisplayInside::Table ||
          IsInnerTableStyle();
@@ -3592,13 +3498,6 @@ ContainSizeAxes nsStyleDisplay::GetContainSizeAxes(
   }
 
   if (PrecludesSizeContainmentOrContentVisibilityWithFrame(aFrame)) {
-    return ContainSizeAxes(false, false);
-  }
-
-  // Internal SVG elements do not use the standard CSS box model, and wouldn't
-  // be affected by size containment. By disabling it we prevent them from
-  // becoming query containers for size features.
-  if (aFrame.HasAnyStateBits(NS_FRAME_SVG_LAYOUT)) {
     return ContainSizeAxes(false, false);
   }
 
@@ -3620,6 +3519,8 @@ StyleContentVisibility nsStyleDisplay::ContentVisibility(
   if (MOZ_LIKELY(mContentVisibility == StyleContentVisibility::Visible)) {
     return StyleContentVisibility::Visible;
   }
+  // content-visibility applies to elements for which size containment applies.
+  // https://drafts.csswg.org/css-contain/#content-visibility
   if (PrecludesSizeContainmentOrContentVisibilityWithFrame(aFrame)) {
     return StyleContentVisibility::Visible;
   }

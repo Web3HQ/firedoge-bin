@@ -124,6 +124,8 @@ class ArrayBufferObjectMaybeShared : public NativeObject {
   inline bool isDetached() const;
   inline SharedMem<uint8_t*> dataPointerEither();
 
+  inline bool pinLength(bool pin);
+
   // WebAssembly support:
   // Note: the eventual goal is to remove this from ArrayBuffer and have
   // (Shared)ArrayBuffers alias memory owned by some wasm::Memory object.
@@ -236,6 +238,11 @@ class ArrayBufferObject : public ArrayBufferObjectMaybeShared {
     // INLINE_DATA buffer is used with asm.js, it's silently rewritten into a
     // MALLOCED buffer which *can* be prepared.)
     FOR_ASMJS = 0b10'0000,
+
+    // The length is temporarily pinned, so it should not be detached. In the
+    // future, this will also prevent GrowableArrayBuffer/ResizeableArrayBuffer
+    // from modifying the length while this is set.
+    PINNED_LENGTH = 0b100'0000
   };
 
   static_assert(JS_ARRAYBUFFER_DETACHED_FLAG == DETACHED,
@@ -400,6 +407,17 @@ class ArrayBufferObject : public ArrayBufferObjectMaybeShared {
 
   bool addView(JSContext* cx, ArrayBufferViewObject* view);
 
+  // Pin or unpin the length. Returns whether pinned status was changed.
+  bool pinLength(bool pin) {
+    if (bool(flags() & PINNED_LENGTH) == pin) {
+      return false;
+    }
+    setFlags(flags() ^ PINNED_LENGTH);
+    return true;
+  }
+
+  static bool ensureNonInline(JSContext* cx, Handle<ArrayBufferObject*> buffer);
+
   // Detach this buffer from its original memory.  (This necessarily makes
   // views of this buffer unusable for modifying that original memory.)
   static void detach(JSContext* cx, Handle<ArrayBufferObject*> buffer);
@@ -452,6 +470,7 @@ class ArrayBufferObject : public ArrayBufferObjectMaybeShared {
   bool isExternal() const { return bufferKind() == EXTERNAL; }
 
   bool isDetached() const { return flags() & DETACHED; }
+  bool isLengthPinned() const { return flags() & PINNED_LENGTH; }
   bool isPreparedForAsmJS() const { return flags() & FOR_ASMJS; }
 
   // Only WASM and asm.js buffers have a non-undefined [[ArrayBufferDetachKey]].
@@ -497,7 +516,10 @@ class ArrayBufferObject : public ArrayBufferObjectMaybeShared {
   uint32_t flags() const;
   void setFlags(uint32_t flags);
 
-  void setIsDetached() { setFlags(flags() | DETACHED); }
+  void setIsDetached() {
+    MOZ_ASSERT(!(flags() & PINNED_LENGTH));
+    setFlags(flags() | DETACHED);
+  }
   void setIsPreparedForAsmJS() {
     MOZ_ASSERT(!isWasm());
     MOZ_ASSERT(!hasUserOwnedData());
@@ -514,6 +536,13 @@ class ArrayBufferObject : public ArrayBufferObjectMaybeShared {
   }
 };
 
+inline bool ArrayBufferObjectMaybeShared::pinLength(bool pin) {
+  if (is<ArrayBufferObject>()) {
+    return as<ArrayBufferObject>().pinLength(pin);
+  }
+  return false;  // Cannot pin or unpin shared array buffers.
+}
+
 // Create a buffer for a wasm memory, whose type is determined by
 // memory.indexType().
 ArrayBufferObjectMaybeShared* CreateWasmBuffer(JSContext* cx,
@@ -522,12 +551,29 @@ ArrayBufferObjectMaybeShared* CreateWasmBuffer(JSContext* cx,
 // Per-compartment table that manages the relationship between array buffers
 // and the views that use their storage.
 class InnerViewTable {
- public:
-  using ViewVector = GCVector<UnsafeBarePtr<JSObject*>, 1, ZoneAllocPolicy>;
+  // Store views in a vector such that all the tenured views come before any
+  // nursery views. Maintain the index of the first nursery view so there is an
+  // efficient way to access only the nursery views.
+  using ViewVector =
+      GCVector<UnsafeBarePtr<ArrayBufferViewObject*>, 1, ZoneAllocPolicy>;
+  struct Views {
+    ViewVector views;  // List of views with tenured views at the front.
+    size_t firstNurseryView = 0;
 
-  friend class ArrayBufferObject;
+    explicit Views(JS::Zone* zone) : views(zone) {}
+    bool empty();
+    bool hasNurseryViews();
+    bool addView(ArrayBufferViewObject* view);
 
- private:
+    bool traceWeak(JSTracer* trc, size_t startIndex = 0);
+    bool sweepAfterMinorGC(JSTracer* trc);
+
+    void check();
+  };
+
+  // For all objects sharing their storage with some other view, this maps
+  // the object to the list of such views. All entries in this map are weak.
+  //
   // This key is a raw pointer and not a WeakHeapPtr because the post-barrier
   // would hold nursery-allocated entries live unconditionally. It is a very
   // common pattern in low-level and performance-oriented JavaScript to create
@@ -536,29 +582,23 @@ class InnerViewTable {
   // regression. Thus, it is vital that nursery pointers in this map not be held
   // live. Special support is required in the minor GC, implemented in
   // sweepAfterMinorGC.
-  using Map = GCHashMap<UnsafeBarePtr<JSObject*>, ViewVector,
-                        StableCellHasher<JSObject*>, ZoneAllocPolicy>;
-
-  // For all objects sharing their storage with some other view, this maps
-  // the object to the list of such views. All entries in this map are weak.
-  Map map;
+  using ArrayBufferViewMap =
+      GCHashMap<UnsafeBarePtr<ArrayBufferObject*>, Views,
+                StableCellHasher<JSObject*>, ZoneAllocPolicy>;
+  ArrayBufferViewMap map;
 
   // List of keys from innerViews where either the source or at least one
   // target is in the nursery. The raw pointer to a JSObject is allowed here
   // because this vector is cleared after every minor collection. Users in
   // sweepAfterMinorCollection must be careful to use MaybeForwarded before
   // touching these pointers.
-  Vector<JSObject*, 0, SystemAllocPolicy> nurseryKeys;
+  Vector<ArrayBufferObject*, 0, SystemAllocPolicy> nurseryKeys;
 
   // Whether nurseryKeys is a complete list.
-  bool nurseryKeysValid;
-
-  bool addView(JSContext* cx, ArrayBufferObject* buffer, JSObject* view);
-  ViewVector* maybeViewsUnbarriered(ArrayBufferObject* obj);
-  void removeViews(ArrayBufferObject* obj);
+  bool nurseryKeysValid = true;
 
  public:
-  explicit InnerViewTable(Zone* zone) : map(zone), nurseryKeysValid(true) {}
+  explicit InnerViewTable(Zone* zone) : map(zone) {}
 
   // Remove references to dead objects in the table and update table entries
   // to reflect moved objects.
@@ -572,6 +612,13 @@ class InnerViewTable {
   }
 
   size_t sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf);
+
+ private:
+  friend class ArrayBufferObject;
+  bool addView(JSContext* cx, ArrayBufferObject* buffer,
+               ArrayBufferViewObject* view);
+  ViewVector* maybeViewsUnbarriered(ArrayBufferObject* buffer);
+  void removeViews(ArrayBufferObject* buffer);
 };
 
 template <typename Wrapper>

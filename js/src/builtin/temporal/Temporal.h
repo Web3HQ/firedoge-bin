@@ -15,6 +15,7 @@
 
 #include "builtin/temporal/TemporalRoundingMode.h"
 #include "builtin/temporal/TemporalUnit.h"
+#include "js/RootingAPI.h"
 #include "js/TypeDecls.h"
 #include "vm/NativeObject.h"
 
@@ -22,7 +23,6 @@ namespace js {
 struct ClassSpec;
 class PlainObject;
 class PropertyName;
-class JSStringBuilder;
 }  // namespace js
 
 namespace js::temporal {
@@ -225,6 +225,12 @@ class Precision final {
     MOZ_ASSERT(value < 10);
   }
 
+  bool operator==(const Precision& other) const {
+    return value_ == other.value_;
+  }
+
+  bool operator!=(const Precision& other) const { return !(*this == other); }
+
   /**
    * Return the number of fractional second digits.
    */
@@ -232,16 +238,6 @@ class Precision final {
     MOZ_ASSERT(value_ >= 0, "auto and minute precision don't have a value");
     return uint8_t(value_);
   }
-
-  /**
-   * Limit the precision to trim off any trailing zeros.
-   */
-  bool isAuto() const { return value_ == -1; }
-
-  /**
-   * Limit the precision to minutes, i.e. don't display seconds and sub-seconds.
-   */
-  bool isMinute() const { return value_ == -2; }
 
   /**
    * Limit the precision to trim off any trailing zeros.
@@ -271,13 +267,6 @@ struct SecondsStringPrecision final {
  */
 SecondsStringPrecision ToSecondsStringPrecision(TemporalUnit smallestUnit,
                                                 Precision fractionalDigitCount);
-
-/**
- * FormatSecondsStringPart ( second, millisecond, microsecond, nanosecond,
- * precision )
- */
-void FormatSecondsStringPart(JSStringBuilder& result, const PlainTime& time,
-                             Precision precision);
 
 enum class TemporalOverflow { Constrain, Reject };
 
@@ -336,16 +325,8 @@ bool ToIntegerWithTruncation(JSContext* cx, JS::Handle<JS::Value> value,
 /**
  * GetMethod ( V, P )
  */
-bool GetMethod(JSContext* cx, JS::Handle<JSObject*> object,
-               JS::Handle<PropertyName*> name,
-               JS::MutableHandle<JS::Value> result);
-
-/**
- * GetMethod ( V, P )
- */
-bool GetMethodForCall(JSContext* cx, JS::Handle<JSObject*> object,
-                      JS::Handle<PropertyName*> name,
-                      JS::MutableHandle<JS::Value> result);
+JSObject* GetMethod(JSContext* cx, JS::Handle<JSObject*> object,
+                    JS::Handle<PropertyName*> name);
 
 /**
  * SnapshotOwnProperties ( source, proto [ , excludedKeys [ , excludedValues ] ]
@@ -384,7 +365,7 @@ struct DifferenceSettings final {
  * fallbackSmallestUnit, smallestLargestDefaultUnit )
  */
 bool GetDifferenceSettings(JSContext* cx, TemporalDifference operation,
-                           JS::Handle<JSObject*> options,
+                           JS::Handle<PlainObject*> options,
                            TemporalUnitGroup unitGroup,
                            TemporalUnit smallestAllowedUnit,
                            TemporalUnit fallbackSmallestUnit,
@@ -396,7 +377,7 @@ bool GetDifferenceSettings(JSContext* cx, TemporalDifference operation,
  * fallbackSmallestUnit, smallestLargestDefaultUnit )
  */
 inline bool GetDifferenceSettings(JSContext* cx, TemporalDifference operation,
-                                  JS::Handle<JSObject*> options,
+                                  JS::Handle<PlainObject*> options,
                                   TemporalUnitGroup unitGroup,
                                   TemporalUnit fallbackSmallestUnit,
                                   TemporalUnit smallestLargestDefaultUnit,
@@ -405,6 +386,11 @@ inline bool GetDifferenceSettings(JSContext* cx, TemporalDifference operation,
                                TemporalUnit::Nanosecond, fallbackSmallestUnit,
                                smallestLargestDefaultUnit, result);
 }
+
+/**
+ * Sets |result| to `true` when array iteration is still in its initial state.
+ */
+bool IsArrayIterationSane(JSContext* cx, bool* result);
 
 } /* namespace js::temporal */
 

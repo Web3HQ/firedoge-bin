@@ -23,7 +23,7 @@ extern mozilla::LazyLogModule gWidgetLog;
 #endif /* MOZ_LOGGING */
 
 /* init methods */
-static void moz_container_class_init(MozContainerClass* klass);
+void moz_container_class_init(MozContainerClass* klass);
 static void moz_container_init(MozContainer* container);
 
 /* widget class methods */
@@ -31,7 +31,8 @@ static void moz_container_map(GtkWidget* widget);
 void moz_container_unmap(GtkWidget* widget);
 static void moz_container_size_allocate(GtkWidget* widget,
                                         GtkAllocation* allocation);
-void moz_container_realize(GtkWidget* widget);
+static void moz_container_realize(GtkWidget* widget);
+static void moz_container_unrealize(GtkWidget* widget);
 
 /* container class methods */
 static void moz_container_remove(GtkContainer* container,
@@ -72,13 +73,6 @@ GType moz_container_get_type(void) {
         (GInstanceInitFunc)moz_container_init,    /* instance_init */
         NULL,                                     /* value_table */
     };
-
-#ifdef MOZ_WAYLAND
-    if (mozilla::widget::GdkIsWaylandDisplay()) {
-      moz_container_info.class_init =
-          (GClassInitFunc)moz_container_wayland_class_init;
-    }
-#endif
 
     moz_container_type =
         g_type_register_static(GTK_TYPE_CONTAINER, "MozContainer",
@@ -122,6 +116,8 @@ static void moz_container_destroy(GtkWidget* widget) {
   if (container->destroyed) {
     return;  // The destroy signal may run multiple times.
   }
+  LOGCONTAINER(("moz_container_destroy() [%p]\n",
+                (void*)moz_container_get_nsWindow(MOZ_CONTAINER(widget))));
   container->destroyed = TRUE;
   container->data.~Data();
 }
@@ -132,10 +128,22 @@ void moz_container_class_init(MozContainerClass* klass) {
   GtkContainerClass* container_class = GTK_CONTAINER_CLASS(klass);
   GtkWidgetClass* widget_class = GTK_WIDGET_CLASS(klass);
 
-  widget_class->map = moz_container_map;
   widget_class->realize = moz_container_realize;
-  widget_class->size_allocate = moz_container_size_allocate;
+  widget_class->unrealize = moz_container_unrealize;
   widget_class->destroy = moz_container_destroy;
+
+#ifdef MOZ_WAYLAND
+  if (mozilla::widget::GdkIsWaylandDisplay()) {
+    widget_class->map = moz_container_wayland_map;
+    widget_class->size_allocate = moz_container_wayland_size_allocate;
+    widget_class->map_event = moz_container_wayland_map_event;
+  } else {
+#endif
+    widget_class->map = moz_container_map;
+    widget_class->size_allocate = moz_container_size_allocate;
+#ifdef MOZ_WAYLAND
+  }
+#endif
 
   container_class->remove = moz_container_remove;
   container_class->forall = moz_container_forall;
@@ -198,37 +206,43 @@ void moz_container_realize(GtkWidget* widget) {
 
   gtk_widget_set_realized(widget, TRUE);
 
-  if (gtk_widget_get_has_window(widget)) {
-    GdkWindowAttr attributes;
-    gint attributes_mask = GDK_WA_VISUAL | GDK_WA_X | GDK_WA_Y;
-    GtkAllocation allocation;
+  GdkWindowAttr attributes;
+  gint attributes_mask = GDK_WA_VISUAL | GDK_WA_X | GDK_WA_Y;
+  GtkAllocation allocation;
 
-    gtk_widget_get_allocation(widget, &allocation);
-    attributes.event_mask = gtk_widget_get_events(widget);
-    attributes.x = allocation.x;
-    attributes.y = allocation.y;
-    attributes.width = allocation.width;
-    attributes.height = allocation.height;
-    attributes.wclass = GDK_INPUT_OUTPUT;
-    attributes.window_type = GDK_WINDOW_CHILD;
-    MozContainer* container = MOZ_CONTAINER(widget);
-    attributes.visual =
-        container->data.force_default_visual
-            ? gdk_screen_get_system_visual(gtk_widget_get_screen(widget))
-            : gtk_widget_get_visual(widget);
+  gtk_widget_get_allocation(widget, &allocation);
+  attributes.event_mask = gtk_widget_get_events(widget);
+  attributes.x = allocation.x;
+  attributes.y = allocation.y;
+  attributes.width = allocation.width;
+  attributes.height = allocation.height;
+  attributes.wclass = GDK_INPUT_OUTPUT;
+  attributes.window_type = GDK_WINDOW_CHILD;
+  MozContainer* container = MOZ_CONTAINER(widget);
+  attributes.visual =
+      container->data.force_default_visual
+          ? gdk_screen_get_system_visual(gtk_widget_get_screen(widget))
+          : gtk_widget_get_visual(widget);
 
-    window = gdk_window_new(parent, &attributes, attributes_mask);
+  window = gdk_window_new(parent, &attributes, attributes_mask);
 
-    LOGCONTAINER(("moz_container_realize() [%p] GdkWindow %p\n",
-                  (void*)moz_container_get_nsWindow(container), (void*)window));
+  LOGCONTAINER(("moz_container_realize() [%p] GdkWindow %p\n",
+                (void*)moz_container_get_nsWindow(container), (void*)window));
 
-    gdk_window_set_user_data(window, widget);
-  } else {
-    window = parent;
-    g_object_ref(window);
-  }
-
+  gtk_widget_register_window(widget, window);
   gtk_widget_set_window(widget, window);
+}
+
+void moz_container_unrealize(GtkWidget* widget) {
+  GdkWindow* window = gtk_widget_get_window(widget);
+  LOGCONTAINER(("moz_container_unrealize() [%p] GdkWindow %p\n",
+                (void*)moz_container_get_nsWindow(MOZ_CONTAINER(widget)),
+                (void*)window));
+
+  gtk_widget_unregister_window(widget, window);
+  gtk_widget_set_window(widget, nullptr);
+  gdk_window_destroy(window);
+  gtk_widget_set_realized(widget, false);
 }
 
 void moz_container_size_allocate(GtkWidget* widget, GtkAllocation* allocation) {

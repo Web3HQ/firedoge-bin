@@ -36,6 +36,8 @@ export const initialUIState = () => ({
   editorWrappingEnabled: prefs.editorWrapping,
   javascriptEnabled: true,
   javascriptTracingLogMethod: prefs.javascriptTracingLogMethod,
+  javascriptTracingValues: prefs.javascriptTracingValues,
+  javascriptTracingOnNextInteraction: prefs.javascriptTracingOnNextInteraction,
   mutableSearchOptions: prefs.searchOptions || {
     [searchKeys.FILE_SEARCH]: {
       regexMatch: false,
@@ -56,6 +58,7 @@ export const initialUIState = () => ({
       excludePatterns: "",
     },
   },
+  projectSearchQuery: "",
   hideIgnoredSources: prefs.hideIgnoredSources,
   sourceMapIgnoreListEnabled: prefs.sourceMapIgnoreListEnabled,
 });
@@ -144,7 +147,7 @@ function update(state = initialUIState(), action) {
     }
 
     case "NAVIGATE": {
-      return { ...state, activeSearch: null, highlightedLineRange: null };
+      return { ...state, highlightedLineRange: null };
     }
 
     case "REMOVE_THREAD": {
@@ -161,6 +164,24 @@ function update(state = initialUIState(), action) {
       return { ...state, javascriptTracingLogMethod: action.value };
     }
 
+    case "TOGGLE_JAVASCRIPT_TRACING_VALUES": {
+      prefs.javascriptTracingValues = !prefs.javascriptTracingValues;
+      return {
+        ...state,
+        javascriptTracingValues: prefs.javascriptTracingValues,
+      };
+    }
+
+    case "TOGGLE_JAVASCRIPT_TRACING_ON_NEXT_INTERACTION": {
+      prefs.javascriptTracingOnNextInteraction =
+        !prefs.javascriptTracingOnNextInteraction;
+      return {
+        ...state,
+        javascriptTracingOnNextInteraction:
+          prefs.javascriptTracingOnNextInteraction,
+      };
+    }
+
     case "SET_SEARCH_OPTIONS": {
       state.mutableSearchOptions[action.searchKey] = {
         ...state.mutableSearchOptions[action.searchKey],
@@ -168,6 +189,14 @@ function update(state = initialUIState(), action) {
       };
       prefs.searchOptions = state.mutableSearchOptions;
       return { ...state };
+    }
+
+    case "SET_PROJECT_SEARCH_QUERY": {
+      if (action.query != state.projectSearchQuery) {
+        state.projectSearchQuery = action.query;
+        return { ...state };
+      }
+      return state;
     }
 
     case "HIDE_IGNORED_SOURCES": {

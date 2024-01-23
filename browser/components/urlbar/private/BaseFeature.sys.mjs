@@ -53,11 +53,13 @@ export class BaseFeature {
 
   /**
    * @returns {Array}
-   *   If the subclass's `shouldEnable` implementation depends on preferences
-   *   instead of Nimbus variables, the subclass should override this getter and
-   *   return their names in this array so that `enable()` can be called when
-   *   they change. Names should be in the same format that `UrlbarPrefs.get()`
-   *   expects.
+   *   If the subclass's `shouldEnable` implementation depends on any prefs that
+   *   are not fallbacks for Nimbus variables, the subclass should override this
+   *   getter and return their names in this array so that `update()` can be
+   *   called when they change. Names should be relative to `browser.urlbar.`.
+   *   It doesn't hurt to include prefs that are fallbacks for Nimbus variables,
+   *   it's just not necessary because `QuickSuggest` will update all features
+   *   whenever a `urlbar` Nimbus variable or its fallback pref changes.
    */
   get enablingPreferences() {
     return null;
@@ -71,6 +73,16 @@ export class BaseFeature {
    */
   get merinoProvider() {
     return "";
+  }
+
+  /**
+   * @returns {Array}
+   *   If the feature manages one or more types of suggestions served by the
+   *   Suggest Rust component, the subclass should override this getter and
+   *   return an array of the type names as defined in `suggest.udl`.
+   */
+  get rustSuggestionTypes() {
+    return [];
   }
 
   /**
@@ -121,6 +133,24 @@ export class BaseFeature {
    */
   getSuggestionTelemetryType(suggestion) {
     return this.merinoProvider;
+  }
+
+  /**
+   * If the feature manages more than one type of suggestion served by the
+   * Suggest Rust component, the subclass should override this method and return
+   * true if the given suggestion type is enabled and false otherwise. Ideally a
+   * feature manages at most one type of Rust suggestion, and in that case it's
+   * fine to rely on the default implementation here because the suggestion type
+   * will be enabled iff the feature itself is enabled.
+   *
+   * @param {string} type
+   *   A Rust suggestion type name as defined in `suggest.udl`. See also
+   *   `rustSuggestionTypes`.
+   * @returns {boolean}
+   *   Whether the suggestion type is enabled.
+   */
+  isRustSuggestionTypeEnabled(type) {
+    return true;
   }
 
   /**

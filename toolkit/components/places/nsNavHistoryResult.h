@@ -315,7 +315,8 @@ class nsNavHistoryResultNode : public nsINavHistoryResultNode {
   virtual void OnRemoving();
 
   nsresult OnItemKeywordChanged(int64_t aItemId, const nsACString& aKeyword);
-  nsresult OnItemTagsChanged(int64_t aItemId, const nsAString& aURL);
+  nsresult OnItemTagsChanged(int64_t aItemId, const nsAString& aURL,
+                             const nsAString& aTags);
   nsresult OnItemTimeChanged(int64_t aItemId, const nsACString& aGUID,
                              PRTime aDateAdded, PRTime aLastModified);
   nsresult OnItemTitleChanged(int64_t aItemId, const nsACString& aGUID,
@@ -332,6 +333,7 @@ class nsNavHistoryResultNode : public nsINavHistoryResultNode {
 
  public:
   nsNavHistoryResult* GetResult();
+  void SetTags(const nsAString& aTags);
 
   // These functions test the type. We don't use a virtual function since that
   // would take a vtable slot for every one of (potentially very many) nodes.
@@ -393,7 +395,6 @@ class nsNavHistoryResultNode : public nsINavHistoryResultNode {
   nsCString mURI;  // not necessarily valid for containers, call GetUri
   nsCString mTitle;
   nsString mTags;
-  bool mAreTagsSorted;
   uint32_t mAccessCount;
   int64_t mTime;
   int32_t mBookmarkIndex;
@@ -549,56 +550,39 @@ class nsNavHistoryContainerResultNode
                                            const nsAString& b);
 
   static int32_t SortComparison_Bookmark(nsNavHistoryResultNode* a,
-                                         nsNavHistoryResultNode* b,
-                                         void* closure);
+                                         nsNavHistoryResultNode* b);
   static int32_t SortComparison_TitleLess(nsNavHistoryResultNode* a,
-                                          nsNavHistoryResultNode* b,
-                                          void* closure);
+                                          nsNavHistoryResultNode* b);
   static int32_t SortComparison_TitleGreater(nsNavHistoryResultNode* a,
-                                             nsNavHistoryResultNode* b,
-                                             void* closure);
+                                             nsNavHistoryResultNode* b);
   static int32_t SortComparison_DateLess(nsNavHistoryResultNode* a,
-                                         nsNavHistoryResultNode* b,
-                                         void* closure);
+                                         nsNavHistoryResultNode* b);
   static int32_t SortComparison_DateGreater(nsNavHistoryResultNode* a,
-                                            nsNavHistoryResultNode* b,
-                                            void* closure);
+                                            nsNavHistoryResultNode* b);
   static int32_t SortComparison_URILess(nsNavHistoryResultNode* a,
-                                        nsNavHistoryResultNode* b,
-                                        void* closure);
+                                        nsNavHistoryResultNode* b);
   static int32_t SortComparison_URIGreater(nsNavHistoryResultNode* a,
-                                           nsNavHistoryResultNode* b,
-                                           void* closure);
+                                           nsNavHistoryResultNode* b);
   static int32_t SortComparison_VisitCountLess(nsNavHistoryResultNode* a,
-                                               nsNavHistoryResultNode* b,
-                                               void* closure);
+                                               nsNavHistoryResultNode* b);
   static int32_t SortComparison_VisitCountGreater(nsNavHistoryResultNode* a,
-                                                  nsNavHistoryResultNode* b,
-                                                  void* closure);
+                                                  nsNavHistoryResultNode* b);
   static int32_t SortComparison_DateAddedLess(nsNavHistoryResultNode* a,
-                                              nsNavHistoryResultNode* b,
-                                              void* closure);
+                                              nsNavHistoryResultNode* b);
   static int32_t SortComparison_DateAddedGreater(nsNavHistoryResultNode* a,
-                                                 nsNavHistoryResultNode* b,
-                                                 void* closure);
+                                                 nsNavHistoryResultNode* b);
   static int32_t SortComparison_LastModifiedLess(nsNavHistoryResultNode* a,
-                                                 nsNavHistoryResultNode* b,
-                                                 void* closure);
+                                                 nsNavHistoryResultNode* b);
   static int32_t SortComparison_LastModifiedGreater(nsNavHistoryResultNode* a,
-                                                    nsNavHistoryResultNode* b,
-                                                    void* closure);
+                                                    nsNavHistoryResultNode* b);
   static int32_t SortComparison_TagsLess(nsNavHistoryResultNode* a,
-                                         nsNavHistoryResultNode* b,
-                                         void* closure);
+                                         nsNavHistoryResultNode* b);
   static int32_t SortComparison_TagsGreater(nsNavHistoryResultNode* a,
-                                            nsNavHistoryResultNode* b,
-                                            void* closure);
+                                            nsNavHistoryResultNode* b);
   static int32_t SortComparison_FrecencyLess(nsNavHistoryResultNode* a,
-                                             nsNavHistoryResultNode* b,
-                                             void* closure);
+                                             nsNavHistoryResultNode* b);
   static int32_t SortComparison_FrecencyGreater(nsNavHistoryResultNode* a,
-                                                nsNavHistoryResultNode* b,
-                                                void* closure);
+                                                nsNavHistoryResultNode* b);
 
   // finding children: THESE DO NOT ADDREF
   nsNavHistoryResultNode* FindChildByURI(const nsACString& aSpec,
@@ -695,7 +679,8 @@ class nsNavHistoryQueryResultNode final
                        const nsACString& aOldParentGUID,
                        const nsACString& aNewParentGUID, uint16_t aSource,
                        const nsACString& aURI);
-  nsresult OnItemTagsChanged(int64_t aItemId, const nsAString& aURL);
+  nsresult OnItemTagsChanged(int64_t aItemId, const nsAString& aURL,
+                             const nsAString& aTags);
   nsresult OnItemTimeChanged(int64_t aItemId, const nsACString& aGUID,
                              PRTime aDateAdded, PRTime aLastModified);
   nsresult OnItemTitleChanged(int64_t aItemId, const nsACString& aGUID,
@@ -744,8 +729,6 @@ class nsNavHistoryQueryResultNode final
   virtual uint16_t GetSortType() override;
   virtual void RecursiveSort(SortComparator aComparator) override;
 
-  nsresult NotifyIfTagsChanged(nsIURI* aURI);
-
   uint32_t mBatchChanges;
 
   // Tracks transition type filters.
@@ -765,9 +748,11 @@ class nsNavHistoryFolderResultNode final
       public nsINavHistoryQueryResultNode,
       public mozilla::places::WeakAsyncStatementCallback {
  public:
-  nsNavHistoryFolderResultNode(const nsACString& aTitle,
-                               nsNavHistoryQueryOptions* options,
-                               int64_t aFolderId);
+  nsNavHistoryFolderResultNode(int64_t aItemId, const nsACString& aBookmarkGuid,
+                               int64_t aTargetFolderItemId,
+                               const nsACString& aTargetFolderGuid,
+                               const nsACString& aTitle,
+                               nsNavHistoryQueryOptions* aOptions);
 
   NS_DECL_ISUPPORTS_INHERITED
   NS_FORWARD_COMMON_RESULTNODE_TO_BASE
@@ -794,7 +779,10 @@ class nsNavHistoryFolderResultNode final
                        const nsACString& aGUID, const nsACString& aParentGUID,
                        uint16_t aSource, const nsACString& aTitle,
                        const nsAString& aTags, int64_t aFrecency, bool aHidden,
-                       uint32_t aVisitCount, PRTime aLastVisitDate);
+                       uint32_t aVisitCount, PRTime aLastVisitDate,
+                       int64_t aTargetFolderItemId,
+                       const nsACString& aTargetFolderGuid,
+                       const nsACString& aTargetFolderTitle);
   nsresult OnItemRemoved(int64_t aItemId, int64_t aParentFolder, int32_t aIndex,
                          uint16_t aItemType, nsIURI* aURI,
                          const nsACString& aGUID, const nsACString& aParentGUID,
@@ -805,7 +793,8 @@ class nsNavHistoryFolderResultNode final
                        const nsACString& aNewParentGUID, uint16_t aSource,
                        const nsACString& aURI, const nsACString& aTitle,
                        const nsAString& aTags, int64_t aFrecency, bool aHidden,
-                       uint32_t aVisitCount, PRTime aLastVisitDate);
+                       uint32_t aVisitCount, PRTime aLastVisitDate,
+                       PRTime aDateAdded);
   nsresult OnItemVisited(nsIURI* aURI, int64_t aVisitId, PRTime aTime,
                          int64_t aFrecency);
 

@@ -173,6 +173,147 @@ const CookieCleaner = {
   },
 };
 
+// A cleaner for clearing cookie banner handling exceptions.
+const CookieBannerExceptionCleaner = {
+  async deleteAll() {
+    try {
+      Services.cookieBanners.removeAllDomainPrefs(false);
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+
+  async deleteByPrincipal(aPrincipal) {
+    try {
+      Services.cookieBanners.removeDomainPref(aPrincipal.URI, false);
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+
+  async deleteByBaseDomain(aDomain) {
+    try {
+      Services.cookieBanners.removeDomainPref(
+        Services.io.newURI("https://" + aDomain),
+        false
+      );
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+
+  async deleteByHost(aHost, aOriginAttributes) {
+    try {
+      let isPrivate =
+        !!aOriginAttributes.privateBrowsingId &&
+        aOriginAttributes.privateBrowsingId !==
+          Services.scriptSecurityManager.DEFAULT_PRIVATE_BROWSING_ID;
+
+      Services.cookieBanners.removeDomainPref(
+        Services.io.newURI("https://" + aHost),
+        isPrivate
+      );
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+};
+
+// A cleaner for cleaning cookie banner handling executed records.
+const CookieBannerExecutedRecordCleaner = {
+  async deleteAll() {
+    try {
+      Services.cookieBanners.removeAllExecutedRecords(false);
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+
+  async deleteByPrincipal(aPrincipal) {
+    try {
+      Services.cookieBanners.removeExecutedRecordForSite(
+        aPrincipal.baseDomain,
+        false
+      );
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+
+  async deleteByBaseDomain(aDomain) {
+    try {
+      Services.cookieBanners.removeExecutedRecordForSite(aDomain, false);
+    } catch (e) {
+      // Don't throw an error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+
+  async deleteByHost(aHost, aOriginAttributes) {
+    try {
+      let isPrivate =
+        !!aOriginAttributes.privateBrowsingId &&
+        aOriginAttributes.privateBrowsingId !==
+          Services.scriptSecurityManager.DEFAULT_PRIVATE_BROWSING_ID;
+
+      Services.cookieBanners.removeExecutedRecordForSite(aHost, isPrivate);
+    } catch (e) {
+      // Don't throw error if the cookie banner handling is disabled.
+      if (e.result != Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+  },
+};
+
+// A cleaner for cleaning fingerprinting protection states.
+const FingerprintingProtectionStateCleaner = {
+  async deleteAll() {
+    Services.rfp.cleanAllRandomKeys();
+  },
+
+  async deleteByPrincipal(aPrincipal) {
+    Services.rfp.cleanRandomKeyByPrincipal(aPrincipal);
+  },
+
+  async deleteByBaseDomain(aDomain) {
+    Services.rfp.cleanRandomKeyByDomain(aDomain);
+  },
+
+  async deleteByHost(aHost, aOriginAttributesPattern) {
+    Services.rfp.cleanRandomKeyByHost(
+      aHost,
+      JSON.stringify(aOriginAttributesPattern)
+    );
+  },
+
+  async deleteByOriginAttributes(aOriginAttributesString) {
+    Services.rfp.cleanRandomKeyByOriginAttributesPattern(
+      aOriginAttributesString
+    );
+  },
+};
+
 const CertCleaner = {
   async deleteByHost(aHost, aOriginAttributes) {
     let overrideService = Cc["@mozilla.org/security/certoverride;1"].getService(
@@ -736,18 +877,17 @@ const QuotaCleaner = {
   },
 
   async cleanupAfterDeletionAtShutdown() {
-    const storageDir = PathUtils.join(
+    const toBeRemovedDir = PathUtils.join(
       PathUtils.profileDir,
-      Services.prefs.getStringPref("dom.quotaManager.storageName")
+      Services.prefs.getStringPref("dom.quotaManager.storageName"),
+      "to-be-removed"
     );
 
     if (
       !AppConstants.MOZ_BACKGROUNDTASKS ||
       !Services.prefs.getBoolPref("dom.quotaManager.backgroundTask.enabled")
     ) {
-      await IOUtils.remove(PathUtils.join(storageDir, "to-be-removed"), {
-        recursive: true,
-      });
+      await IOUtils.remove(toBeRemovedDir, { recursive: true });
       return;
     }
 
@@ -756,10 +896,10 @@ const QuotaCleaner = {
     );
 
     runner.removeDirectoryInDetachedProcess(
-      storageDir,
-      "to-be-removed",
-      "0",
+      toBeRemovedDir,
       "",
+      "0",
+      "*", // wildcard
       "Quota"
     );
   },
@@ -1621,6 +1761,21 @@ const FLAGS_MAP = [
     flag: Ci.nsIClearDataService.CLEAR_CREDENTIAL_MANAGER_STATE,
     cleaners: [IdentityCredentialStorageCleaner],
   },
+
+  {
+    flag: Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXCEPTION,
+    cleaners: [CookieBannerExceptionCleaner],
+  },
+
+  {
+    flag: Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXECUTED_RECORD,
+    cleaners: [CookieBannerExecutedRecordCleaner],
+  },
+
+  {
+    flag: Ci.nsIClearDataService.CLEAR_FINGERPRINTING_PROTECTION_STATE,
+    cleaners: [FingerprintingProtectionStateCleaner],
+  },
 ];
 
 export function ClearDataService() {
@@ -1807,12 +1962,15 @@ ClearDataService.prototype = Object.freeze({
       return Cr.NS_ERROR_INVALID_ARG;
     }
 
-    StorageAccessCleaner.deleteExceptPrincipals(
-      aPrincipalsWithStorage,
-      aFrom
-    ).then(() => {
-      aCallback.onDataDeleted(0);
-    });
+    StorageAccessCleaner.deleteExceptPrincipals(aPrincipalsWithStorage, aFrom)
+      .then(() => {
+        aCallback.onDataDeleted(0);
+      })
+      .catch(() => {
+        // This is part of clearing storageAccessAPI permissions, thus return
+        // an appropriate error flag.
+        aCallback.onDataDeleted(Ci.nsIClearDataService.CLEAR_PERMISSIONS);
+      });
     return Cr.NS_OK;
   },
 

@@ -18,6 +18,7 @@
 
 namespace JS::loader {
 
+class LoadedScript;
 class ModuleScript;
 class ModuleLoaderBase;
 
@@ -49,7 +50,8 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
                                                          ScriptLoadRequest)
   using SRIMetadata = mozilla::dom::SRIMetadata;
 
-  ModuleLoadRequest(nsIURI* aURI, ScriptFetchOptions* aFetchOptions,
+  ModuleLoadRequest(nsIURI* aURI, mozilla::dom::ReferrerPolicy aReferrerPolicy,
+                    ScriptFetchOptions* aFetchOptions,
                     const SRIMetadata& aIntegrity, nsIURI* aReferrer,
                     LoadContextBase* aContext, bool aIsTopLevel,
                     bool aIsDynamicImport, ModuleLoaderBase* aLoader,
@@ -162,7 +164,7 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
   RefPtr<VisitedURLSet> mVisitedSet;
 
   // For dynamic imports, the details to pass to FinishDynamicImport.
-  JS::Heap<JS::Value> mDynamicReferencingPrivate;
+  RefPtr<LoadedScript> mDynamicReferencingScript;
   JS::Heap<JSString*> mDynamicSpecifier;
   JS::Heap<JSObject*> mDynamicPromise;
 };

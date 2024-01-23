@@ -256,7 +256,7 @@
     "toolkit/components/aboutperformance/tests/browser/browser.ini": 4.46,
     "toolkit/components/aboutprocesses/tests/browser/browser.ini": 3.81,
     "toolkit/components/antitracking/test/browser/browser-blocking.ini": 1000.0,
-    "toolkit/components/antitracking/test/browser/browser.ini": 324.51,
+    "toolkit/components/antitracking/test/browser/browser.ini": 1000.0,
     "toolkit/components/certviewer/tests/browser/browser.ini": 70.37,
     "toolkit/components/cleardata/tests/browser/browser.ini": 4.81,
     "toolkit/components/enterprisepolicies/tests/browser/browser.ini": 0.62,
@@ -299,7 +299,7 @@
     "uriloader/exthandler/tests/mochitest/browser.ini": 25.41,
     "widget/tests/browser/browser.ini": 16.15
   },
-  "mochitest-browser-chrome-screenshots": {
+  "mochitest-browser-screenshots": {
     "browser/tools/mozscreenshots/controlCenter/browser.ini": 144.09,
     "browser/tools/mozscreenshots/devtools/browser.ini": 25.54,
     "browser/tools/mozscreenshots/permissionPrompts/browser.ini": 67.87,

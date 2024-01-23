@@ -448,9 +448,6 @@ class RTC_EXPORT PeerConnectionInterface : public rtc::RefCountInterface {
     // when switching from a static scene to one with motion.
     absl::optional<int> screencast_min_bitrate;
 
-    // Use new combined audio/video bandwidth estimation?
-    absl::optional<bool> combined_audio_video_bwe;
-
 #if defined(WEBRTC_FUCHSIA)
     // TODO(bugs.webrtc.org/11066): Remove entirely once Fuchsia does not use.
     // TODO(bugs.webrtc.org/9891) - Move to crypto_options
@@ -1389,6 +1386,9 @@ struct RTC_EXPORT PeerConnectionDependencies final {
   std::unique_ptr<webrtc::AsyncDnsResolverFactoryInterface>
       async_dns_resolver_factory;
   // Deprecated - use async_dns_resolver_factory
+  // Deprecation is in abeyance until Chromium is updated.
+  // TODO(crbug.com/1475925): Deprecate once Chromium is updated
+  // [[deprecated("Use async_dns_resolver_factory")]]
   std::unique_ptr<webrtc::AsyncResolverFactory> async_resolver_factory;
   std::unique_ptr<webrtc::IceTransportFactory> ice_transport_factory;
   std::unique_ptr<rtc::RTCCertificateGeneratorInterface> cert_generator;

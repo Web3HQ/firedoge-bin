@@ -1,4 +1,7 @@
-use crate::auxil::{self, dxgi::result::HResult as _};
+use crate::{
+    auxil::{self, dxgi::result::HResult as _},
+    dx12::shader_compilation,
+};
 
 use super::{conv, descriptor, view};
 use parking_lot::Mutex;
@@ -19,20 +22,12 @@ impl super::Device {
         limits: &wgt::Limits,
         private_caps: super::PrivateCapabilities,
         library: &Arc<d3d12::D3D12Lib>,
-        dx12_shader_compiler: wgt::Dx12Compiler,
+        dxc_container: Option<Arc<shader_compilation::DxcContainer>>,
     ) -> Result<Self, crate::DeviceError> {
         let mem_allocator = if private_caps.suballocation_supported {
             super::suballocation::create_allocator_wrapper(&raw)?
         } else {
             None
-        };
-
-        let dxc_container = match dx12_shader_compiler {
-            wgt::Dx12Compiler::Dxc {
-                dxil_path,
-                dxc_path,
-            } => super::shader_compilation::get_dxc_container(dxc_path, dxil_path)?,
-            wgt::Dx12Compiler::Fxc => None,
         };
 
         let mut idle_fence = d3d12::Fence::null();
@@ -181,14 +176,17 @@ impl super::Device {
         })
     }
 
-    pub(super) unsafe fn wait_idle(&self) -> Result<(), crate::DeviceError> {
+    // Blocks until the dedicated present queue is finished with all of its work.
+    //
+    // Once this method completes, the surface is able to be resized or deleted.
+    pub(super) unsafe fn wait_for_present_queue_idle(&self) -> Result<(), crate::DeviceError> {
         let cur_value = self.idler.fence.get_value();
         if cur_value == !0 {
             return Err(crate::DeviceError::Lost);
         }
 
         let value = cur_value + 1;
-        log::info!("Waiting for idle with value {}", value);
+        log::debug!("Waiting for idle with value {}", value);
         self.present_queue.signal(&self.idler.fence, value);
         let hr = self
             .idler
@@ -671,6 +669,7 @@ impl crate::Device<super::Api> for super::Device {
                     num_texture_views += count
                 }
                 wgt::BindingType::Sampler { .. } => num_samplers += count,
+                wgt::BindingType::AccelerationStructure => todo!(),
             }
         }
 
@@ -985,7 +984,7 @@ impl crate::Device<super::Api> for super::Device {
         debug_assert_eq!(ranges.len(), total_non_dynamic_entries);
 
         let (special_constants_root_index, special_constants_binding) = if desc.flags.intersects(
-            crate::PipelineLayoutFlags::BASE_VERTEX_INSTANCE
+            crate::PipelineLayoutFlags::FIRST_VERTEX_INSTANCE
                 | crate::PipelineLayoutFlags::NUM_WORK_GROUPS,
         ) {
             let parameter_index = parameters.len();
@@ -993,7 +992,7 @@ impl crate::Device<super::Api> for super::Device {
             parameters.push(d3d12::RootParameter::constants(
                 d3d12::ShaderVisibility::All, // really needed for VS and CS only
                 native_binding(&bind_cbv),
-                3, // 0 = base vertex, 1 = base instance, 2 = other
+                3, // 0 = first_vertex, 1 = first_instance, 2 = other
             ));
             let binding = bind_cbv.clone();
             bind_cbv.register += 1;
@@ -1192,6 +1191,7 @@ impl crate::Device<super::Api> for super::Device {
                         cpu_samplers.as_mut().unwrap().stage.push(data.handle.raw);
                     }
                 }
+                wgt::BindingType::AccelerationStructure => todo!(),
             }
         }
 
@@ -1514,7 +1514,7 @@ impl crate::Device<super::Api> for super::Device {
         let hr = unsafe {
             self.raw.CreateFence(
                 0,
-                d3d12_ty::D3D12_FENCE_FLAG_NONE,
+                d3d12_ty::D3D12_FENCE_FLAG_SHARED,
                 &d3d12_ty::ID3D12Fence::uuidof(),
                 raw.mut_void(),
             )
@@ -1570,5 +1570,39 @@ impl crate::Device<super::Api> for super::Device {
             self.render_doc
                 .end_frame_capture(self.raw.as_mut_ptr() as *mut _, ptr::null_mut())
         }
+    }
+
+    unsafe fn get_acceleration_structure_build_sizes<'a>(
+        &self,
+        _desc: &crate::GetAccelerationStructureBuildSizesDescriptor<'a, super::Api>,
+    ) -> crate::AccelerationStructureBuildSizes {
+        // Implement using `GetRaytracingAccelerationStructurePrebuildInfo`:
+        // https://microsoft.github.io/DirectX-Specs/d3d/Raytracing.html#getraytracingaccelerationstructureprebuildinfo
+        todo!()
+    }
+
+    unsafe fn get_acceleration_structure_device_address(
+        &self,
+        _acceleration_structure: &super::AccelerationStructure,
+    ) -> wgt::BufferAddress {
+        // Implement using `GetGPUVirtualAddress`:
+        // https://docs.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12resource-getgpuvirtualaddress
+        todo!()
+    }
+
+    unsafe fn create_acceleration_structure(
+        &self,
+        _desc: &crate::AccelerationStructureDescriptor,
+    ) -> Result<super::AccelerationStructure, crate::DeviceError> {
+        // Create a D3D12 resource as per-usual.
+        todo!()
+    }
+
+    unsafe fn destroy_acceleration_structure(
+        &self,
+        _acceleration_structure: super::AccelerationStructure,
+    ) {
+        // Destroy a D3D12 resource as per-usual.
+        todo!()
     }
 }

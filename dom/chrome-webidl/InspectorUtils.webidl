@@ -26,7 +26,7 @@ namespace InspectorUtils {
   // Useful for DevTools as this is faster than in JS where we'd have a lot of
   // proxy access overhead building the same list.
   sequence<CSSRule> getAllStyleSheetCSSStyleRules(CSSStyleSheet sheet);
-  boolean isInheritedProperty(UTF8String property);
+  boolean isInheritedProperty(Document document, UTF8String property);
   sequence<DOMString> getCSSPropertyNames(optional PropertyNamesOptions options = {});
   sequence<PropertyPref> getCSSPropertyPrefs();
   [Throws] sequence<DOMString> getCSSValuesForProperty(UTF8String property);
@@ -78,8 +78,14 @@ namespace InspectorUtils {
 
   Element? containingBlockOf(Element element);
 
+  // If the element is styled as display:block, returns an array of numbers giving
+  // the number of lines in each fragment.
+  // Returns null if the element is not a block.
+  [NewObject] sequence<unsigned long>? getBlockLineCounts(Element element);
+
   [NewObject] NodeList getOverflowingChildrenOfElement(Element element);
   sequence<DOMString> getRegisteredCssHighlights(Document document, optional boolean activeOnly = false);
+  sequence<InspectorCSSPropertyDefinition> getCSSRegisteredProperties(Document document);
 };
 
 dictionary SupportsOptions {
@@ -142,6 +148,14 @@ dictionary InspectorFontFeature {
   required DOMString tag;
   required DOMString script;
   required DOMString languageSystem;
+};
+
+dictionary InspectorCSSPropertyDefinition {
+  required UTF8String name;
+  required UTF8String syntax;
+  required boolean inherits;
+  required UTF8String? initialValue;
+  required boolean fromJS;
 };
 
 [Func="nsContentUtils::IsCallerChromeOrFuzzingEnabled",

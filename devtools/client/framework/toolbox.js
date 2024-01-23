@@ -67,7 +67,7 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
-  ["registerWalkerListeners"],
+  ["registerWalkerListeners", "removeTarget"],
   "resource://devtools/client/framework/actions/index.js",
   true
 );
@@ -204,6 +204,17 @@ loader.lazyRequireGetter(
   "resource://devtools/client/shared/source-map-loader/index.js",
   true
 );
+loader.lazyRequireGetter(
+  this,
+  "openProfilerTab",
+  "resource://devtools/client/performance-new/shared/browser.js",
+  true
+);
+loader.lazyGetter(this, "ProfilerBackground", () => {
+  return ChromeUtils.import(
+    "resource://devtools/client/performance-new/shared/background.jsm.js"
+  );
+});
 
 /**
  * A "Toolbox" is the component that holds all the tools for one specific
@@ -657,6 +668,29 @@ Toolbox.prototype = {
   },
 
   /**
+   * Called on each new JSTRACER_STATE resource
+   *
+   * @param {Object} resource The JSTRACER_STATE resource
+   */
+  async _onTracingStateChanged(resource) {
+    const { profile } = resource;
+    if (!profile) {
+      return;
+    }
+    const browser = await openProfilerTab();
+
+    const profileCaptureResult = {
+      type: "SUCCESS",
+      profile,
+    };
+    ProfilerBackground.registerProfileCaptureForBrowser(
+      browser,
+      profileCaptureResult,
+      null
+    );
+  },
+
+  /**
    * Be careful, this method is synchronous, but highlightTool, raise, selectTool
    * are all async.
    */
@@ -763,6 +797,8 @@ Toolbox.prototype = {
   },
 
   _onTargetDestroyed({ targetFront }) {
+    removeTarget(this.store, targetFront);
+
     if (targetFront.isTopLevel) {
       const consoleFront = targetFront.getCachedFront("console");
       // If the target has already been destroyed, its console front will
@@ -883,6 +919,15 @@ Toolbox.prototype = {
         this.resourceCommand.TYPES.DOCUMENT_EVENT,
         this.resourceCommand.TYPES.THREAD_STATE,
       ];
+
+      if (
+        Services.prefs.getBoolPref(
+          "devtools.debugger.features.javascript-tracing",
+          false
+        )
+      ) {
+        watchedResources.push(this.resourceCommand.TYPES.JSTRACER_STATE);
+      }
 
       if (!this.isBrowserToolbox) {
         // Independently of watching network event resources for the error count icon,
@@ -1364,10 +1409,7 @@ Toolbox.prototype = {
     if (this._sourceMapLoader) {
       return this._sourceMapLoader;
     }
-    this._sourceMapLoader = new SourceMapLoader();
-    this._sourceMapLoader.on("source-map-error", message =>
-      this.target.logWarningInPage(message, "source map")
-    );
+    this._sourceMapLoader = new SourceMapLoader(this.commands.targetCommand);
     return this._sourceMapLoader;
   },
 
@@ -1529,6 +1571,7 @@ Toolbox.prototype = {
       isToolSupported,
       isCurrentlyVisible,
       isChecked,
+      isToggle,
       onKeyDown,
       experimentalURL,
     } = options;
@@ -1562,6 +1605,7 @@ Toolbox.prototype = {
         isCheckedValue = value;
         this.emit("updatechecked");
       },
+      isToggle,
       // The preference for having this button visible.
       visibilityswitch: `devtools.${id}.enabled`,
       // The toolbar has a container at the start and end of the toolbar for
@@ -1587,16 +1631,30 @@ Toolbox.prototype = {
   },
 
   _splitConsoleOnKeypress(e) {
-    if (e.keyCode === KeyCodes.DOM_VK_ESCAPE) {
-      this.toggleSplitConsole();
-      // If the debugger is paused, don't let the ESC key stop any pending navigation.
-      // If the host is page, don't let the ESC stop the load of the webconsole frame.
-      if (
-        this.threadFront.state == "paused" ||
-        this.hostType === Toolbox.HostType.PAGE
-      ) {
-        e.preventDefault();
+    if (e.keyCode !== KeyCodes.DOM_VK_ESCAPE) {
+      return;
+    }
+
+    const currentPanel = this.getCurrentPanel();
+    if (
+      typeof currentPanel.onToolboxChromeEventHandlerEscapeKeyDown ===
+      "function"
+    ) {
+      const ac = new this.win.AbortController();
+      currentPanel.onToolboxChromeEventHandlerEscapeKeyDown(ac);
+      if (ac.signal.aborted) {
+        return;
       }
+    }
+
+    this.toggleSplitConsole();
+    // If the debugger is paused, don't let the ESC key stop any pending navigation.
+    // If the host is page, don't let the ESC stop the load of the webconsole frame.
+    if (
+      this.threadFront.state == "paused" ||
+      this.hostType === Toolbox.HostType.PAGE
+    ) {
+      e.preventDefault();
     }
   },
 
@@ -2103,6 +2161,7 @@ Toolbox.prototype = {
       isToolSupported: toolbox => {
         return toolbox.target.getTrait("frames");
       },
+      isToggle: true,
     });
 
     return this.pickerButton;
@@ -4020,9 +4079,7 @@ Toolbox.prototype = {
     this._pausedTargets = null;
 
     if (this._sourceMapLoader) {
-      this._sourceMapLoader.stopSourceMapWorker();
-      // Unregister all listeners
-      this._sourceMapLoader.clearEvents();
+      this._sourceMapLoader.destroy();
       this._sourceMapLoader = null;
     }
 
@@ -4681,6 +4738,9 @@ Toolbox.prototype = {
 
       if (resourceType == TYPES.THREAD_STATE) {
         this._onThreadStateChanged(resource);
+      }
+      if (resourceType == TYPES.JSTRACER_STATE) {
+        this._onTracingStateChanged(resource);
       }
     }
 

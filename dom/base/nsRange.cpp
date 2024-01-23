@@ -204,8 +204,8 @@ already_AddRefed<nsRange> nsRange::Create(
  * nsISupports
  ******************************************************/
 
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_ADDREF(nsRange)
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_RELEASE_WITH_INTERRUPTABLE_LAST_RELEASE(
+NS_IMPL_CYCLE_COLLECTING_ADDREF(nsRange)
+NS_IMPL_CYCLE_COLLECTING_RELEASE_WITH_INTERRUPTABLE_LAST_RELEASE(
     nsRange, DoSetRange(RawRangeBoundary(), RawRangeBoundary(), nullptr),
     MaybeInterruptLastRelease())
 
@@ -3053,7 +3053,7 @@ static bool IsVisibleAndNotInReplacedElement(nsIFrame* aFrame) {
     if (f->HidesContent()) {
       return false;
     }
-    if (f->IsFrameOfType(nsIFrame::eReplaced) &&
+    if (f->IsReplaced() &&
         !f->GetContent()->IsAnyOfHTMLElements(nsGkAtoms::button,
                                               nsGkAtoms::select) &&
         !f->GetContent()->IsSVGElement()) {

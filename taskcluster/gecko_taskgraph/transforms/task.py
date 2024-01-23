@@ -523,19 +523,11 @@ def build_docker_worker_payload(config, task, task_def):
 
     if "artifacts" in worker:
         artifacts = {}
-        expires_policy = get_expiration(
-            config, task.get("expiration-policy", "default")
-        )
-        now = datetime.datetime.utcnow()
-        task_exp = task_def["expires"]["relative-datestamp"]
-        task_exp_from_now = fromNow(task_exp)
         for artifact in worker["artifacts"]:
-            art_exp = artifact.get("expires-after", expires_policy)
-            expires = art_exp if fromNow(art_exp, now) < task_exp_from_now else task_exp
             artifacts[artifact["name"]] = {
                 "path": artifact["path"],
                 "type": artifact["type"],
-                "expires": {"relative-datestamp": expires},
+                "expires": {"relative-datestamp": artifact["expires-after"]},
             }
         payload["artifacts"] = artifacts
 
@@ -757,18 +749,11 @@ def build_generic_worker_payload(config, task, task_def):
 
     artifacts = []
 
-    expires_policy = get_expiration(config, task.get("expiration-policy", "default"))
-    now = datetime.datetime.utcnow()
-    task_exp = task_def["expires"]["relative-datestamp"]
-    task_exp_from_now = fromNow(task_exp)
     for artifact in worker.get("artifacts", []):
-        art_exp = artifact.get("expires-after", expires_policy)
-        task_exp = task_def["expires"]["relative-datestamp"]
-        expires = art_exp if fromNow(art_exp, now) < task_exp_from_now else task_exp
         a = {
             "path": artifact["path"],
             "type": artifact["type"],
-            "expires": {"relative-datestamp": expires},
+            "expires": {"relative-datestamp": artifact["expires-after"]},
         }
         if "name" in artifact:
             a["name"] = artifact["name"]
@@ -852,6 +837,7 @@ def build_generic_worker_payload(config, task, task_def):
         Optional("mac-behavior"): Any(
             "apple_notarization",
             "mac_sign_and_pkg",
+            "mac_sign_and_pkg_hardened",
             "mac_geckodriver",
             "mac_notarize_geckodriver",
             "mac_single_file",
@@ -859,6 +845,22 @@ def build_generic_worker_payload(config, task, task_def):
         ),
         Optional("entitlements-url"): str,
         Optional("requirements-plist-url"): str,
+        Optional("provisioning-profile-config"): [
+            {
+                Required("profile_name"): str,
+                Required("target_path"): str,
+            }
+        ],
+        Optional("hardened-sign-config"): [
+            {
+                Optional("deep"): bool,
+                Optional("runtime"): bool,
+                Optional("force"): bool,
+                Optional("entitlements"): str,
+                Optional("requirements"): str,
+                Required("globs"): [str],
+            }
+        ],
     },
 )
 def build_scriptworker_signing_payload(config, task, task_def):
@@ -870,7 +872,12 @@ def build_scriptworker_signing_payload(config, task, task_def):
     }
     if worker.get("mac-behavior"):
         task_def["payload"]["behavior"] = worker["mac-behavior"]
-        for attribute in ("entitlements-url", "requirements-plist-url"):
+        for attribute in (
+            "entitlements-url",
+            "requirements-plist-url",
+            "hardened-sign-config",
+            "provisioning-profile-config",
+        ):
             if worker.get(attribute):
                 task_def["payload"][attribute] = worker[attribute]
 
@@ -894,7 +901,6 @@ def build_scriptworker_signing_payload(config, task, task_def):
         Required("max-run-time"): int,
         # locale key, if this is a locale beetmover job
         Optional("locale"): str,
-        Optional("partner-public"): bool,
         Required("release-properties"): {
             "app-name": str,
             "app-version": str,
@@ -941,8 +947,6 @@ def build_beetmover_payload(config, task, task_def):
         task_def["payload"]["locale"] = worker["locale"]
     if worker.get("artifact-map"):
         task_def["payload"]["artifactMap"] = worker["artifact-map"]
-    if worker.get("partner-public"):
-        task_def["payload"]["is_partner_repack_public"] = worker["partner-public"]
     if release_config:
         task_def["payload"].update(release_config)
 
@@ -1849,13 +1853,31 @@ def set_task_and_artifact_expiry(config, jobs):
     These values are read from ci/config.yml
     """
     now = datetime.datetime.utcnow()
+    # We don't want any configuration leading to anything with an expiry longer
+    # than 28 days on try.
+    cap = "28 days" if is_try(config.params) else None
+    cap_from_now = fromNow(cap, now) if cap else None
+    if cap:
+        for policy, expires in config.graph_config["expiration-policy"]["by-project"][
+            "try"
+        ].items():
+            if fromNow(expires, now) > cap_from_now:
+                raise Exception(
+                    f'expiration-policy "{policy}" is larger than {cap} '
+                    f'for {config.params["project"]}'
+                )
     for job in jobs:
         expires = get_expiration(config, job.get("expiration-policy", "default"))
         job_expiry = job.setdefault("expires-after", expires)
-        job_expiry_from_now = fromNow(job_expiry)
+        job_expiry_from_now = fromNow(job_expiry, now)
+        if cap and job_expiry_from_now > cap_from_now:
+            job_expiry, job_expiry_from_now = cap, cap_from_now
+        # If the task has no explicit expiration-policy, but has an expires-after,
+        # we use that as the default artifact expiry.
+        artifact_expires = expires if "expiration-policy" in job else job_expiry
 
         for artifact in job["worker"].get("artifacts", ()):
-            artifact_expiry = artifact.setdefault("expires-after", expires)
+            artifact_expiry = artifact.setdefault("expires-after", artifact_expires)
 
             # By using > instead of >=, there's a chance of mismatch
             #   where the artifact expires sooner than the task.

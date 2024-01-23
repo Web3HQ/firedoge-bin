@@ -3,12 +3,9 @@
 
 "use strict";
 
-/**
- * Tests that the correct shopping-message-bar component appears if there are not enough
- * reviews to provided an analysis.
- * The footer should be visible.
- */
-add_task(async function test_not_enough_reviews() {
+// Tests that the unanalyzed card is shown when not_enough_reviews is not present.
+
+add_task(async function test_show_unanalyzed_on_initial_load() {
   await BrowserTestUtils.withNewTab(
     {
       url: "about:shoppingsidebar",
@@ -17,21 +14,67 @@ add_task(async function test_not_enough_reviews() {
     async browser => {
       let shoppingContainer = await getAnalysisDetails(
         browser,
-        MOCK_NOT_ENOUGH_REVIEWS_PRODUCT_RESPONSE
+        MOCK_UNANALYZED_PRODUCT_RESPONSE
       );
-
       ok(
-        shoppingContainer.shoppingMessageBarEl,
-        "Got shopping-message-bar element"
-      );
-      is(
-        shoppingContainer.shoppingMessageBarType,
-        "not-enough-reviews",
-        "shopping-message-bar type should be correct"
+        shoppingContainer.unanalyzedProductEl,
+        "Got unanalyzed card on first try"
       );
 
       verifyAnalysisDetailsHidden(shoppingContainer);
       verifyFooterVisible(shoppingContainer);
+    }
+  );
+});
+
+// Tests that the not enough reviews card is shown when not_enough_reviews is true.
+
+add_task(async function test_show_not_enough_reviews() {
+  await BrowserTestUtils.withNewTab(
+    {
+      url: "about:shoppingsidebar",
+      gBrowser,
+    },
+
+    async browser => {
+      await SpecialPowers.spawn(
+        browser,
+        [MOCK_NOT_ENOUGH_REVIEWS_PRODUCT_RESPONSE],
+        async mockData => {
+          let shoppingContainer =
+            content.document.querySelector(
+              "shopping-container"
+            ).wrappedJSObject;
+
+          shoppingContainer.data = Cu.cloneInto(mockData, content);
+
+          let messageBarVisiblePromise = ContentTaskUtils.waitForCondition(
+            () => {
+              return (
+                !!shoppingContainer.shoppingMessageBarEl &&
+                ContentTaskUtils.isVisible(
+                  shoppingContainer.shoppingMessageBarEl
+                )
+              );
+            },
+            "Waiting for shopping-message-bar to be visible"
+          );
+
+          await messageBarVisiblePromise;
+          await shoppingContainer.updateComplete;
+
+          ok(
+            shoppingContainer.shoppingMessageBarEl,
+            "Got shopping-message-bar element"
+          );
+
+          is(
+            shoppingContainer.shoppingMessageBarEl?.getAttribute("type"),
+            "not-enough-reviews",
+            "shopping-message-bar type should be correct"
+          );
+        }
+      );
     }
   );
 });

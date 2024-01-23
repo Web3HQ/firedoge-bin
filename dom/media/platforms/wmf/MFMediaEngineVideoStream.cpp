@@ -125,21 +125,20 @@ HRESULT MFMediaEngineVideoStream::CreateMediaType(const TrackInfo& aInfo,
                                       sizeof(area)));
 
   // https://docs.microsoft.com/en-us/windows/win32/api/mfapi/ne-mfapi-mfvideorotationformat
-  static const auto ToMFVideoRotationFormat =
-      [](VideoInfo::Rotation aRotation) {
-        using Rotation = VideoInfo::Rotation;
-        switch (aRotation) {
-          case Rotation::kDegree_0:
-            return MFVideoRotationFormat_0;
-          case Rotation::kDegree_90:
-            return MFVideoRotationFormat_90;
-          case Rotation::kDegree_180:
-            return MFVideoRotationFormat_180;
-          default:
-            MOZ_ASSERT(aRotation == Rotation::kDegree_270);
-            return MFVideoRotationFormat_270;
-        }
-      };
+  static const auto ToMFVideoRotationFormat = [](VideoRotation aRotation) {
+    using Rotation = VideoRotation;
+    switch (aRotation) {
+      case Rotation::kDegree_0:
+        return MFVideoRotationFormat_0;
+      case Rotation::kDegree_90:
+        return MFVideoRotationFormat_90;
+      case Rotation::kDegree_180:
+        return MFVideoRotationFormat_180;
+      default:
+        MOZ_ASSERT(aRotation == Rotation::kDegree_270);
+        return MFVideoRotationFormat_270;
+    }
+  };
   const auto rotation = ToMFVideoRotationFormat(videoInfo.mRotation);
   RETURN_IF_FAILED(mediaType->SetUINT32(MF_MT_VIDEO_ROTATION, rotation));
 
@@ -288,7 +287,8 @@ void MFMediaEngineVideoStream::ResolvePendingDrainPromiseIfNeeded() {
 
 MediaDataDecoder::ConversionRequired MFMediaEngineVideoStream::NeedsConversion()
     const {
-  return mStreamType == WMFStreamType::H264
+  return mStreamType == WMFStreamType::H264 ||
+                 mStreamType == WMFStreamType::HEVC
              ? MediaDataDecoder::ConversionRequired::kNeedAnnexB
              : MediaDataDecoder::ConversionRequired::kNeedNone;
 }
@@ -311,13 +311,14 @@ void MFMediaEngineVideoStream::SetConfig(const TrackInfo& aConfig) {
 
 void MFMediaEngineVideoStream::UpdateConfig(const VideoInfo& aInfo) {
   AssertOnTaskQueue();
-  // Disable explicit format change event for H264 to allow switching to the
-  // new stream without a full re-create, which will be much faster. This is
+  // Disable explicit format change event for H264/HEVC to allow switching to
+  // the new stream without a full re-create, which will be much faster. This is
   // also due to the fact that the MFT decoder can handle some format changes
   // without a format change event. For format changes that the MFT decoder
   // cannot support (e.g. codec change), the playback will fail later with
   // MF_E_INVALIDMEDIATYPE (0xC00D36B4).
-  if (mStreamType == WMFStreamType::H264) {
+  if (mStreamType == WMFStreamType::H264 ||
+      mStreamType == WMFStreamType::HEVC) {
     return;
   }
 
@@ -361,6 +362,8 @@ nsCString MFMediaEngineVideoStream::GetCodecName() const {
       return "vp9"_ns;
     case WMFStreamType::AV1:
       return "av1"_ns;
+    case WMFStreamType::HEVC:
+      return "hevc"_ns;
     default:
       return "unknown"_ns;
   };

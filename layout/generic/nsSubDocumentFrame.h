@@ -44,12 +44,6 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
 
   NS_DECL_QUERYFRAME
 
-  bool IsFrameOfType(uint32_t aFlags) const override {
-    return nsAtomicContainerFrame::IsFrameOfType(
-        aFlags & ~(nsIFrame::eReplaced | nsIFrame::eReplacedSizing |
-                   nsIFrame::eReplacedContainsBlock));
-  }
-
   void Init(nsIContent* aContent, nsContainerFrame* aParent,
             nsIFrame* aPrevInFlow) override;
 
@@ -102,6 +96,10 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   nsIDocShell* GetDocShell() const;
   nsresult BeginSwapDocShells(nsIFrame* aOther);
   void EndSwapDocShells(nsIFrame* aOther);
+
+  static void InsertViewsInReverseOrder(nsView* aSibling, nsView* aParent);
+  static void EndSwapDocShellsForViews(nsView* aView);
+
   nsView* EnsureInnerView();
   nsPoint GetExtraOffset() const;
   nsIFrame* GetSubdocumentRootFrame();
@@ -132,12 +130,6 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   void ResetFrameLoader(RetainPaintData);
   void ClearRetainedPaintData();
 
-  void MaybeUpdateEmbedderColorScheme();
-
-  void MaybeUpdateRemoteStyle(ComputedStyle* aOldComputedStyle = nullptr);
-  void PropagateIsUnderHiddenEmbedderElementToSubView(
-      bool aIsUnderHiddenEmbedderElement);
-
   void ClearDisplayItems();
 
   void SubdocumentIntrinsicSizeOrRatioChanged();
@@ -152,6 +144,11 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
 
  protected:
   friend class AsyncFrameInit;
+
+  void MaybeUpdateEmbedderColorScheme();
+  void MaybeUpdateRemoteStyle(ComputedStyle* aOldComputedStyle = nullptr);
+  void PropagateIsUnderHiddenEmbedderElement(bool aValue);
+  void UpdateEmbeddedBrowsingContextDependentData();
 
   bool IsInline() { return mIsInline; }
 

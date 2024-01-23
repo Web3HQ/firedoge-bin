@@ -96,7 +96,7 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
   // If the GPU process is enabled but has not yet been launched then this will
   // launch the process. If that is not desired then check that return value of
   // Process() is non-null before calling.
-  nsresult EnsureGPUReady();
+  nsresult EnsureGPUReady(bool aRetryAfterFallback = true);
 
   already_AddRefed<CompositorSession> CreateTopLevelCompositor(
       nsBaseWidget* aWidget, WebRenderLayerManager* aLayerManager,
@@ -110,7 +110,7 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
       mozilla::ipc::Endpoint<PImageBridgeChild>* aOutImageBridge,
       mozilla::ipc::Endpoint<PVRManagerChild>* aOutVRBridge,
       mozilla::ipc::Endpoint<PRemoteDecoderManagerChild>* aOutVideoManager,
-      nsTArray<uint32_t>* aNamespaces);
+      dom::ContentParentId aChildId, nsTArray<uint32_t>* aNamespaces);
 
   // Initialize GPU process with consuming end of PVideoBridge.
   void InitVideoBridge(
@@ -216,16 +216,17 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
   void OnPreferenceChange(const char16_t* aData);
 
   bool CreateContentCompositorManager(
-      base::ProcessId aOtherProcess,
+      base::ProcessId aOtherProcess, dom::ContentParentId aChildId,
+      uint32_t aNamespace,
       mozilla::ipc::Endpoint<PCompositorManagerChild>* aOutEndpoint);
   bool CreateContentImageBridge(
-      base::ProcessId aOtherProcess,
+      base::ProcessId aOtherProcess, dom::ContentParentId aChildId,
       mozilla::ipc::Endpoint<PImageBridgeChild>* aOutEndpoint);
   bool CreateContentVRManager(
-      base::ProcessId aOtherProcess,
+      base::ProcessId aOtherProcess, dom::ContentParentId aChildId,
       mozilla::ipc::Endpoint<PVRManagerChild>* aOutEndpoint);
   void CreateContentRemoteDecoderManager(
-      base::ProcessId aOtherProcess,
+      base::ProcessId aOtherProcess, dom::ContentParentId aChildId,
       mozilla::ipc::Endpoint<PRemoteDecoderManagerChild>* aOutEndPoint);
 
   // Called from RemoteCompositorSession. We track remote sessions so we can
@@ -240,6 +241,8 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
 
   void DestroyRemoteCompositorSessions();
   void DestroyInProcessCompositorSessions();
+
+  void OnBlockingProcessUnexpectedShutdown();
 
   // Returns true if we crossed the threshold such that we should disable
   // acceleration.

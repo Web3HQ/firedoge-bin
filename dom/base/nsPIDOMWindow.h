@@ -16,7 +16,6 @@
 #include "mozilla/dom/EventTarget.h"
 #include "mozilla/EventForwards.h"
 #include "mozilla/Maybe.h"
-#include "mozilla/TaskCategory.h"
 #include "js/TypeDecls.h"
 #include "nsRefPtrHashtable.h"
 #include "nsILoadInfo.h"
@@ -635,10 +634,9 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   virtual nsresult Close() = 0;
 
   mozilla::dom::DocGroup* GetDocGroup() const;
-  virtual nsISerialEventTarget* EventTargetFor(
-      mozilla::TaskCategory aCategory) const = 0;
 
   void SaveStorageAccessPermissionGranted();
+  void SaveStorageAccessPermissionRevoked();
 
   bool UsingStorageAccess();
 
@@ -759,10 +757,6 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   // The event dispatch code sets and unsets this while keeping
   // the event object alive.
   mozilla::dom::Event* mEvent;
-
-  // A boolean flag indicating whether storage access is granted for the
-  // current window and that it is currently being used by this window.
-  bool mUsingStorageAccess;
 
   // The WindowGlobalChild actor for this window.
   //
@@ -1139,8 +1133,6 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
   virtual void UpdateCommands(const nsAString& anAction) = 0;
 
   mozilla::dom::DocGroup* GetDocGroup() const;
-  virtual nsISerialEventTarget* EventTargetFor(
-      mozilla::TaskCategory aCategory) const = 0;
 
   already_AddRefed<nsIDocShellTreeOwner> GetTreeOwner();
   already_AddRefed<nsIBaseWindow> GetTreeOwnerWindow();

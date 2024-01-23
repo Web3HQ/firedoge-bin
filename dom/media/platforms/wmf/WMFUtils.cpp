@@ -16,9 +16,7 @@
 #  include "AOMDecoder.h"
 #endif
 #include "MP4Decoder.h"
-#include "OpusDecoder.h"
 #include "VideoUtils.h"
-#include "VorbisDecoder.h"
 #include "VPXDecoder.h"
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/CheckedInt.h"
@@ -46,6 +44,7 @@ bool StreamTypeIsVideo(const WMFStreamType& aType) {
     case WMFStreamType::VP8:
     case WMFStreamType::VP9:
     case WMFStreamType::AV1:
+    case WMFStreamType::HEVC:
       return true;
     default:
       return false;
@@ -75,6 +74,8 @@ const char* StreamTypeToString(WMFStreamType aStreamType) {
       return "VP9";
     case WMFStreamType::AV1:
       return "AV1";
+    case WMFStreamType::HEVC:
+      return "HEVC";
     case WMFStreamType::MP3:
       return "MP3";
     case WMFStreamType::AAC:
@@ -104,6 +105,9 @@ WMFStreamType GetStreamTypeFromMimeType(const nsCString& aMimeType) {
     return WMFStreamType::AV1;
   }
 #endif
+  if (MP4Decoder::IsHEVC(aMimeType)) {
+    return WMFStreamType::HEVC;
+  }
   if (aMimeType.EqualsLiteral("audio/mp4a-latm") ||
       aMimeType.EqualsLiteral("audio/mp4")) {
     return WMFStreamType::AAC;
@@ -111,10 +115,10 @@ WMFStreamType GetStreamTypeFromMimeType(const nsCString& aMimeType) {
   if (aMimeType.EqualsLiteral("audio/mpeg")) {
     return WMFStreamType::MP3;
   }
-  if (OpusDataDecoder::IsOpus(aMimeType)) {
+  if (aMimeType.EqualsLiteral("audio/opus")) {
     return WMFStreamType::OPUS;
   }
-  if (VorbisDataDecoder::IsVorbis(aMimeType)) {
+  if (aMimeType.EqualsLiteral("audio/vorbis")) {
     return WMFStreamType::VORBIS;
   }
   return WMFStreamType::Unknown;
@@ -298,9 +302,9 @@ GUID AudioMimeTypeToMediaFoundationSubtype(const nsACString& aMimeType) {
     return MFAudioFormat_MP3;
   } else if (MP4Decoder::IsAAC(aMimeType)) {
     return MFAudioFormat_AAC;
-  } else if (VorbisDataDecoder::IsVorbis(aMimeType)) {
+  } else if (aMimeType.EqualsLiteral("audio/vorbis")) {
     return MFAudioFormat_Vorbis;
-  } else if (OpusDataDecoder::IsOpus(aMimeType)) {
+  } else if (aMimeType.EqualsLiteral("audio/opus")) {
     return MFAudioFormat_Opus;
   }
   NS_WARNING("Unsupport audio mimetype");
@@ -320,6 +324,9 @@ GUID VideoMimeTypeToMediaFoundationSubtype(const nsACString& aMimeType) {
     return MFVideoFormat_AV1;
   }
 #endif
+  else if (MP4Decoder::IsHEVC(aMimeType)) {
+    return MFVideoFormat_HEVC;
+  }
   NS_WARNING("Unsupport video mimetype");
   return GUID_NULL;
 }

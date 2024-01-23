@@ -225,8 +225,9 @@ void LoadAllScripts(WorkerPrivate* aWorkerPrivate,
   }
 
   RefPtr<loader::WorkerScriptLoader> loader =
-      new loader::WorkerScriptLoader(aWorkerPrivate, std::move(aOriginStack),
-                                     syncLoopTarget, aWorkerScriptType, aRv);
+      loader::WorkerScriptLoader::Create(
+          aWorkerPrivate, std::move(aOriginStack), syncLoopTarget,
+          aWorkerScriptType, aRv);
 
   if (NS_WARN_IF(aRv.Failed())) {
     return;
@@ -396,14 +397,15 @@ nsresult GetModuleSecFlags(bool aIsTopLevel, nsIPrincipal* principal,
   // Step 9. If destination is "worker", "sharedworker", or "serviceworker",
   //         and the top-level module fetch flag is set, then set request's
   //         mode to "same-origin".
-  secFlags = aIsTopLevel
-                 ? nsILoadInfo::SEC_REQUIRE_SAME_ORIGIN_DATA_IS_BLOCKED
-                 : nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_INHERITS_SEC_CONTEXT;
 
   // Step 8. Let request be a new request whose [...] mode is "cors" [...]
+  secFlags = aIsTopLevel ? nsILoadInfo::SEC_REQUIRE_SAME_ORIGIN_DATA_IS_BLOCKED
+                         : nsILoadInfo::SEC_REQUIRE_CORS_INHERITS_SEC_CONTEXT;
+
   // This implements the same Cookie settings as  nsContentSecurityManager's
   // ComputeSecurityFlags. The main difference is the line above, Step 9,
   // setting to same origin.
+
   if (aCredentials == RequestCredentials::Include) {
     secFlags |= nsILoadInfo::nsILoadInfo::SEC_COOKIES_INCLUDE;
   } else if (aCredentials == RequestCredentials::Same_origin) {
@@ -470,7 +472,6 @@ static bool EvaluateSourceBuffer(JSContext* aCx, JS::Handle<JSScript*> aScript,
 }
 
 WorkerScriptLoader::WorkerScriptLoader(
-    WorkerPrivate* aWorkerPrivate,
     UniquePtr<SerializedStackHolder> aOriginStack,
     nsISerialEventTarget* aSyncLoopTarget, WorkerScriptType aWorkerScriptType,
     ErrorResult& aRv)
@@ -480,30 +481,47 @@ WorkerScriptLoader::WorkerScriptLoader(
       mRv(aRv),
       mLoadingModuleRequestCount(0),
       mCleanedUp(false),
-      mCleanUpLock("cleanUpLock") {
+      mCleanUpLock("cleanUpLock") {}
+
+already_AddRefed<WorkerScriptLoader> WorkerScriptLoader::Create(
+    WorkerPrivate* aWorkerPrivate,
+    UniquePtr<SerializedStackHolder> aOriginStack,
+    nsISerialEventTarget* aSyncLoopTarget, WorkerScriptType aWorkerScriptType,
+    ErrorResult& aRv) {
   aWorkerPrivate->AssertIsOnWorkerThread();
 
-  RefPtr<StrongWorkerRef> workerRef =
-      StrongWorkerRef::Create(aWorkerPrivate, "ScriptLoader");
+  RefPtr<WorkerScriptLoader> self = new WorkerScriptLoader(
+      std::move(aOriginStack), aSyncLoopTarget, aWorkerScriptType, aRv);
+
+  RefPtr<StrongWorkerRef> workerRef = StrongWorkerRef::Create(
+      aWorkerPrivate, "WorkerScriptLoader::Create", [self]() {
+        // Requests that are in flight are covered by the worker references
+        // in DispatchLoadScript(s), so we do not need to do additional
+        // cleanup, but just in case we are ready/aborted we can try to
+        // shutdown here, too.
+        self->TryShutdown();
+      });
 
   if (workerRef) {
-    mWorkerRef = new ThreadSafeWorkerRef(workerRef);
+    self->mWorkerRef = new ThreadSafeWorkerRef(workerRef);
   } else {
-    mRv.Throw(NS_ERROR_FAILURE);
-    return;
+    self->mRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
   }
 
-  nsIGlobalObject* global = GetGlobal();
-  mController = global->GetController();
+  nsIGlobalObject* global = self->GetGlobal();
+  self->mController = global->GetController();
 
   if (!StaticPrefs::dom_workers_modules_enabled()) {
-    return;
+    return self.forget();
   }
 
   // Set up the module loader, if it has not been initialzied yet.
   if (!aWorkerPrivate->IsServiceWorker()) {
-    InitModuleLoader();
+    self->InitModuleLoader();
   }
+
+  return self.forget();
 }
 
 ScriptLoadRequest* WorkerScriptLoader::GetMainScript() {
@@ -615,8 +633,22 @@ already_AddRefed<ScriptLoadRequest> WorkerScriptLoader::CreateScriptLoadRequest(
 
   Maybe<ClientInfo> clientInfo = GetGlobal()->GetClientInfo();
 
-  RefPtr<WorkerLoadContext> loadContext =
-      new WorkerLoadContext(kind, clientInfo, this);
+  // (For non-serviceworkers, this variable does not matter, but false best
+  // captures their behavior.)
+  bool onlyExistingCachedResourcesAllowed = false;
+  if (mWorkerRef->Private()->IsServiceWorker()) {
+    // https://w3c.github.io/ServiceWorker/#importscripts step 4:
+    // > 4. If serviceWorker’s state is not "parsed" or "installing":
+    // >    1. Return map[url] if it exists and a network error otherwise.
+    //
+    // So if our state is beyond installing, it's too late to make a request
+    // that would perform a new fetch which would be cached.
+    onlyExistingCachedResourcesAllowed =
+        mWorkerRef->Private()->GetServiceWorkerDescriptor().State() >
+        ServiceWorkerState::Installing;
+  }
+  RefPtr<WorkerLoadContext> loadContext = new WorkerLoadContext(
+      kind, clientInfo, this, onlyExistingCachedResourcesAllowed);
 
   // Create ScriptLoadRequests for this WorkerScriptLoader
   ReferrerPolicy referrerPolicy = mWorkerRef->Private()->GetReferrerPolicy();
@@ -627,11 +659,13 @@ already_AddRefed<ScriptLoadRequest> WorkerScriptLoader::CreateScriptLoadRequest(
                 aIsMainScript && !mWorkerRef->Private()->GetParent());
   nsCOMPtr<nsIURI> baseURI = aIsMainScript ? GetInitialBaseURI() : GetBaseURI();
   nsCOMPtr<nsIURI> uri;
+  bool setErrorResult = false;
   nsresult rv =
       ConstructURI(aScriptURL, baseURI, aDocumentEncoding, getter_AddRefs(uri));
   // If we failed to construct the URI, handle it in the LoadContext so it is
   // thrown in the right order.
   if (NS_WARN_IF(NS_FAILED(rv))) {
+    setErrorResult = true;
     loadContext->mLoadResult = rv;
   }
 
@@ -645,15 +679,16 @@ already_AddRefed<ScriptLoadRequest> WorkerScriptLoader::CreateScriptLoadRequest(
   // is "not-parser-inserted", credentials mode is credentials mode, referrer
   // policy is the empty string, and fetch priority is "auto".
   RefPtr<ScriptFetchOptions> fetchOptions = new ScriptFetchOptions(
-      CORSMode::CORS_NONE, referrerPolicy, /* aNonce = */ u""_ns,
-      RequestPriority::Auto, ParserMetadata::NotParserInserted, nullptr);
+      CORSMode::CORS_NONE, /* aNonce = */ u""_ns, RequestPriority::Auto,
+      ParserMetadata::NotParserInserted, nullptr);
 
   RefPtr<ScriptLoadRequest> request = nullptr;
   // Bug 1817259 - For now the debugger scripts are always loaded a Classic.
   if (mWorkerRef->Private()->WorkerType() == WorkerType::Classic ||
       IsDebuggerScript()) {
-    request = new ScriptLoadRequest(ScriptKind::eClassic, uri, fetchOptions,
-                                    SRIMetadata(), nullptr,  // mReferrer
+    request = new ScriptLoadRequest(ScriptKind::eClassic, uri, referrerPolicy,
+                                    fetchOptions, SRIMetadata(),
+                                    nullptr,  // mReferrer
                                     loadContext);
   } else {
     // Implements part of "To fetch a worklet/module worker script graph"
@@ -685,7 +720,7 @@ already_AddRefed<ScriptLoadRequest> WorkerScriptLoader::CreateScriptLoadRequest(
 
     // Part of Step 2. This sets the Top-level flag to true
     request = new ModuleLoadRequest(
-        uri, fetchOptions, SRIMetadata(), referrer, loadContext,
+        uri, referrerPolicy, fetchOptions, SRIMetadata(), referrer, loadContext,
         true,  /* is top level */
         false, /* is dynamic import */
         moduleLoader, ModuleLoadRequest::NewVisitedSetForTopLevelImport(uri),
@@ -694,6 +729,12 @@ already_AddRefed<ScriptLoadRequest> WorkerScriptLoader::CreateScriptLoadRequest(
 
   // Set the mURL, it will be used for error handling and debugging.
   request->mURL = NS_ConvertUTF16toUTF8(aScriptURL);
+
+  if (setErrorResult) {
+    request->SetPendingFetchingError();
+  } else {
+    request->NoCacheEntryFound();
+  }
 
   return request.forget();
 }
@@ -712,7 +753,8 @@ bool WorkerScriptLoader::DispatchLoadScript(ScriptLoadRequest* aRequest) {
       new ScriptLoaderRunnable(this, std::move(scriptLoadList));
 
   RefPtr<StrongWorkerRef> workerRef = StrongWorkerRef::Create(
-      mWorkerRef->Private(), "ScriptLoader", [runnable]() {
+      mWorkerRef->Private(), "WorkerScriptLoader::DispatchLoadScript",
+      [runnable]() {
         NS_DispatchToMainThread(NewRunnableMethod(
             "ScriptLoaderRunnable::CancelMainThreadWithBindingAborted",
             runnable,
@@ -736,7 +778,8 @@ bool WorkerScriptLoader::DispatchLoadScripts() {
       new ScriptLoaderRunnable(this, std::move(scriptLoadList));
 
   RefPtr<StrongWorkerRef> workerRef = StrongWorkerRef::Create(
-      mWorkerRef->Private(), "ScriptLoader", [runnable]() {
+      mWorkerRef->Private(), "WorkerScriptLoader::DispatchLoadScripts",
+      [runnable]() {
         NS_DispatchToMainThread(NewRunnableMethod(
             "ScriptLoaderRunnable::CancelMainThreadWithBindingAborted",
             runnable,
@@ -841,9 +884,7 @@ bool WorkerScriptLoader::ProcessPendingRequests(JSContext* aCx) {
   MOZ_ASSERT(global);
 
   while (!mLoadedRequests.isEmpty()) {
-    // Take a reference, but do not remove it from the list yet. There is a
-    // possibility that this will need to be cancelled.
-    RefPtr<ScriptLoadRequest> req = mLoadedRequests.getFirst();
+    RefPtr<ScriptLoadRequest> req = mLoadedRequests.StealFirst();
     // We don't have a ProcessRequest method (like we do on the DOM), as there
     // isn't much processing that we need to do per request that isn't related
     // to evaluation (the processsing done for the DOM is handled in
@@ -851,14 +892,13 @@ bool WorkerScriptLoader::ProcessPendingRequests(JSContext* aCx) {
     // So, this inner loop calls EvaluateScript directly. This will change
     // once modules are introduced as we will have some extra work to do.
     if (!EvaluateScript(aCx, req)) {
+      req->Cancel();
       mExecutionAborted = true;
       WorkerLoadContext* loadContext = req->GetWorkerLoadContext();
       mMutedErrorFlag = loadContext->mMutedErrorFlag.valueOr(true);
       mLoadedRequests.CancelRequestsAndClear();
       break;
     }
-    // remove the element from the list.
-    mLoadedRequests.Remove(req);
   }
 
   TryShutdown();
@@ -1185,7 +1225,8 @@ bool WorkerScriptLoader::EvaluateScript(JSContext* aCx,
 
   // Get the source text.
   ScriptLoadRequest::MaybeSourceText maybeSource;
-  rv = aRequest->GetScriptSource(aCx, &maybeSource);
+  rv = aRequest->GetScriptSource(aCx, &maybeSource,
+                                 aRequest->mLoadContext.get());
   if (NS_FAILED(rv)) {
     mRv.StealExceptionFromJSContext(aCx);
     return false;
@@ -1209,8 +1250,11 @@ bool WorkerScriptLoader::EvaluateScript(JSContext* aCx,
     } else {
       requestBaseURI = aRequest->mBaseURL;
     }
-    classicScript =
-        new JS::loader::ClassicScript(aRequest->mFetchOptions, requestBaseURI);
+    MOZ_ASSERT(aRequest->mLoadedScript->IsClassicScript());
+    MOZ_ASSERT(aRequest->mLoadedScript->GetFetchOptions() ==
+               aRequest->mFetchOptions);
+    aRequest->mLoadedScript->SetBaseURL(requestBaseURI);
+    classicScript = aRequest->mLoadedScript->AsClassicScript();
   }
 
   JS::Rooted<JSScript*> script(aCx);
@@ -1311,8 +1355,9 @@ void WorkerScriptLoader::ShutdownScriptLoader(bool aResult, bool aMutedError) {
     mWorkerRef->Private()->AssertIsOnWorkerThread();
     // Module loader doesn't use sync loop for dynamic import
     if (mSyncLoopTarget) {
-      mWorkerRef->Private()->StopSyncLoop(mSyncLoopTarget,
-                                          aResult ? NS_OK : NS_ERROR_FAILURE);
+      mWorkerRef->Private()->MaybeStopSyncLoop(
+          mSyncLoopTarget, aResult ? NS_OK : NS_ERROR_FAILURE);
+      mSyncLoopTarget = nullptr;
     }
 
     // Signal cleanup
@@ -1427,7 +1472,8 @@ nsresult ScriptLoaderRunnable::Run() {
     handle->mRunnable = this;
     WorkerLoadContext* loadContext = handle->GetContext();
     mCacheCreator->AddLoader(MakeNotNull<RefPtr<CacheLoadHandler>>(
-        mWorkerRef, handle, loadContext->IsTopLevel(), mScriptLoader));
+        mWorkerRef, handle, loadContext->IsTopLevel(),
+        loadContext->mOnlyExistingCachedResourcesAllowed, mScriptLoader));
   }
 
   // The worker may have a null principal on first load, but in that case its

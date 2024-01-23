@@ -113,8 +113,6 @@ class LoadListener {
 export var SearchUtils = {
   BROWSER_SEARCH_PREF,
 
-  SETTINGS_KEY: "search-config",
-
   /**
    * This is the Remote Settings key that we use to get the ignore lists for
    * engines.
@@ -128,6 +126,58 @@ export var SearchUtils = {
   SETTINGS_ALLOWLIST_KEY: "search-default-override-allowlist",
 
   /**
+   * This is the Remote Settings key for getting the older search engine
+   * configuration. Tests may use `SETTINGS_KEY` if they want to get the key
+   * for the current configuration according to the preference.
+   */
+  OLD_SETTINGS_KEY: "search-config",
+
+  /**
+   * This is the Remote Settings key for getting the newer search engine
+   * configuration. Tests may use `SETTINGS_KEY` if they want to get the key
+   * for the current configuration according to the preference.
+   */
+  NEW_SETTINGS_KEY: "search-config-v2",
+
+  /**
+   * This is the Remote Settings key for getting the overrides for the
+   * older search engine configuration. Tests may use `SETTINGS_OVERRIDES_KEY`
+   * for the current configuration according to the preference.
+   */
+  OLD_SETTINGS_OVERRIDES_KEY: "search-config-overrides",
+
+  /**
+   * This is the Remote Settings key for getting the overrides for the
+   * newer search engine configuration. Tests may use `SETTINGS_OVERRIDES_KEY`
+   * for the current configuration according to the preference.
+   */
+  NEW_SETTINGS_OVERRIDES_KEY: "search-config-overrides-v2",
+
+  /**
+   * This is the Remote Settings key that we use to get the search engine
+   * configurations.
+   *
+   * @returns {string}
+   */
+  get SETTINGS_KEY() {
+    return SearchUtils.newSearchConfigEnabled
+      ? SearchUtils.NEW_SETTINGS_KEY
+      : SearchUtils.OLD_SETTINGS_KEY;
+  },
+
+  /**
+   * This is the Remote Settings key that we use to get the search engine
+   * configuration overrides.
+   *
+   * @returns {string}
+   */
+  get SETTINGS_OVERRIDES_KEY() {
+    return SearchUtils.newSearchConfigEnabled
+      ? SearchUtils.NEW_SETTINGS_OVERRIDES_KEY
+      : SearchUtils.OLD_SETTINGS_OVERRIDES_KEY;
+  },
+
+  /**
    * Topic used for events involving the service itself.
    */
   TOPIC_SEARCH_SERVICE: "browser-search-service",
@@ -136,7 +186,6 @@ export var SearchUtils = {
   TOPIC_ENGINE_MODIFIED: "browser-search-engine-modified",
   MODIFIED_TYPE: {
     CHANGED: "engine-changed",
-    LOADED: "engine-loaded",
     REMOVED: "engine-removed",
     ADDED: "engine-added",
     DEFAULT: "engine-default",
@@ -174,7 +223,6 @@ export var SearchUtils = {
   DEFAULT_TAG: "default",
 
   MOZ_PARAM: {
-    DATE: "moz:date",
     LOCALE: "moz:locale",
   },
 
@@ -383,6 +431,13 @@ XPCOMUtils.defineLazyPreferenceGetter(
   SearchUtils,
   "loggingEnabled",
   BROWSER_SEARCH_PREF + "log",
+  false
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  SearchUtils,
+  "newSearchConfigEnabled",
+  "browser.search.newSearchConfig.enabled",
   false
 );
 

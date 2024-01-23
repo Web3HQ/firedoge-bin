@@ -22,7 +22,7 @@ use std::ops::{Deref, DerefMut};
 
 bitflags! {
     /// Various flags stored on ElementData.
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     pub struct ElementDataFlags: u8 {
         /// Whether the styles changed for this restyle.
         const WAS_RESTYLED = 1 << 0;
@@ -312,12 +312,8 @@ impl ElementData {
             return InvalidationResult::empty();
         }
 
-        let mut processor = StateAndAttrInvalidationProcessor::new(
-            shared_context,
-            element,
-            self,
-            selector_caches,
-        );
+        let mut processor =
+            StateAndAttrInvalidationProcessor::new(shared_context, element, self, selector_caches);
 
         let invalidator = TreeStyleInvalidator::new(element, stack_limit_checker, &mut processor);
 

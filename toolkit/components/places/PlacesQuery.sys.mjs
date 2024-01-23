@@ -8,12 +8,14 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BinarySearch: "resource://gre/modules/BinarySearch.sys.mjs",
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
+  DeferredTask: "resource://gre/modules/DeferredTask.sys.mjs",
   ObjectUtils: "resource://gre/modules/ObjectUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
-  requestIdleCallback: "resource://gre/modules/Timer.sys.mjs",
 });
 
 const BULK_PLACES_EVENTS_THRESHOLD = 50;
+const OBSERVER_DEBOUNCE_RATE_MS = 500;
+const OBSERVER_DEBOUNCE_TIMEOUT_MS = 5000;
 
 /**
  * An object that contains details of a page visit.
@@ -22,8 +24,6 @@ const BULK_PLACES_EVENTS_THRESHOLD = 50;
  *
  * @property {Date} date
  *   When this page was visited.
- * @property {number} id
- *   Visit ID from the database.
  * @property {string} title
  *   The page's title.
  * @property {string} url
@@ -56,6 +56,9 @@ export class PlacesQuery {
   #historyListener = null;
   /** @type {function(HistoryVisit[])} */
   #historyListenerCallback = null;
+  /** @type {DeferredTask} */
+  #historyObserverTask = null;
+  #searchInProgress = false;
 
   /**
    * Get a snapshot of history visits at this moment.
@@ -115,7 +118,7 @@ export class PlacesQuery {
         groupBy = "url";
         break;
     }
-    const sql = `SELECT v.id, visit_date, title, url, frecency
+    const sql = `SELECT MAX(visit_date) as visit_date, title, url
       FROM moz_historyvisits v
       JOIN moz_places h
       ON v.place_id = h.id
@@ -128,12 +131,57 @@ export class PlacesQuery {
       LIMIT ${limit > 0 ? limit : -1}`;
     const rows = await db.executeCached(sql);
     for (const row of rows) {
-      this.appendToCache({
-        date: lazy.PlacesUtils.toDate(row.getResultByName("visit_date")),
-        id: row.getResultByName("id"),
-        title: row.getResultByName("title"),
-        url: row.getResultByName("url"),
+      const visit = this.formatRowAsVisit(row);
+      this.appendToCache(visit);
+    }
+  }
+
+  /**
+   * Search the database for visits matching a search query. This does not
+   * affect internal caches, and observers will not be notified of search
+   * results obtained from this query.
+   *
+   * @param {string} query
+   *   The search query.
+   * @param {number} [limit]
+   *   The maximum number of visits to return.
+   * @returns {HistoryVisit[]}
+   *   The matching visits.
+   */
+  async searchHistory(query, limit) {
+    const { sortBy } = this.cachedHistoryOptions;
+    const db = await lazy.PlacesUtils.promiseLargeCacheDBConnection();
+    let orderBy;
+    switch (sortBy) {
+      case "date":
+        orderBy = "visit_date DESC";
+        break;
+      case "site":
+        orderBy = "url";
+        break;
+    }
+    const sql = `SELECT MAX(visit_date) as visit_date, title, url
+      FROM moz_historyvisits v
+      JOIN moz_places h
+      ON v.place_id = h.id
+      WHERE AUTOCOMPLETE_MATCH(:query, url, title, NULL, 1, 1, 1, 1, :matchBehavior, :searchBehavior, NULL)
+      AND hidden = 0
+      GROUP BY url
+      ORDER BY ${orderBy}
+      LIMIT ${limit > 0 ? limit : -1}`;
+    if (this.#searchInProgress) {
+      db.interrupt();
+    }
+    try {
+      this.#searchInProgress = true;
+      const rows = await db.executeCached(sql, {
+        query,
+        matchBehavior: Ci.mozIPlacesAutoComplete.MATCH_ANYWHERE_UNMODIFIED,
+        searchBehavior: Ci.mozIPlacesAutoComplete.BEHAVIOR_HISTORY,
       });
+      return rows.map(row => this.formatRowAsVisit(row));
+    } finally {
+      this.#searchInProgress = false;
     }
   }
 
@@ -158,6 +206,19 @@ export class PlacesQuery {
    */
   insertSortedIntoCache(visit) {
     const container = this.#getContainerForVisit(visit);
+    const existingVisitsForUrl = this.#cachedHistoryPerUrl.get(visit.url) ?? [];
+    for (const existingVisit of existingVisitsForUrl) {
+      if (this.#getContainerForVisit(existingVisit) === container) {
+        if (existingVisit.date.getTime() >= visit.date.getTime()) {
+          // Existing visit is more recent. Don't insert this one.
+          return;
+        }
+        // Remove the existing visit, then insert the new one.
+        container.splice(container.indexOf(existingVisit), 1);
+        existingVisitsForUrl.delete(existingVisit);
+        break;
+      }
+    }
     let insertionPoint = 0;
     if (visit.date.getTime() < container[0]?.date.getTime()) {
       insertionPoint = lazy.BinarySearch.insertionIndexOf(
@@ -248,12 +309,26 @@ export class PlacesQuery {
     }
     this.#historyListener = null;
     this.#historyListenerCallback = null;
+    if (!this.#historyObserverTask.isFinalized) {
+      this.#historyObserverTask.disarm();
+      this.#historyObserverTask.finalize();
+    }
   }
 
   /**
    * Listen for changes to the visits table and update caches accordingly.
    */
   #initHistoryListener() {
+    this.#historyObserverTask = new lazy.DeferredTask(
+      async () => {
+        if (typeof this.#historyListenerCallback === "function") {
+          const history = await this.getHistory(this.cachedHistoryOptions);
+          this.#historyListenerCallback(history);
+        }
+      },
+      OBSERVER_DEBOUNCE_RATE_MS,
+      OBSERVER_DEBOUNCE_TIMEOUT_MS
+    );
     this.#historyListener = async events => {
       if (
         events.length >= BULK_PLACES_EVENTS_THRESHOLD ||
@@ -278,12 +353,7 @@ export class PlacesQuery {
           }
         }
       }
-      lazy.requestIdleCallback(async () => {
-        if (typeof this.#historyListenerCallback === "function") {
-          const history = await this.getHistory(this.cachedHistoryOptions);
-          this.#historyListenerCallback(history);
-        }
-      });
+      this.#historyObserverTask.arm();
     };
     PlacesObservers.addListener(
       ["page-removed", "page-visited", "history-cleared", "page-title-changed"],
@@ -303,12 +373,7 @@ export class PlacesQuery {
     if (event.hidden) {
       return null;
     }
-    const visit = {
-      date: new Date(event.visitTime),
-      id: event.visitId,
-      title: event.lastKnownTitle,
-      url: event.url,
-    };
+    const visit = this.formatEventAsVisit(event);
     this.insertSortedIntoCache(visit);
     return visit;
   }
@@ -357,5 +422,37 @@ export class PlacesQuery {
    */
   getStartOfMonthTimestamp(date) {
     return new Date(date.getFullYear(), date.getMonth()).getTime();
+  }
+
+  /**
+   * Format a database row as a history visit.
+   *
+   * @param {mozIStorageRow} row
+   *   The row to format.
+   * @returns {HistoryVisit}
+   *   The resulting history visit.
+   */
+  formatRowAsVisit(row) {
+    return {
+      date: lazy.PlacesUtils.toDate(row.getResultByName("visit_date")),
+      title: row.getResultByName("title"),
+      url: row.getResultByName("url"),
+    };
+  }
+
+  /**
+   * Format a page visited event as a history visit.
+   *
+   * @param {PlacesEvent} event
+   *   The event to format.
+   * @returns {HistoryVisit}
+   *   The resulting history visit.
+   */
+  formatEventAsVisit(event) {
+    return {
+      date: new Date(event.visitTime),
+      title: event.lastKnownTitle,
+      url: event.url,
+    };
   }
 }

@@ -215,17 +215,6 @@
 #  define SM_CONVERTIBLESLATEMODE 0x2003
 #endif
 
-// Win 8.1+ (_WIN32_WINNT_WINBLUE)
-#if !defined(WM_DPICHANGED)
-#  define WM_DPICHANGED 0x02E0
-#endif
-
-// Win 8+ (_WIN32_WINNT_WIN8)
-#if !defined(EVENT_OBJECT_CLOAKED)
-#  define EVENT_OBJECT_CLOAKED 0x8017
-#  define EVENT_OBJECT_UNCLOAKED 0x8018
-#endif
-
 #include "mozilla/gfx/DeviceManagerDx.h"
 #include "mozilla/layers/APZInputBridge.h"
 #include "mozilla/layers/InputAPZContext.h"
@@ -619,17 +608,17 @@ class InitializeVirtualDesktopManagerTask : public Task {
   }
 #endif
 
-  virtual bool Run() override {
+  virtual TaskResult Run() override {
     RefPtr<IVirtualDesktopManager> desktopManager;
     HRESULT hr = ::CoCreateInstance(
         CLSID_VirtualDesktopManager, NULL, CLSCTX_INPROC_SERVER,
         __uuidof(IVirtualDesktopManager), getter_AddRefs(desktopManager));
     if (FAILED(hr)) {
-      return true;
+      return TaskResult::Complete;
     }
 
     gVirtualDesktopManager = desktopManager;
-    return true;
+    return TaskResult::Complete;
   }
 };
 
@@ -2196,13 +2185,13 @@ void nsWindow::AsyncUpdateWorkspaceID(Desktop& aDesktop) {
         : Task(Kind::OffMainThreadOnly, EventQueuePriority::Normal),
           mSelf(aSelf) {}
 
-    bool Run() override {
+    TaskResult Run() override {
       auto desktop = mSelf->mDesktopId.Lock();
       if (desktop->mUpdateIsQueued) {
         DoGetWorkspaceID(mSelf->mWnd, &desktop->mID);
         desktop->mUpdateIsQueued = false;
       }
-      return true;
+      return TaskResult::Complete;
     }
 
 #ifdef MOZ_COLLECTING_RUNNABLE_TELEMETRY
@@ -2576,8 +2565,8 @@ void nsWindow::UpdateGetWindowInfoCaptionStatus(bool aActiveCaption) {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 
 void nsWindow::UpdateDarkModeToolbar() {
-  LookAndFeel::EnsureColorSchemesInitialized();
-  BOOL dark = LookAndFeel::ColorSchemeForChrome() == ColorScheme::Dark;
+  PreferenceSheet::EnsureInitialized();
+  BOOL dark = PreferenceSheet::ColorSchemeForChrome() == ColorScheme::Dark;
   DwmSetWindowAttribute(mWnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, &dark,
                         sizeof dark);
   DwmSetWindowAttribute(mWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
@@ -3042,7 +3031,10 @@ void nsWindow::SetCursor(const Cursor& aCursor) {
   sCurrentHCursorIsCustom = false;
   sCurrentCursor = aCursor;
 
-  HCURSOR cursor = CursorForImage(aCursor, GetDefaultScale());
+  HCURSOR cursor = nullptr;
+  if (mCustomCursorAllowed) {
+    cursor = CursorForImage(aCursor, GetDefaultScale());
+  }
   bool custom = false;
   if (cursor) {
     custom = true;
@@ -3755,15 +3747,11 @@ void nsWindow::EnableDragDrop(bool aEnable) {
     if (!mNativeDragTarget) {
       mNativeDragTarget = new nsNativeDragTarget(this);
       mNativeDragTarget->AddRef();
-      if (SUCCEEDED(::CoLockObjectExternal((LPUNKNOWN)mNativeDragTarget, TRUE,
-                                           FALSE))) {
-        ::RegisterDragDrop(mWnd, (LPDROPTARGET)mNativeDragTarget);
-      }
+      ::RegisterDragDrop(mWnd, (LPDROPTARGET)mNativeDragTarget);
     }
   } else {
     if (mWnd && mNativeDragTarget) {
       ::RevokeDragDrop(mWnd);
-      ::CoLockObjectExternal((LPUNKNOWN)mNativeDragTarget, FALSE, TRUE);
       mNativeDragTarget->DragCancel();
       NS_RELEASE(mNativeDragTarget);
     }
@@ -5667,6 +5655,20 @@ bool nsWindow::ProcessMessageInternal(UINT msg, WPARAM& wParam, LPARAM& lParam,
         NotifySizeMoveDone();
       }
 
+      // Windows spins a separate hidden event loop when moving a window so we
+      // don't hear mouse events during this time and WM_EXITSIZEMOVE is fired
+      // when the hidden event loop exits. We set mDraggingWindowWithMouse to
+      // true in WM_NCLBUTTONDOWN when we started moving the window with the
+      // mouse so we know that if mDraggingWindowWithMouse is true, we can send
+      // a mouse up event.
+      if (mDraggingWindowWithMouse) {
+        mDraggingWindowWithMouse = false;
+        result = DispatchMouseEvent(
+            eMouseUp, wParam, lParam, false, MouseButton::ePrimary,
+            MOUSE_INPUT_SOURCE(),
+            mPointerEvents.GetCachedPointerInfo(msg, wParam));
+      }
+
       break;
     }
 
@@ -5694,6 +5696,7 @@ bool nsWindow::ProcessMessageInternal(UINT msg, WPARAM& wParam, LPARAM& lParam,
       if (ClientMarginHitTestPoint(GET_X_LPARAM(lParam),
                                    GET_Y_LPARAM(lParam)) == HTCAPTION) {
         DispatchCustomEvent(u"draggableregionleftmousedown"_ns);
+        mDraggingWindowWithMouse = true;
       }
 
       if (IsWindowButton(wParam) && mCustomNonClient) {
@@ -5758,7 +5761,13 @@ bool nsWindow::ProcessMessageInternal(UINT msg, WPARAM& wParam, LPARAM& lParam,
     } break;
 
     case WM_ACTIVATEAPP: {
-      GPUProcessManager::Get()->SetAppInForeground(wParam);
+      // Bug 1851991: Sometimes this can be called before gfxPlatform::Init
+      // when a window is created very early. In that case we just forego
+      // setting this and accept the GPU process might briefly run at a lower
+      // priority.
+      if (GPUProcessManager::Get()) {
+        GPUProcessManager::Get()->SetAppInForeground(wParam);
+      }
     } break;
 
     case WM_MOUSEACTIVATE:
@@ -7095,7 +7104,7 @@ void nsWindow::OnSizeModeChange() {
         this, mode != nsSizeMode_Minimized);
 
     wr::DebugFlags flags{0};
-    flags.bits = gfx::gfxVars::WebRenderDebugFlags();
+    flags._0 = gfx::gfxVars::WebRenderDebugFlags();
     bool debugEnabled = bool(flags & wr::DebugFlags::WINDOW_VISIBILITY_DBG);
     if (debugEnabled && mCompositorWidgetDelegate) {
       mCompositorWidgetDelegate->NotifyVisibilityUpdated(mode,

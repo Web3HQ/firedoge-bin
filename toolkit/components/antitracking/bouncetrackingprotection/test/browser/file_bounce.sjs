@@ -1,10 +1,10 @@
 function handleRequest(request, response) {
   response.setHeader("Cache-Control", "no-cache", false);
 
-  Cu.importGlobalProperties(["URLSearchParams"]);
   let query = new URLSearchParams(request.queryString);
 
-  if (query.get("setCookie")) {
+  let setState = query.get("setState");
+  if (setState == "cookie-server") {
     response.setHeader("Set-Cookie", "foo=bar");
   }
 

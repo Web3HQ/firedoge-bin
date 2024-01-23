@@ -82,9 +82,9 @@ async function checkDialog(
       "Title should fit without overflowing."
     );
 
-    ok(BrowserTestUtils.is_visible(titleEl), "New title should be shown.");
+    ok(BrowserTestUtils.isVisible(titleEl), "New title should be shown.");
     ok(
-      BrowserTestUtils.is_hidden(doc.getElementById("infoTitle")),
+      BrowserTestUtils.isHidden(doc.getElementById("infoTitle")),
       "Old title should be hidden."
     );
     let iconCS = doc.ownerGlobal.getComputedStyle(
@@ -192,7 +192,7 @@ add_task(async function test_check_auth() {
   // Try a simple load:
   await checkDialog(
     "https://example.com/",
-    browser => BrowserTestUtils.loadURIString(browser, AUTH_URI),
+    browser => BrowserTestUtils.startLoadingURIString(browser, AUTH_URI),
     HOST,
     "chrome://global/skin/icons/defaultFavicon.svg",
     Ci.nsIPrompt.MODAL_TYPE_TAB

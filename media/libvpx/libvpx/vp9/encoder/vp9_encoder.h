@@ -18,6 +18,7 @@
 #include "vpx/internal/vpx_codec_internal.h"
 #include "vpx/vpx_ext_ratectrl.h"
 #include "vpx/vp8cx.h"
+#include "vpx/vpx_tpl.h"
 #if CONFIG_INTERNAL_STATS
 #include "vpx_dsp/ssim.h"
 #endif
@@ -337,6 +338,7 @@ typedef struct TileDataEnc {
 
   // Used for adaptive_rd_thresh with row multithreading
   int *row_base_thresh_freq_fact;
+  MV firstpass_top_mv;
 } TileDataEnc;
 
 typedef struct RowMTInfo {
@@ -845,7 +847,7 @@ typedef struct VP9_COMP {
 
   uint8_t *skin_map;
 
-  // segment threashold for encode breakout
+  // segment threshold for encode breakout
   int segment_encode_breakout[MAX_SEGMENTS];
 
   CYCLIC_REFRESH *cyclic_refresh;
@@ -918,6 +920,9 @@ typedef struct VP9_COMP {
                     // normalize the firstpass stats. This will differ from the
                     // number of MBs in the current frame when the frame is
                     // scaled.
+
+  int last_coded_width;
+  int last_coded_height;
 
   int use_svc;
 
@@ -1035,6 +1040,13 @@ typedef struct VP9_COMP {
 
   int fixed_qp_onepass;
 
+  // Flag to keep track of dynamic change in deadline mode
+  // (good/best/realtime).
+  MODE deadline_mode_previous_frame;
+
+  // Flag to disable scene detection when rtc rate control library is used.
+  int disable_scene_detection_rtc_ratectrl;
+
 #if CONFIG_COLLECT_COMPONENT_TIMING
   /*!
    * component_time[] are initialized to zero while encoder starts.
@@ -1050,6 +1062,8 @@ typedef struct VP9_COMP {
    */
   uint64_t frame_component_time[kTimingComponents];
 #endif
+  // Flag to indicate if QP and GOP for TPL is controlled by external RC.
+  int tpl_with_external_rc;
 } VP9_COMP;
 
 #if CONFIG_RATE_CTRL
@@ -1075,8 +1089,8 @@ static INLINE void free_partition_info(struct VP9_COMP *cpi) {
 }
 
 static INLINE void reset_mv_info(MOTION_VECTOR_INFO *mv_info) {
-  mv_info->ref_frame[0] = NONE;
-  mv_info->ref_frame[1] = NONE;
+  mv_info->ref_frame[0] = NO_REF_FRAME;
+  mv_info->ref_frame[1] = NO_REF_FRAME;
   mv_info->mv[0].as_int = INVALID_MV;
   mv_info->mv[1].as_int = INVALID_MV;
 }
@@ -1372,6 +1386,14 @@ void vp9_get_ref_frame_info(FRAME_UPDATE_TYPE update_type, int ref_frame_flags,
                             int *ref_frame_valid_list);
 
 void vp9_set_high_precision_mv(VP9_COMP *cpi, int allow_high_precision_mv);
+
+#if CONFIG_VP9_HIGHBITDEPTH
+void vp9_scale_and_extend_frame_nonnormative(const YV12_BUFFER_CONFIG *src,
+                                             YV12_BUFFER_CONFIG *dst, int bd);
+#else
+void vp9_scale_and_extend_frame_nonnormative(const YV12_BUFFER_CONFIG *src,
+                                             YV12_BUFFER_CONFIG *dst);
+#endif  // CONFIG_VP9_HIGHBITDEPTH
 
 YV12_BUFFER_CONFIG *vp9_svc_twostage_scale(
     VP9_COMMON *cm, YV12_BUFFER_CONFIG *unscaled, YV12_BUFFER_CONFIG *scaled,

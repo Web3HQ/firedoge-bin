@@ -54,6 +54,16 @@ function renderInfo({
     container.style.backgroundImage = `url(${infoIcon})`;
   }
 
+  if (feltPrivacyEnabled) {
+    // Record exposure event for Felt Privacy experiment
+    window.FeltPrivacyExposureTelemetry();
+
+    infoTitleEnabled = true;
+    infoTitle = "fluent:about-private-browsing-felt-privacy-v1-info-header";
+    infoBody = "fluent:about-private-browsing-felt-privacy-v1-info-body";
+    infoLinkText = "fluent:about-private-browsing-felt-privacy-v1-info-link";
+  }
+
   titleEl.hidden = !infoTitleEnabled;
 
   translateElements([
@@ -197,7 +207,7 @@ function recordOnceVisible(message) {
         data: message,
       });
       // Similar telemetry, but for Nimbus experiments
-      window.PrivateBrowsingExposureTelemetry();
+      window.PrivateBrowsingPromoExposureTelemetry();
       document.removeEventListener("visibilitychange", recordImpression);
     }
   };
@@ -208,7 +218,7 @@ function recordOnceVisible(message) {
       data: message,
     });
     // Similar telemetry, but for Nimbus experiments
-    window.PrivateBrowsingExposureTelemetry();
+    window.PrivateBrowsingPromoExposureTelemetry();
   } else {
     document.addEventListener("visibilitychange", recordImpression);
   }
@@ -345,38 +355,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // Setup the search hand-off box.
   let btn = document.getElementById("search-handoff-button");
-  RPMSendQuery("ShouldShowSearch", {}).then(
-    ([engineName, shouldHandOffToSearchMode]) => {
-      let input = document.querySelector(".fake-textbox");
-      if (shouldHandOffToSearchMode) {
-        document.l10n.setAttributes(btn, "about-private-browsing-search-btn");
-        document.l10n.setAttributes(
-          input,
-          "about-private-browsing-search-placeholder"
-        );
-      } else if (engineName) {
-        document.l10n.setAttributes(btn, "about-private-browsing-handoff", {
-          engine: engineName,
-        });
-        document.l10n.setAttributes(
-          input,
-          "about-private-browsing-handoff-text",
-          {
-            engine: engineName,
-          }
-        );
-      } else {
-        document.l10n.setAttributes(
-          btn,
-          "about-private-browsing-handoff-no-engine"
-        );
-        document.l10n.setAttributes(
-          input,
-          "about-private-browsing-handoff-text-no-engine"
-        );
-      }
-    }
-  );
 
   let editable = document.getElementById("fake-editable");
   let DISABLE_SEARCH_TOPIC = "DisableSearch";

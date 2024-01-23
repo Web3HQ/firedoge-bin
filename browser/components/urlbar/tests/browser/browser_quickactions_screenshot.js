@@ -49,7 +49,7 @@ add_task(async function test_screenshot() {
     set: [["screenshots.browser.component.enabled", true]],
   });
 
-  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, DUMMY_PAGE);
+  BrowserTestUtils.startLoadingURIString(gBrowser.selectedBrowser, DUMMY_PAGE);
   await BrowserTestUtils.browserLoaded(
     gBrowser.selectedBrowser,
     false,
@@ -111,7 +111,7 @@ add_task(async function search_mode_on_webpage() {
 
   info("Trigger the screenshot mode");
   const initialActionButtons = window.document.querySelectorAll(
-    ".urlbarView-row[dynamicType=quickactions] .urlbarView-quickaction-row"
+    ".urlbarView-row[dynamicType=quickactions] .urlbarView-quickaction-button"
   );
   let screenshotButton;
   for (let i = 0; i < initialActionButtons.length; i++) {
@@ -137,7 +137,7 @@ add_task(async function search_mode_on_webpage() {
   );
 
   info("Check the urlbar state");
-  Assert.equal(gURLBar.value, "https://example.com");
+  Assert.equal(gURLBar.value, UrlbarTestUtils.trimURL("https://example.com"));
   Assert.equal(gURLBar.getAttribute("pageproxystate"), "valid");
 
   info("Show result again");
@@ -150,7 +150,7 @@ add_task(async function search_mode_on_webpage() {
   await clickQuickActionOneoffButton();
   await UrlbarTestUtils.waitForAutocompleteResultAt(window, 0);
   const finalActionButtons = window.document.querySelectorAll(
-    ".urlbarView-row[dynamicType=quickactions] .urlbarView-quickaction-row"
+    ".urlbarView-row[dynamicType=quickactions] .urlbarView-quickaction-button"
   );
 
   info("Check the action buttons and the urlbar");

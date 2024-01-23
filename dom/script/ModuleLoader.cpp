@@ -21,11 +21,14 @@
 #include "js/loader/ModuleLoaderBase.h"
 #include "js/loader/ModuleLoadRequest.h"
 #include "mozilla/dom/RequestBinding.h"
+#include "mozilla/Assertions.h"
+#include "nsError.h"
 #include "xpcpublic.h"
 #include "GeckoProfiler.h"
 #include "nsContentSecurityManager.h"
 #include "nsIContent.h"
 #include "nsJSUtils.h"
+#include "mozilla/CycleCollectedJSContext.h"
 #include "mozilla/dom/AutoEntryScript.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
@@ -127,6 +130,28 @@ nsresult ModuleLoader::StartFetch(ModuleLoadRequest* aRequest) {
   return NS_OK;
 }
 
+void ModuleLoader::AsyncExecuteInlineModule(ModuleLoadRequest* aRequest) {
+  MOZ_ALWAYS_SUCCEEDS(NS_DispatchToMainThread(
+      mozilla::NewRunnableMethod<RefPtr<ModuleLoadRequest>>(
+          "ModuleLoader::ExecuteInlineModule", this,
+          &ModuleLoader::ExecuteInlineModule, aRequest)));
+}
+
+void ModuleLoader::ExecuteInlineModule(ModuleLoadRequest* aRequest) {
+  MOZ_ASSERT(aRequest->IsFinished());
+  MOZ_ASSERT(aRequest->IsTopLevel());
+  MOZ_ASSERT(aRequest->GetScriptLoadContext()->mIsInline);
+
+  if (aRequest->GetScriptLoadContext()->GetParserCreated() == NOT_FROM_PARSER) {
+    GetScriptLoader()->RunScriptWhenSafe(aRequest);
+  } else {
+    GetScriptLoader()->MaybeMoveToLoadedList(aRequest);
+    GetScriptLoader()->ProcessPendingRequests();
+  }
+
+  aRequest->GetScriptLoadContext()->MaybeUnblockOnload();
+}
+
 void ModuleLoader::OnModuleLoadComplete(ModuleLoadRequest* aRequest) {
   MOZ_ASSERT(aRequest->IsFinished());
 
@@ -134,7 +159,28 @@ void ModuleLoader::OnModuleLoadComplete(ModuleLoadRequest* aRequest) {
     if (aRequest->GetScriptLoadContext()->mIsInline &&
         aRequest->GetScriptLoadContext()->GetParserCreated() ==
             NOT_FROM_PARSER) {
-      GetScriptLoader()->RunScriptWhenSafe(aRequest);
+      if (aRequest->mImports.Length() == 0) {
+        GetScriptLoader()->RunScriptWhenSafe(aRequest);
+      } else {
+        AsyncExecuteInlineModule(aRequest);
+        return;
+      }
+    } else if (aRequest->GetScriptLoadContext()->mIsInline &&
+               aRequest->GetScriptLoadContext()->GetParserCreated() !=
+                   NOT_FROM_PARSER &&
+               !nsContentUtils::IsSafeToRunScript()) {
+      // Avoid giving inline async module scripts that don't have
+      // external dependencies a guaranteed execution time relative
+      // to the HTML parse. That is, deliberately avoid guaranteeing
+      // that the script would always observe a DOM shape where the
+      // parser has not added further elements to the DOM.
+      // (If `nsContentUtils::IsSafeToRunScript()` returns `true`,
+      // we come here synchronously from the parser. If it returns
+      // `false` we come here from an external dependency completing
+      // its fetch, in which case we already are at an unspecific
+      // point relative to the parse.)
+      AsyncExecuteInlineModule(aRequest);
+      return;
     } else {
       GetScriptLoader()->MaybeMoveToLoadedList(aRequest);
       GetScriptLoader()->ProcessPendingRequestsAsync();
@@ -179,7 +225,8 @@ nsresult ModuleLoader::CompileFetchedModule(
   RefPtr<JS::Stencil> stencil;
   if (aRequest->IsTextSource()) {
     MaybeSourceText maybeSource;
-    nsresult rv = aRequest->GetScriptSource(aCx, &maybeSource);
+    nsresult rv = aRequest->GetScriptSource(aCx, &maybeSource,
+                                            aRequest->mLoadContext.get());
     NS_ENSURE_SUCCESS(rv, rv);
 
     auto compile = [&](auto& source) {
@@ -191,12 +238,7 @@ nsresult ModuleLoader::CompileFetchedModule(
     JS::DecodeOptions decodeOptions(aOptions);
     decodeOptions.borrowBuffer = true;
 
-    auto& bytecode = aRequest->mScriptBytecode;
-    auto& offset = aRequest->mBytecodeOffset;
-
-    JS::TranscodeRange range(bytecode.begin() + offset,
-                             bytecode.length() - offset);
-
+    JS::TranscodeRange range = aRequest->Bytecode();
     JS::TranscodeResult tr =
         JS::DecodeStencil(aCx, decodeOptions, range, getter_AddRefs(stencil));
     if (tr != JS::TranscodeResult::Ok) {
@@ -226,15 +268,17 @@ nsresult ModuleLoader::CompileFetchedModule(
 
 /* static */
 already_AddRefed<ModuleLoadRequest> ModuleLoader::CreateTopLevel(
-    nsIURI* aURI, ScriptFetchOptions* aFetchOptions,
-    const SRIMetadata& aIntegrity, nsIURI* aReferrer, ScriptLoader* aLoader,
-    ScriptLoadContext* aContext) {
+    nsIURI* aURI, ReferrerPolicy aReferrerPolicy,
+    ScriptFetchOptions* aFetchOptions, const SRIMetadata& aIntegrity,
+    nsIURI* aReferrer, ScriptLoader* aLoader, ScriptLoadContext* aContext) {
   RefPtr<ModuleLoadRequest> request = new ModuleLoadRequest(
-      aURI, aFetchOptions, aIntegrity, aReferrer, aContext, true,
+      aURI, aReferrerPolicy, aFetchOptions, aIntegrity, aReferrer, aContext,
+      true,
       /* is top level */ false, /* is dynamic import */
       aLoader->GetModuleLoader(),
       ModuleLoadRequest::NewVisitedSetForTopLevelImport(aURI), nullptr);
 
+  request->NoCacheEntryFound();
   return request.forget();
 }
 
@@ -247,30 +291,32 @@ already_AddRefed<ModuleLoadRequest> ModuleLoader::CreateStaticImport(
   newContext->mScriptMode = aParent->GetScriptLoadContext()->mScriptMode;
 
   RefPtr<ModuleLoadRequest> request = new ModuleLoadRequest(
-      aURI, aParent->mFetchOptions, SRIMetadata(), aParent->mURI, newContext,
-      false, /* is top level */
-      false, /* is dynamic import */
+      aURI, aParent->ReferrerPolicy(), aParent->mFetchOptions, SRIMetadata(),
+      aParent->mURI, newContext, false, /* is top level */
+      false,                            /* is dynamic import */
       aParent->mLoader, aParent->mVisitedSet, aParent->GetRootModule());
 
+  request->NoCacheEntryFound();
   return request.forget();
 }
 
 already_AddRefed<ModuleLoadRequest> ModuleLoader::CreateDynamicImport(
     JSContext* aCx, nsIURI* aURI, LoadedScript* aMaybeActiveScript,
-    JS::Handle<JS::Value> aReferencingPrivate, JS::Handle<JSString*> aSpecifier,
-    JS::Handle<JSObject*> aPromise) {
+    JS::Handle<JSString*> aSpecifier, JS::Handle<JSObject*> aPromise) {
   MOZ_ASSERT(aSpecifier);
   MOZ_ASSERT(aPromise);
 
   RefPtr<ScriptFetchOptions> options = nullptr;
   nsIURI* baseURL = nullptr;
   RefPtr<ScriptLoadContext> context = new ScriptLoadContext();
+  ReferrerPolicy referrerPolicy;
 
   if (aMaybeActiveScript) {
     // https://html.spec.whatwg.org/multipage/webappapis.html#hostloadimportedmodule
     // Step 6.3. Set fetchOptions to the new descendant script fetch options for
     // referencingScript's fetch options.
     options = aMaybeActiveScript->GetFetchOptions();
+    referrerPolicy = aMaybeActiveScript->ReferrerPolicy();
     baseURL = aMaybeActiveScript->BaseURL();
   } else {
     // We don't have a referencing script so fall back on using
@@ -294,9 +340,9 @@ already_AddRefed<ModuleLoadRequest> ModuleLoader::CreateDynamicImport(
     // "same-origin", referrer policy is the empty string, and fetch priority is
     // "auto".
     options = new ScriptFetchOptions(
-        mozilla::CORS_NONE, document->GetReferrerPolicy(),
-        /* aNonce = */ u""_ns, RequestPriority::Auto,
+        mozilla::CORS_NONE, /* aNonce = */ u""_ns, RequestPriority::Auto,
         ParserMetadata::NotParserInserted, principal, nullptr);
+    referrerPolicy = document->GetReferrerPolicy();
     baseURL = document->GetDocBaseURI();
   }
 
@@ -304,16 +350,17 @@ already_AddRefed<ModuleLoadRequest> ModuleLoader::CreateDynamicImport(
   context->mScriptMode = ScriptLoadContext::ScriptMode::eAsync;
 
   RefPtr<ModuleLoadRequest> request = new ModuleLoadRequest(
-      aURI, options, SRIMetadata(), baseURL, context, true,
+      aURI, referrerPolicy, options, SRIMetadata(), baseURL, context, true,
       /* is top level */ true, /* is dynamic import */
       this, ModuleLoadRequest::NewVisitedSetForTopLevelImport(aURI), nullptr);
 
-  request->mDynamicReferencingPrivate = aReferencingPrivate;
+  request->mDynamicReferencingScript = aMaybeActiveScript;
   request->mDynamicSpecifier = aSpecifier;
   request->mDynamicPromise = aPromise;
 
   HoldJSObjects(request.get());
 
+  request->NoCacheEntryFound();
   return request.forget();
 }
 

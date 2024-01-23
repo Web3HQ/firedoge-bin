@@ -454,14 +454,42 @@ static bool CompareCodec(const UniquePtr<JsepCodecDescription>& lhs,
   return lhs->mStronglyPreferred && !rhs->mStronglyPreferred;
 }
 
+void JsepTrack::MaybeStoreCodecToLog(const std::string& codec,
+                                     SdpMediaSection::MediaType type) {
+  // We are logging ulpfec and red elsewhere and will not log rtx.
+  if (!nsCRT::strcasecmp(codec.c_str(), "ulpfec") ||
+      !nsCRT::strcasecmp(codec.c_str(), "red") ||
+      !nsCRT::strcasecmp(codec.c_str(), "rtx")) {
+    return;
+  }
+
+  if (type == SdpMediaSection::kVideo) {
+    if (nsCRT::strcasestr(codec.c_str(), "fec") && mFecCodec.empty()) {
+      mFecCodec = codec;
+    } else if (!nsCRT::strcasestr(codec.c_str(), "fec") &&
+               mVideoPreferredCodec.empty()) {
+      mVideoPreferredCodec = codec;
+    }
+  } else if (type == SdpMediaSection::kAudio && mAudioPreferredCodec.empty()) {
+    mAudioPreferredCodec = codec;
+  }
+}
+
 std::vector<UniquePtr<JsepCodecDescription>> JsepTrack::NegotiateCodecs(
     const SdpMediaSection& remote, bool remoteIsOffer,
     Maybe<const SdpMediaSection&> local) {
   std::vector<UniquePtr<JsepCodecDescription>> negotiatedCodecs;
   std::vector<UniquePtr<JsepCodecDescription>> newPrototypeCodecs;
+  bool onlyRedUlpFec = true;
 
   // Outer loop establishes the remote side's preference
   for (const std::string& fmt : remote.GetFormats()) {
+    // Decide if we want to store this codec for logging.
+    const auto* entry = remote.FindRtpmap(fmt);
+    if (entry) {
+      MaybeStoreCodecToLog(entry->name, remote.GetMediaType());
+    }
+
     for (auto& codec : mPrototypeCodecs) {
       if (!codec || !codec->mEnabled || !codec->Matches(fmt, remote)) {
         continue;
@@ -487,6 +515,10 @@ std::vector<UniquePtr<JsepCodecDescription>> JsepTrack::NegotiateCodecs(
           videoCodec->mRtxPayloadType = cloneVideoCodec->mRtxPayloadType;
         }
 
+        if (codec->mName != "red" && codec->mName != "ulpfec") {
+          onlyRedUlpFec = false;
+        }
+
         // Moves the codec out of mPrototypeCodecs, leaving an empty
         // UniquePtr, so we don't use it again. Also causes successfully
         // negotiated codecs to be placed up front in the future.
@@ -495,6 +527,12 @@ std::vector<UniquePtr<JsepCodecDescription>> JsepTrack::NegotiateCodecs(
         break;
       }
     }
+  }
+
+  if (onlyRedUlpFec) {
+    // We don't have any codecs we can actually use. Clearing so we don't
+    // attempt to create a connection signaling only RED and/or ULPFEC.
+    negotiatedCodecs.clear();
   }
 
   // newPrototypeCodecs contains just the negotiated stuff so far. Add the rest.

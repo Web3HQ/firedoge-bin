@@ -137,53 +137,40 @@ CodeOffset MacroAssembler::call(const wasm::CallSiteDesc& desc,
 // ABI function calls.
 
 void MacroAssembler::passABIArg(Register reg) {
-  passABIArg(MoveOperand(reg), MoveOp::GENERAL);
+  passABIArg(MoveOperand(reg), ABIType::General);
 }
 
-void MacroAssembler::passABIArg(FloatRegister reg, MoveOp::Type type) {
+void MacroAssembler::passABIArg(FloatRegister reg, ABIType type) {
   passABIArg(MoveOperand(reg), type);
 }
 
-void MacroAssembler::callWithABI(DynFn fun, MoveOp::Type result,
+void MacroAssembler::callWithABI(DynFn fun, ABIType result,
                                  CheckUnsafeCallWithABI check) {
   AutoProfilerCallInstrumentation profiler(*this);
   callWithABINoProfiler(fun.address, result, check);
 }
 
 template <typename Sig, Sig fun>
-void MacroAssembler::callWithABI(MoveOp::Type result,
-                                 CheckUnsafeCallWithABI check) {
+void MacroAssembler::callWithABI(ABIType result, CheckUnsafeCallWithABI check) {
   ABIFunction<Sig, fun> abiFun;
   AutoProfilerCallInstrumentation profiler(*this);
   callWithABINoProfiler(abiFun.address(), result, check);
 }
 
-void MacroAssembler::callWithABI(Register fun, MoveOp::Type result) {
+void MacroAssembler::callWithABI(Register fun, ABIType result) {
   AutoProfilerCallInstrumentation profiler(*this);
   callWithABINoProfiler(fun, result);
 }
 
-void MacroAssembler::callWithABI(const Address& fun, MoveOp::Type result) {
+void MacroAssembler::callWithABI(const Address& fun, ABIType result) {
   AutoProfilerCallInstrumentation profiler(*this);
   callWithABINoProfiler(fun, result);
 }
 
-void MacroAssembler::appendSignatureType(MoveOp::Type type) {
+void MacroAssembler::appendSignatureType(ABIType type) {
 #ifdef JS_SIMULATOR
-  signature_ <<= ArgType_Shift;
-  switch (type) {
-    case MoveOp::GENERAL:
-      signature_ |= ArgType_General;
-      break;
-    case MoveOp::DOUBLE:
-      signature_ |= ArgType_Float64;
-      break;
-    case MoveOp::FLOAT32:
-      signature_ |= ArgType_Float32;
-      break;
-    default:
-      MOZ_CRASH("Invalid argument type");
-  }
+  signature_ <<= ABITypeArgShift;
+  signature_ |= uint32_t(type);
 #endif
 }
 
@@ -215,6 +202,7 @@ ABIFunctionType MacroAssembler::signature() const {
     case Args_Int_IntDoubleIntInt:
     case Args_Double_DoubleDoubleDouble:
     case Args_Double_DoubleDoubleDoubleDouble:
+    case Args_Int64_GeneralGeneral:
       break;
     default:
       MOZ_CRASH("Unexpected type");
@@ -352,11 +340,13 @@ uint32_t MacroAssembler::buildFakeExitFrame(Register scratch) {
 // Exit frame footer.
 
 void MacroAssembler::enterExitFrame(Register cxreg, Register scratch,
-                                    const VMFunctionData* f) {
-  MOZ_ASSERT(f);
+                                    VMFunctionId f) {
   linkExitFrame(cxreg, scratch);
-  // Push VMFunction pointer, to mark arguments.
-  Push(ImmPtr(f));
+  // Push `ExitFrameType::VMFunction + VMFunctionId`, for marking the arguments.
+  // See ExitFooterFrame::data_.
+  uintptr_t type = uintptr_t(ExitFrameType::VMFunction) + uintptr_t(f);
+  MOZ_ASSERT(type <= INT32_MAX);
+  Push(Imm32(type));
 }
 
 void MacroAssembler::enterFakeExitFrame(Register cxreg, Register scratch,
@@ -901,15 +891,16 @@ void MacroAssembler::canonicalizeDoubleIfDeterministic(FloatRegister reg) {
 // ========================================================================
 // Memory access primitives.
 template <class T>
-void MacroAssembler::storeDouble(FloatRegister src, const T& dest) {
+FaultingCodeOffset MacroAssembler::storeDouble(FloatRegister src,
+                                               const T& dest) {
   canonicalizeDoubleIfDeterministic(src);
-  storeUncanonicalizedDouble(src, dest);
+  return storeUncanonicalizedDouble(src, dest);
 }
 
-template void MacroAssembler::storeDouble(FloatRegister src,
-                                          const Address& dest);
-template void MacroAssembler::storeDouble(FloatRegister src,
-                                          const BaseIndex& dest);
+template FaultingCodeOffset MacroAssembler::storeDouble(FloatRegister src,
+                                                        const Address& dest);
+template FaultingCodeOffset MacroAssembler::storeDouble(FloatRegister src,
+                                                        const BaseIndex& dest);
 
 template <class T>
 void MacroAssembler::boxDouble(FloatRegister src, const T& dest) {
@@ -917,15 +908,16 @@ void MacroAssembler::boxDouble(FloatRegister src, const T& dest) {
 }
 
 template <class T>
-void MacroAssembler::storeFloat32(FloatRegister src, const T& dest) {
+FaultingCodeOffset MacroAssembler::storeFloat32(FloatRegister src,
+                                                const T& dest) {
   canonicalizeFloatIfDeterministic(src);
-  storeUncanonicalizedFloat32(src, dest);
+  return storeUncanonicalizedFloat32(src, dest);
 }
 
-template void MacroAssembler::storeFloat32(FloatRegister src,
-                                           const Address& dest);
-template void MacroAssembler::storeFloat32(FloatRegister src,
-                                           const BaseIndex& dest);
+template FaultingCodeOffset MacroAssembler::storeFloat32(FloatRegister src,
+                                                         const Address& dest);
+template FaultingCodeOffset MacroAssembler::storeFloat32(FloatRegister src,
+                                                         const BaseIndex& dest);
 
 template <typename T>
 void MacroAssembler::fallibleUnboxInt32(const T& src, Register dest,

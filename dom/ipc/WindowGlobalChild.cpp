@@ -35,6 +35,7 @@
 #include "nsQueryObject.h"
 #include "nsSerializationHelper.h"
 #include "nsFrameLoader.h"
+#include "nsIScriptSecurityManager.h"
 
 #include "mozilla/dom/JSWindowActorBinding.h"
 #include "mozilla/dom/JSWindowActorChild.h"
@@ -215,10 +216,16 @@ void WindowGlobalChild::OnNewDocument(Document* aDocument) {
   if (auto policy = aDocument->GetEmbedderPolicy()) {
     txn.SetEmbedderPolicy(*policy);
   }
+  txn.SetShouldResistFingerprinting(aDocument->ShouldResistFingerprinting(
+      RFPTarget::IsAlwaysEnabledForPrecompute));
+  txn.SetOverriddenFingerprintingSettings(
+      aDocument->GetOverriddenFingerprintingSettings());
 
   if (nsCOMPtr<nsIChannel> channel = aDocument->GetChannel()) {
     nsCOMPtr<nsILoadInfo> loadInfo(channel->LoadInfo());
     txn.SetIsOriginalFrameSource(loadInfo->GetOriginalFrameSrcLoad());
+    txn.SetUsingStorageAccess(loadInfo->GetStoragePermission() !=
+                              nsILoadInfo::NoStoragePermission);
   } else {
     txn.SetIsOriginalFrameSource(false);
   }
@@ -547,8 +554,8 @@ IPCResult WindowGlobalChild::RecvRawMessage(
   return IPC_OK();
 }
 
-IPCResult WindowGlobalChild::RecvNotifyPermissionChange(
-    const nsCString& aType) {
+IPCResult WindowGlobalChild::RecvNotifyPermissionChange(const nsCString& aType,
+                                                        uint32_t aPermission) {
   nsCOMPtr<nsIObserverService> observerService = services::GetObserverService();
   NS_ENSURE_TRUE(observerService,
                  IPC_FAIL(this, "Failed to get observer service"));
@@ -556,6 +563,13 @@ IPCResult WindowGlobalChild::RecvNotifyPermissionChange(
       static_cast<nsPIDOMWindowInner*>(this->GetWindowGlobal());
   observerService->NotifyObservers(notifyTarget, "perm-changed-notify-only",
                                    NS_ConvertUTF8toUTF16(aType).get());
+  // We only need to handle the revoked permission case here. The permission
+  // grant case is handled via the Storage Access API code.
+  if (this->GetWindowGlobal() &&
+      this->GetWindowGlobal()->UsingStorageAccess() &&
+      aPermission != nsIPermissionManager::ALLOW_ACTION) {
+    this->GetWindowGlobal()->SaveStorageAccessPermissionRevoked();
+  }
   return IPC_OK();
 }
 
@@ -572,8 +586,36 @@ void WindowGlobalChild::SetDocumentURI(nsIURI* aDocumentURI) {
       BrowsingContext()->BrowserId(), InnerWindowId(),
       nsContentUtils::TruncatedURLForDisplay(aDocumentURI, 1024),
       embedderInnerWindowID, BrowsingContext()->UsePrivateBrowsing());
+
+  if (StaticPrefs::dom_security_setdocumenturi()) {
+    auto isLoadableViaInternet = [](nsIURI* uri) {
+      return (uri && (net::SchemeIsHTTP(uri) || net::SchemeIsHTTPS(uri)));
+    };
+    if (isLoadableViaInternet(aDocumentURI)) {
+      nsCOMPtr<nsIURI> principalURI = mDocumentPrincipal->GetURI();
+      if (mDocumentPrincipal->GetIsNullPrincipal()) {
+        nsCOMPtr<nsIPrincipal> precursor =
+            mDocumentPrincipal->GetPrecursorPrincipal();
+        if (precursor) {
+          principalURI = precursor->GetURI();
+        }
+      }
+
+      if (isLoadableViaInternet(principalURI)) {
+        nsIScriptSecurityManager* ssm = nsContentUtils::GetSecurityManager();
+
+        if (!NS_SUCCEEDED(ssm->CheckSameOriginURI(principalURI, aDocumentURI,
+                                                  false, false))) {
+          MOZ_DIAGNOSTIC_ASSERT(false,
+                                "Setting DocumentURI with a different origin "
+                                "than principal URI");
+        }
+      }
+    }
+  }
+
   mDocumentURI = aDocumentURI;
-  SendUpdateDocumentURI(aDocumentURI);
+  SendUpdateDocumentURI(WrapNotNull(aDocumentURI));
 }
 
 void WindowGlobalChild::SetDocumentPrincipal(

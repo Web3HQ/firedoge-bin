@@ -12,17 +12,18 @@ from textwrap import dedent
 import requests
 import six.moves.urllib.parse as urllib_parse
 from mozbuild.base import BuildEnvironmentNotFoundException, MozbuildObject
-from mozbuild.settings import TelemetrySettings
 from mozbuild.telemetry import filter_args
 from mozversioncontrol import InvalidRepoPath, get_repository_object
 from six.moves import configparser, input
 
 from mach.config import ConfigSettings
+from mach.settings import MachSettings
 from mach.site import MozSiteMetadata
 from mach.telemetry_interface import GleanTelemetry, NoopTelemetry
 from mach.util import get_state_dir
 
 MACH_METRICS_PATH = (Path(__file__) / ".." / ".." / "metrics.yaml").resolve()
+SITE_DIR = (Path(__file__) / ".." / ".." / ".." / "sites").resolve()
 
 
 def create_telemetry_from_environment(settings):
@@ -36,16 +37,17 @@ def create_telemetry_from_environment(settings):
     """
 
     active_metadata = MozSiteMetadata.from_runtime()
-    is_mach_virtualenv = active_metadata and active_metadata.site_name == "mach"
+    mach_sites = [site_path.stem for site_path in SITE_DIR.glob("*.txt")]
+    is_a_mach_virtualenv = active_metadata and active_metadata.site_name in mach_sites
 
     if not (
         is_applicable_telemetry_environment()
         # Glean is not compatible with Python 2
         and sys.version_info >= (3, 0)
-        # If not using the mach virtualenv (e.g.: bootstrap uses native python)
+        # If not using a mach virtualenv (e.g.: bootstrap uses native python)
         # then we can't guarantee that the glean package that we import is a
         # compatible version. Therefore, don't use glean.
-        and is_mach_virtualenv
+        and is_a_mach_virtualenv
     ):
         return NoopTelemetry(False)
 
@@ -211,7 +213,7 @@ def record_telemetry_settings(
     # settings, update it, then write to it.
     settings_path = state_dir / "machrc"
     file_settings = ConfigSettings()
-    file_settings.register_provider(TelemetrySettings)
+    file_settings.register_provider(MachSettings)
     try:
         file_settings.load_file(settings_path)
     except configparser.Error as error:

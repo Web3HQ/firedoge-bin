@@ -178,6 +178,43 @@ fn experiments_status_is_correctly_toggled() {
 }
 
 #[test]
+fn experimentation_id_is_set_correctly() {
+    let t = tempfile::tempdir().unwrap();
+    let name = t.path().display().to_string();
+
+    // Define an experimentation id to test
+    let experimentation_id = "test-experimentation-id";
+
+    let glean = Glean::new(InternalConfiguration {
+        data_path: name,
+        application_id: GLOBAL_APPLICATION_ID.into(),
+        language_binding_name: "Rust".into(),
+        upload_enabled: true,
+        max_events: None,
+        delay_ping_lifetime_io: false,
+        app_build: "Unknown".into(),
+        use_core_mps: false,
+        trim_data_to_registered_pings: false,
+        log_level: None,
+        rate_limit: None,
+        enable_event_timestamps: false,
+        experimentation_id: Some(experimentation_id.to_string()),
+    })
+    .unwrap();
+
+    // Check that the correct value was stored
+    if let Some(exp_id) = glean
+        .additional_metrics
+        .experimentation_id
+        .get_value(&glean, "all-pings")
+    {
+        assert_eq!(exp_id, experimentation_id, "Experimentation ids must match");
+    } else {
+        panic!("The experimentation id must not be `None`");
+    }
+}
+
+#[test]
 fn client_id_and_first_run_date_must_be_regenerated() {
     let dir = tempfile::tempdir().unwrap();
     let tmpname = dir.path().display().to_string();
@@ -1040,11 +1077,13 @@ fn records_database_file_size() {
     let dir = tempfile::tempdir().unwrap();
     let tmpname = dir.path().display().to_string();
 
-    // Initialize Glean once to ensure we create the database.
+    // Initialize Glean once to ensure we create the database and did not error.
     let glean = Glean::with_options(&tmpname, GLOBAL_APPLICATION_ID, true);
     let database_size = &glean.database_metrics.size;
     let data = database_size.get_value(&glean, "metrics");
+
     assert!(data.is_none());
+
     drop(glean);
 
     // Initialize Glean again to record file size.
@@ -1057,6 +1096,11 @@ fn records_database_file_size() {
 
     // We should see the database containing some data.
     assert!(data.sum > 0);
+
+    let rkv_load_state = &glean.database_metrics.rkv_load_error;
+    let rkv_load_error = rkv_load_state.get_value(&glean, "metrics");
+
+    assert_eq!(rkv_load_error, None);
 }
 
 #[cfg(not(target_os = "windows"))]

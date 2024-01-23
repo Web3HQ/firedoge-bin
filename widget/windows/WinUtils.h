@@ -46,30 +46,6 @@
 #include "mozilla/WindowsProcessMitigations.h"
 #include "mozilla/gfx/2D.h"
 
-// Starting with version 10.0.22621.0 of the Windows SDK the AR_STATE enum and
-// types are only defined when building for Windows 8 instead of Windows 7
-// (although they are always defined for MinGW)
-#if (WDK_NTDDI_VERSION >= 0x0A00000C) && (WINVER < 0x0602) && \
-    (!defined(__MINGW32__))
-
-enum tagAR_STATE {
-  AR_ENABLED = 0x0,
-  AR_DISABLED = 0x1,
-  AR_SUPPRESSED = 0x2,
-  AR_REMOTESESSION = 0x4,
-  AR_MULTIMON = 0x8,
-  AR_NOSENSOR = 0x10,
-  AR_NOT_SUPPORTED = 0x20,
-  AR_DOCKED = 0x40,
-  AR_LAPTOP = 0x80
-};
-
-typedef enum tagAR_STATE AR_STATE;
-
-using PAR_STATE = enum tagAR_STATE*;
-
-#endif  // (WDK_NTDDI_VERSION >= 0x0A00000C) && (WINVER < 0x0602)
-
 /**
  * NS_INLINE_DECL_IUNKNOWN_REFCOUNTING should be used for defining and
  * implementing AddRef() and Release() of IUnknown interface.
@@ -318,34 +294,6 @@ class WinUtils {
    * @param aTimeoutMs Timeout for waiting in ms, defaults to INFINITE
    */
   static void WaitForMessage(DWORD aTimeoutMs = INFINITE);
-
-  /**
-   * Gets the value of a string-typed registry value.
-   *
-   * @param aRoot The registry root to search in.
-   * @param aKeyName The name of the registry key to open.
-   * @param aValueName The name of the registry value in the specified key whose
-   *   value is to be retrieved.  Can be null, to retrieve the key's unnamed/
-   *   default value.
-   * @param aBuffer The buffer into which to store the string value.  Can be
-   *   null, in which case the return value indicates just whether the value
-   *   exists.
-   * @param aBufferLength The size of aBuffer, in bytes.
-   * @return Whether the value exists and is a string.
-   */
-  static bool GetRegistryKey(HKEY aRoot, char16ptr_t aKeyName,
-                             char16ptr_t aValueName, wchar_t* aBuffer,
-                             DWORD aBufferLength);
-
-  /**
-   * Checks whether the registry key exists in either 32bit or 64bit branch on
-   * the environment.
-   *
-   * @param aRoot The registry root of aName.
-   * @param aKeyName The name of the registry key to check.
-   * @return TRUE if it exists and is readable.  Otherwise, FALSE.
-   */
-  static bool HasRegistryKey(HKEY aRoot, char16ptr_t aKeyName);
 
   /**
    * GetTopLevelHWND() returns a window handle of the top level window which
@@ -616,6 +564,8 @@ class WinUtils {
 
   static bool GetAutoRotationState(AR_STATE* aRotationState);
 
+  static void GetClipboardFormatAsString(UINT aFormat, nsAString& aOutput);
+
  private:
   static WhitelistVec BuildWhitelist();
 
@@ -696,9 +646,6 @@ class FaviconHelper {
       RefPtr<LazyIdleThread>& aIOThread, bool aURLShortcut,
       already_AddRefed<nsIRunnable> aRunnable = nullptr);
 
-  static nsresult HashURI(nsCOMPtr<nsICryptoHash>& aCryptoHash, nsIURI* aUri,
-                          nsACString& aUriHash);
-
   static nsresult GetOutputIconPath(nsCOMPtr<nsIURI> aFaviconPageURI,
                                     nsCOMPtr<nsIFile>& aICOFile,
                                     bool aURLShortcut);
@@ -715,13 +662,15 @@ MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(WinUtils::PathTransformFlags);
 
 // RTL shim windows are temporary child windows of our nsWindows created to
 // address RTL issues in picker dialogs. (See bug 588735.)
-class MOZ_STACK_CLASS ScopedRtlShimWindow {
+class ScopedRtlShimWindow {
  public:
   explicit ScopedRtlShimWindow(nsIWidget* aParent);
   ~ScopedRtlShimWindow();
 
   ScopedRtlShimWindow(const ScopedRtlShimWindow&) = delete;
-  ScopedRtlShimWindow(ScopedRtlShimWindow&&) = delete;
+  ScopedRtlShimWindow(ScopedRtlShimWindow&& that) noexcept : mWnd(that.mWnd) {
+    that.mWnd = nullptr;
+  };
 
   HWND get() const { return mWnd; }
 

@@ -126,6 +126,35 @@ BackgroundParentImpl::~BackgroundParentImpl() {
   MOZ_COUNT_DTOR(mozilla::ipc::BackgroundParentImpl);
 }
 
+void BackgroundParentImpl::ProcessingError(Result aCode, const char* aReason) {
+  if (MsgDropped == aCode) {
+    return;
+  }
+
+  // XXX Remove this cut-out once bug 1858621 is fixed. Some parent actors
+  // currently return nullptr in actor allocation methods for non fatal errors.
+  // We don't want to crash the parent process or child processes in that case.
+  if (MsgValueError == aCode) {
+    return;
+  }
+
+  // Other errors are big deals.
+  nsDependentCString reason(aReason);
+  if (BackgroundParent::IsOtherProcessActor(this)) {
+#ifndef FUZZING
+    BackgroundParent::KillHardAsync(this, reason);
+#endif
+    if (CanSend()) {
+      GetIPCChannel()->InduceConnectionError();
+    }
+  } else {
+    CrashReporter::AnnotateCrashReport(
+        CrashReporter::Annotation::ipc_channel_error, reason);
+
+    MOZ_CRASH("in-process BackgroundParent abort due to IPC error");
+  }
+}
+
 void BackgroundParentImpl::ActorDestroy(ActorDestroyReason aWhy) {
   AssertIsInMainProcess();
   AssertIsOnBackgroundThread();
@@ -215,7 +244,7 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvFlushPendingFileDeletions() {
   return IPC_OK();
 }
 
-BackgroundParentImpl::PBackgroundSDBConnectionParent*
+already_AddRefed<BackgroundParentImpl::PBackgroundSDBConnectionParent>
 BackgroundParentImpl::AllocPBackgroundSDBConnectionParent(
     const PersistenceType& aPersistenceType,
     const PrincipalInfo& aPrincipalInfo) {
@@ -242,16 +271,7 @@ BackgroundParentImpl::RecvPBackgroundSDBConnectionConstructor(
   return IPC_OK();
 }
 
-bool BackgroundParentImpl::DeallocPBackgroundSDBConnectionParent(
-    PBackgroundSDBConnectionParent* aActor) {
-  AssertIsInMainProcess();
-  AssertIsOnBackgroundThread();
-  MOZ_ASSERT(aActor);
-
-  return mozilla::dom::DeallocPBackgroundSDBConnectionParent(aActor);
-}
-
-BackgroundParentImpl::PBackgroundLSDatabaseParent*
+already_AddRefed<BackgroundParentImpl::PBackgroundLSDatabaseParent>
 BackgroundParentImpl::AllocPBackgroundLSDatabaseParent(
     const PrincipalInfo& aPrincipalInfo, const uint32_t& aPrivateBrowsingId,
     const uint64_t& aDatastoreId) {
@@ -275,15 +295,6 @@ BackgroundParentImpl::RecvPBackgroundLSDatabaseConstructor(
     return IPC_FAIL_NO_REASON(this);
   }
   return IPC_OK();
-}
-
-bool BackgroundParentImpl::DeallocPBackgroundLSDatabaseParent(
-    PBackgroundLSDatabaseParent* aActor) {
-  AssertIsInMainProcess();
-  AssertIsOnBackgroundThread();
-  MOZ_ASSERT(aActor);
-
-  return mozilla::dom::DeallocPBackgroundLSDatabaseParent(aActor);
 }
 
 BackgroundParentImpl::PBackgroundLSObserverParent*
@@ -477,7 +488,7 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateWebTransportParent(
     const nsAString& aURL, nsIPrincipal* aPrincipal,
     const mozilla::Maybe<IPCClientInfo>& aClientInfo, const bool& aDedicated,
     const bool& aRequireUnreliable, const uint32_t& aCongestionControl,
-    // Sequence<WebTransportHash>* aServerCertHashes,
+    nsTArray<WebTransportHash>&& aServerCertHashes,
     Endpoint<PWebTransportParent>&& aParentEndpoint,
     CreateWebTransportParentResolver&& aResolver) {
   AssertIsInMainProcess();
@@ -486,9 +497,8 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateWebTransportParent(
   RefPtr<mozilla::dom::WebTransportParent> webt =
       new mozilla::dom::WebTransportParent();
   webt->Create(aURL, aPrincipal, aClientInfo, aDedicated, aRequireUnreliable,
-               aCongestionControl,
-               /*aServerCertHashes, */ std::move(aParentEndpoint),
-               std::move(aResolver));
+               aCongestionControl, std::move(aServerCertHashes),
+               std::move(aParentEndpoint), std::move(aResolver));
   return IPC_OK();
 }
 
@@ -499,12 +509,12 @@ BackgroundParentImpl::AllocPIdleSchedulerParent() {
   return actor.forget();
 }
 
-dom::PRemoteWorkerControllerParent*
+already_AddRefed<dom::PRemoteWorkerControllerParent>
 BackgroundParentImpl::AllocPRemoteWorkerControllerParent(
     const dom::RemoteWorkerData& aRemoteWorkerData) {
   RefPtr<dom::RemoteWorkerControllerParent> actor =
       new dom::RemoteWorkerControllerParent(aRemoteWorkerData);
-  return actor.forget().take();
+  return actor.forget();
 }
 
 IPCResult BackgroundParentImpl::RecvPRemoteWorkerControllerConstructor(
@@ -513,13 +523,6 @@ IPCResult BackgroundParentImpl::RecvPRemoteWorkerControllerConstructor(
   MOZ_ASSERT(aActor);
 
   return IPC_OK();
-}
-
-bool BackgroundParentImpl::DeallocPRemoteWorkerControllerParent(
-    dom::PRemoteWorkerControllerParent* aActor) {
-  RefPtr<dom::RemoteWorkerControllerParent> actor =
-      dont_AddRef(static_cast<dom::RemoteWorkerControllerParent*>(aActor));
-  return true;
 }
 
 already_AddRefed<dom::PRemoteWorkerServiceParent>
@@ -816,6 +819,10 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvPBroadcastChannelConstructor(
     return IPC_OK();
   }
 
+  // XXX The principal can be checked right here on the PBackground thread
+  // since BackgroundParentImpl now overrides the ProcessingError method and
+  // kills invalid child processes (IPC_FAIL triggers a processing error).
+
   RefPtr<CheckPrincipalRunnable> runnable =
       new CheckPrincipalRunnable(parent.forget(), aPrincipalInfo, aOrigin);
   MOZ_ALWAYS_SUCCEEDS(NS_DispatchToMainThread(runnable));
@@ -923,19 +930,12 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvMessagePortForceClose(
   return IPC_OK();
 }
 
-BackgroundParentImpl::PQuotaParent* BackgroundParentImpl::AllocPQuotaParent() {
+already_AddRefed<BackgroundParentImpl::PQuotaParent>
+BackgroundParentImpl::AllocPQuotaParent() {
   AssertIsInMainProcess();
   AssertIsOnBackgroundThread();
 
   return mozilla::dom::quota::AllocPQuotaParent();
-}
-
-bool BackgroundParentImpl::DeallocPQuotaParent(PQuotaParent* aActor) {
-  AssertIsInMainProcess();
-  AssertIsOnBackgroundThread();
-  MOZ_ASSERT(aActor);
-
-  return mozilla::dom::quota::DeallocPQuotaParent(aActor);
 }
 
 mozilla::ipc::IPCResult BackgroundParentImpl::RecvShutdownQuotaManager() {
@@ -1168,14 +1168,9 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvHasMIDIDevice(
   return IPC_OK();
 }
 
-mozilla::dom::PClientManagerParent*
+already_AddRefed<mozilla::dom::PClientManagerParent>
 BackgroundParentImpl::AllocPClientManagerParent() {
   return mozilla::dom::AllocClientManagerParent();
-}
-
-bool BackgroundParentImpl::DeallocPClientManagerParent(
-    mozilla::dom::PClientManagerParent* aActor) {
-  return mozilla::dom::DeallocClientManagerParent(aActor);
 }
 
 mozilla::ipc::IPCResult BackgroundParentImpl::RecvPClientManagerConstructor(
@@ -1257,26 +1252,36 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvPEndpointForReportConstructor(
 mozilla::ipc::IPCResult
 BackgroundParentImpl::RecvEnsureRDDProcessAndCreateBridge(
     EnsureRDDProcessAndCreateBridgeResolver&& aResolver) {
-  RDDProcessManager* rdd = RDDProcessManager::Get();
   using Type = std::tuple<const nsresult&,
                           Endpoint<mozilla::PRemoteDecoderManagerChild>&&>;
+
+  RefPtr<ThreadsafeContentParentHandle> parent =
+      BackgroundParent::GetContentParentHandle(this);
+  if (NS_WARN_IF(!parent)) {
+    aResolver(
+        Type(NS_ERROR_NOT_AVAILABLE, Endpoint<PRemoteDecoderManagerChild>()));
+    return IPC_OK();
+  }
+
+  RDDProcessManager* rdd = RDDProcessManager::Get();
   if (!rdd) {
     aResolver(
         Type(NS_ERROR_NOT_AVAILABLE, Endpoint<PRemoteDecoderManagerChild>()));
-  } else {
-    rdd->EnsureRDDProcessAndCreateBridge(OtherPid())
-        ->Then(GetCurrentSerialEventTarget(), __func__,
-               [resolver = std::move(aResolver)](
-                   mozilla::RDDProcessManager::EnsureRDDPromise::
-                       ResolveOrRejectValue&& aValue) mutable {
-                 if (aValue.IsReject()) {
-                   resolver(Type(aValue.RejectValue(),
-                                 Endpoint<PRemoteDecoderManagerChild>()));
-                   return;
-                 }
-                 resolver(Type(NS_OK, std::move(aValue.ResolveValue())));
-               });
+    return IPC_OK();
   }
+
+  rdd->EnsureRDDProcessAndCreateBridge(OtherPid(), parent->ChildID())
+      ->Then(GetCurrentSerialEventTarget(), __func__,
+             [resolver = std::move(aResolver)](
+                 mozilla::RDDProcessManager::EnsureRDDPromise::
+                     ResolveOrRejectValue&& aValue) mutable {
+               if (aValue.IsReject()) {
+                 resolver(Type(aValue.RejectValue(),
+                               Endpoint<PRemoteDecoderManagerChild>()));
+                 return;
+               }
+               resolver(Type(NS_OK, std::move(aValue.ResolveValue())));
+             });
   return IPC_OK();
 }
 
@@ -1285,13 +1290,19 @@ BackgroundParentImpl::RecvEnsureUtilityProcessAndCreateBridge(
     const RemoteDecodeIn& aLocation,
     EnsureUtilityProcessAndCreateBridgeResolver&& aResolver) {
   base::ProcessId otherPid = OtherPid();
+  RefPtr<ThreadsafeContentParentHandle> parent =
+      BackgroundParent::GetContentParentHandle(this);
+  if (NS_WARN_IF(!parent)) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+  dom::ContentParentId childId = parent->ChildID();
   nsCOMPtr<nsISerialEventTarget> managerThread = GetCurrentSerialEventTarget();
   if (!managerThread) {
     return IPC_FAIL_NO_REASON(this);
   }
   NS_DispatchToMainThread(NS_NewRunnableFunction(
       "BackgroundParentImpl::RecvEnsureUtilityProcessAndCreateBridge()",
-      [aResolver, managerThread, otherPid, aLocation]() {
+      [aResolver, managerThread, otherPid, childId, aLocation]() {
         RefPtr<UtilityProcessManager> upm =
             UtilityProcessManager::GetSingleton();
         using Type =
@@ -1307,7 +1318,7 @@ BackgroundParentImpl::RecvEnsureUtilityProcessAndCreateBridge(
               }));
         } else {
           SandboxingKind sbKind = GetSandboxingKindFromLocation(aLocation);
-          upm->StartProcessForRemoteMediaDecoding(otherPid, sbKind)
+          upm->StartProcessForRemoteMediaDecoding(otherPid, childId, sbKind)
               ->Then(managerThread, __func__,
                      [resolver = aResolver](
                          mozilla::ipc::UtilityProcessManager::
@@ -1326,21 +1337,22 @@ BackgroundParentImpl::RecvEnsureUtilityProcessAndCreateBridge(
 }
 
 mozilla::ipc::IPCResult BackgroundParentImpl::RecvRequestCameraAccess(
+    const bool& aAllowPermissionRequest,
     RequestCameraAccessResolver&& aResolver) {
 #ifdef MOZ_WEBRTC
-  mozilla::camera::CamerasParent::RequestCameraAccess()->Then(
-      GetCurrentSerialEventTarget(), __func__,
-      [resolver = std::move(aResolver)](
-          const mozilla::camera::CamerasParent::CameraAccessRequestPromise::
-              ResolveOrRejectValue& aValue) {
-        if (aValue.IsResolve()) {
-          resolver(aValue.ResolveValue());
-        } else {
-          resolver(aValue.RejectValue());
-        }
-      });
+  mozilla::camera::CamerasParent::RequestCameraAccess(aAllowPermissionRequest)
+      ->Then(GetCurrentSerialEventTarget(), __func__,
+             [resolver = std::move(aResolver)](
+                 const mozilla::camera::CamerasParent::
+                     CameraAccessRequestPromise::ResolveOrRejectValue& aValue) {
+               if (aValue.IsResolve()) {
+                 resolver(aValue.ResolveValue());
+               } else {
+                 resolver(CamerasAccessStatus::Error);
+               }
+             });
 #else
-  aResolver(NS_ERROR_NOT_IMPLEMENTED);
+  aResolver(CamerasAccessStatus::Error);
 #endif
   return IPC_OK();
 }

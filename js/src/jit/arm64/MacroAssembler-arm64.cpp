@@ -199,7 +199,7 @@ void MacroAssemblerCompat::handleFailureWithHandlerTail(Label* profilerExitTail,
   asMasm().setupUnalignedABICall(r1);
   asMasm().passABIArg(r0);
   asMasm().callWithABI<Fn, HandleException>(
-      MoveOp::GENERAL, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
+      ABIType::General, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
 
   Label entryFrame;
   Label catch_;
@@ -272,12 +272,19 @@ void MacroAssemblerCompat::handleFailureWithHandlerTail(Label* profilerExitTail,
   syncStackPtr();
   Br(x0);
 
-  // If we found a finally block, this must be a baseline frame. Push two
-  // values expected by the finally block: the exception and BooleanValue(true).
+  // If we found a finally block, this must be a baseline frame. Push three
+  // values expected by the finally block: the exception, the exception stack,
+  // and BooleanValue(true).
   bind(&finally);
   ARMRegister exception = x1;
   Ldr(exception, MemOperand(PseudoStackPointer64,
                             ResumeFromException::offsetOfException()));
+
+  ARMRegister exceptionStack = x2;
+  Ldr(exceptionStack,
+      MemOperand(PseudoStackPointer64,
+                 ResumeFromException::offsetOfExceptionStack()));
+
   Ldr(x0,
       MemOperand(PseudoStackPointer64, ResumeFromException::offsetOfTarget()));
   Ldr(ARMRegister(FramePointer, 64),
@@ -288,6 +295,7 @@ void MacroAssemblerCompat::handleFailureWithHandlerTail(Label* profilerExitTail,
                  ResumeFromException::offsetOfStackPointer()));
   syncStackPtr();
   push(exception);
+  push(exceptionStack);
   pushValue(BooleanValue(true));
   Br(x0);
 
@@ -480,106 +488,92 @@ void MacroAssemblerCompat::wasmLoadImpl(const wasm::MemoryAccessDesc& access,
 void MacroAssemblerCompat::wasmLoadImpl(const wasm::MemoryAccessDesc& access,
                                         MemOperand srcAddr, AnyRegister outany,
                                         Register64 out64) {
-  // Reg+Reg and Reg+SmallImm addressing is directly encodable in one Load
-  // instruction, hence we expect exactly one instruction to be emitted in the
-  // window.
-  int32_t instructionsExpected = 1;
-
-  // Splat and widen however require an additional instruction to be emitted
-  // after the load, so allow one more instruction in the window.
-  if (access.isSplatSimd128Load() || access.isWidenSimd128Load()) {
-    MOZ_ASSERT(access.type() == Scalar::Float64);
-    instructionsExpected++;
-  }
+  MOZ_ASSERT_IF(access.isSplatSimd128Load() || access.isWidenSimd128Load(),
+                access.type() == Scalar::Float64);
 
   // NOTE: the generated code must match the assembly code in gen_load in
   // GenerateAtomicOperations.py
   asMasm().memoryBarrierBefore(access.sync());
 
-  {
-    // The AutoForbidPoolsAndNops asserts if we emit more than the expected
-    // number of instructions and thus ensures that the access metadata is
-    // emitted at the address of the Load.
-    AutoForbidPoolsAndNops afp(this, instructionsExpected);
-
-    append(access, asMasm().currentOffset());
-    switch (access.type()) {
-      case Scalar::Int8:
-        Ldrsb(SelectGPReg(outany, out64), srcAddr);
-        break;
-      case Scalar::Uint8:
-        Ldrb(SelectGPReg(outany, out64), srcAddr);
-        break;
-      case Scalar::Int16:
-        Ldrsh(SelectGPReg(outany, out64), srcAddr);
-        break;
-      case Scalar::Uint16:
-        Ldrh(SelectGPReg(outany, out64), srcAddr);
-        break;
-      case Scalar::Int32:
-        if (out64 != Register64::Invalid()) {
-          Ldrsw(SelectGPReg(outany, out64), srcAddr);
+  FaultingCodeOffset fco;
+  switch (access.type()) {
+    case Scalar::Int8:
+      fco = Ldrsb(SelectGPReg(outany, out64), srcAddr);
+      break;
+    case Scalar::Uint8:
+      fco = Ldrb(SelectGPReg(outany, out64), srcAddr);
+      break;
+    case Scalar::Int16:
+      fco = Ldrsh(SelectGPReg(outany, out64), srcAddr);
+      break;
+    case Scalar::Uint16:
+      fco = Ldrh(SelectGPReg(outany, out64), srcAddr);
+      break;
+    case Scalar::Int32:
+      if (out64 != Register64::Invalid()) {
+        fco = Ldrsw(SelectGPReg(outany, out64), srcAddr);
+      } else {
+        fco = Ldr(SelectGPReg(outany, out64, 32), srcAddr);
+      }
+      break;
+    case Scalar::Uint32:
+      fco = Ldr(SelectGPReg(outany, out64, 32), srcAddr);
+      break;
+    case Scalar::Int64:
+      fco = Ldr(SelectGPReg(outany, out64), srcAddr);
+      break;
+    case Scalar::Float32:
+      // LDR does the right thing also for access.isZeroExtendSimd128Load()
+      fco = Ldr(SelectFPReg(outany, out64, 32), srcAddr);
+      break;
+    case Scalar::Float64:
+      if (access.isSplatSimd128Load() || access.isWidenSimd128Load()) {
+        ScratchSimd128Scope scratch_(asMasm());
+        ARMFPRegister scratch = Simd1D(scratch_);
+        fco = Ldr(scratch, srcAddr);
+        if (access.isSplatSimd128Load()) {
+          Dup(SelectFPReg(outany, out64, 128).V2D(), scratch, 0);
         } else {
-          Ldr(SelectGPReg(outany, out64, 32), srcAddr);
-        }
-        break;
-      case Scalar::Uint32:
-        Ldr(SelectGPReg(outany, out64, 32), srcAddr);
-        break;
-      case Scalar::Int64:
-        Ldr(SelectGPReg(outany, out64), srcAddr);
-        break;
-      case Scalar::Float32:
-        // LDR does the right thing also for access.isZeroExtendSimd128Load()
-        Ldr(SelectFPReg(outany, out64, 32), srcAddr);
-        break;
-      case Scalar::Float64:
-        if (access.isSplatSimd128Load() || access.isWidenSimd128Load()) {
-          ScratchSimd128Scope scratch_(asMasm());
-          ARMFPRegister scratch = Simd1D(scratch_);
-          Ldr(scratch, srcAddr);
-          if (access.isSplatSimd128Load()) {
-            Dup(SelectFPReg(outany, out64, 128).V2D(), scratch, 0);
-          } else {
-            MOZ_ASSERT(access.isWidenSimd128Load());
-            switch (access.widenSimdOp()) {
-              case wasm::SimdOp::V128Load8x8S:
-                Sshll(SelectFPReg(outany, out64, 128).V8H(), scratch.V8B(), 0);
-                break;
-              case wasm::SimdOp::V128Load8x8U:
-                Ushll(SelectFPReg(outany, out64, 128).V8H(), scratch.V8B(), 0);
-                break;
-              case wasm::SimdOp::V128Load16x4S:
-                Sshll(SelectFPReg(outany, out64, 128).V4S(), scratch.V4H(), 0);
-                break;
-              case wasm::SimdOp::V128Load16x4U:
-                Ushll(SelectFPReg(outany, out64, 128).V4S(), scratch.V4H(), 0);
-                break;
-              case wasm::SimdOp::V128Load32x2S:
-                Sshll(SelectFPReg(outany, out64, 128).V2D(), scratch.V2S(), 0);
-                break;
-              case wasm::SimdOp::V128Load32x2U:
-                Ushll(SelectFPReg(outany, out64, 128).V2D(), scratch.V2S(), 0);
-                break;
-              default:
-                MOZ_CRASH("Unexpected widening op for wasmLoad");
-            }
+          MOZ_ASSERT(access.isWidenSimd128Load());
+          switch (access.widenSimdOp()) {
+            case wasm::SimdOp::V128Load8x8S:
+              Sshll(SelectFPReg(outany, out64, 128).V8H(), scratch.V8B(), 0);
+              break;
+            case wasm::SimdOp::V128Load8x8U:
+              Ushll(SelectFPReg(outany, out64, 128).V8H(), scratch.V8B(), 0);
+              break;
+            case wasm::SimdOp::V128Load16x4S:
+              Sshll(SelectFPReg(outany, out64, 128).V4S(), scratch.V4H(), 0);
+              break;
+            case wasm::SimdOp::V128Load16x4U:
+              Ushll(SelectFPReg(outany, out64, 128).V4S(), scratch.V4H(), 0);
+              break;
+            case wasm::SimdOp::V128Load32x2S:
+              Sshll(SelectFPReg(outany, out64, 128).V2D(), scratch.V2S(), 0);
+              break;
+            case wasm::SimdOp::V128Load32x2U:
+              Ushll(SelectFPReg(outany, out64, 128).V2D(), scratch.V2S(), 0);
+              break;
+            default:
+              MOZ_CRASH("Unexpected widening op for wasmLoad");
           }
-        } else {
-          // LDR does the right thing also for access.isZeroExtendSimd128Load()
-          Ldr(SelectFPReg(outany, out64, 64), srcAddr);
         }
-        break;
-      case Scalar::Simd128:
-        Ldr(SelectFPReg(outany, out64, 128), srcAddr);
-        break;
-      case Scalar::Uint8Clamped:
-      case Scalar::BigInt64:
-      case Scalar::BigUint64:
-      case Scalar::MaxTypedArrayViewType:
-        MOZ_CRASH("unexpected array type");
-    }
+      } else {
+        // LDR does the right thing also for access.isZeroExtendSimd128Load()
+        fco = Ldr(SelectFPReg(outany, out64, 64), srcAddr);
+      }
+      break;
+    case Scalar::Simd128:
+      fco = Ldr(SelectFPReg(outany, out64, 128), srcAddr);
+      break;
+    case Scalar::Uint8Clamped:
+    case Scalar::BigInt64:
+    case Scalar::BigUint64:
+    case Scalar::MaxTypedArrayViewType:
+      MOZ_CRASH("unexpected array type");
   }
+
+  append(access, wasm::TrapMachineInsnForLoad(byteSize(access.type())), fco);
 
   asMasm().memoryBarrierAfter(access.sync());
 }
@@ -649,48 +643,40 @@ void MacroAssemblerCompat::wasmStoreImpl(const wasm::MemoryAccessDesc& access,
   // GenerateAtomicOperations.py
   asMasm().memoryBarrierBefore(access.sync());
 
-  {
-    // Reg+Reg addressing is directly encodable in one Store instruction, hence
-    // the AutoForbidPoolsAndNops will ensure that the access metadata is
-    // emitted at the address of the Store.  The AutoForbidPoolsAndNops will
-    // assert if we emit more than one instruction.
-
-    AutoForbidPoolsAndNops afp(this,
-                               /* max number of instructions in scope = */ 1);
-
-    append(access, asMasm().currentOffset());
-    switch (access.type()) {
-      case Scalar::Int8:
-      case Scalar::Uint8:
-        Strb(SelectGPReg(valany, val64), dstAddr);
-        break;
-      case Scalar::Int16:
-      case Scalar::Uint16:
-        Strh(SelectGPReg(valany, val64), dstAddr);
-        break;
-      case Scalar::Int32:
-      case Scalar::Uint32:
-        Str(SelectGPReg(valany, val64), dstAddr);
-        break;
-      case Scalar::Int64:
-        Str(SelectGPReg(valany, val64), dstAddr);
-        break;
-      case Scalar::Float32:
-        Str(SelectFPReg(valany, val64, 32), dstAddr);
-        break;
-      case Scalar::Float64:
-        Str(SelectFPReg(valany, val64, 64), dstAddr);
-        break;
-      case Scalar::Simd128:
-        Str(SelectFPReg(valany, val64, 128), dstAddr);
-        break;
-      case Scalar::Uint8Clamped:
-      case Scalar::BigInt64:
-      case Scalar::BigUint64:
-      case Scalar::MaxTypedArrayViewType:
-        MOZ_CRASH("unexpected array type");
-    }
+  FaultingCodeOffset fco;
+  switch (access.type()) {
+    case Scalar::Int8:
+    case Scalar::Uint8:
+      fco = Strb(SelectGPReg(valany, val64), dstAddr);
+      break;
+    case Scalar::Int16:
+    case Scalar::Uint16:
+      fco = Strh(SelectGPReg(valany, val64), dstAddr);
+      break;
+    case Scalar::Int32:
+    case Scalar::Uint32:
+      fco = Str(SelectGPReg(valany, val64), dstAddr);
+      break;
+    case Scalar::Int64:
+      fco = Str(SelectGPReg(valany, val64), dstAddr);
+      break;
+    case Scalar::Float32:
+      fco = Str(SelectFPReg(valany, val64, 32), dstAddr);
+      break;
+    case Scalar::Float64:
+      fco = Str(SelectFPReg(valany, val64, 64), dstAddr);
+      break;
+    case Scalar::Simd128:
+      fco = Str(SelectFPReg(valany, val64, 128), dstAddr);
+      break;
+    case Scalar::Uint8Clamped:
+    case Scalar::BigInt64:
+    case Scalar::BigUint64:
+    case Scalar::MaxTypedArrayViewType:
+      MOZ_CRASH("unexpected array type");
   }
+
+  append(access, wasm::TrapMachineInsnForStore(byteSize(access.type())), fco);
 
   asMasm().memoryBarrierAfter(access.sync());
 }
@@ -916,7 +902,7 @@ static void PushOrStoreRegsInMask(MacroAssembler* masm, LiveRegisterSet set,
   // If we're saving to arbitrary memory, check the destination is big enough.
   if (dest) {
     mozilla::DebugOnly<size_t> bytesRequired =
-        masm->PushRegsInMaskSizeInBytes(set);
+        MacroAssembler::PushRegsInMaskSizeInBytes(set);
     MOZ_ASSERT(dest->offset >= 0);
     MOZ_ASSERT(((size_t)dest->offset) >= bytesRequired);
   }
@@ -1059,10 +1045,10 @@ static void PushOrStoreRegsInMask(MacroAssembler* masm, LiveRegisterSet set,
   // Final overrun check.
   if (dest) {
     MOZ_ASSERT(maxExtentInitial - dest->offset ==
-               masm->PushRegsInMaskSizeInBytes(set));
+               MacroAssembler::PushRegsInMaskSizeInBytes(set));
   } else {
     MOZ_ASSERT(masm->framePushed() - maxExtentInitial ==
-               masm->PushRegsInMaskSizeInBytes(set));
+               MacroAssembler::PushRegsInMaskSizeInBytes(set));
   }
 }
 
@@ -1537,7 +1523,7 @@ void MacroAssembler::callWithABIPre(uint32_t* stackAdjust, bool callFromWasm) {
   assertStackAlignment(ABIStackAlignment);
 }
 
-void MacroAssembler::callWithABIPost(uint32_t stackAdjust, MoveOp::Type result,
+void MacroAssembler::callWithABIPost(uint32_t stackAdjust, ABIType result,
                                      bool callFromWasm) {
   // wasm operates without the need for dynamic alignment of SP.
   MOZ_ASSERT(!(dynamicAlignment_ && callFromWasm));
@@ -1583,7 +1569,7 @@ void MacroAssembler::callWithABIPost(uint32_t stackAdjust, MoveOp::Type result,
 #endif
 }
 
-void MacroAssembler::callWithABINoProfiler(Register fun, MoveOp::Type result) {
+void MacroAssembler::callWithABINoProfiler(Register fun, ABIType result) {
   vixl::UseScratchRegisterScope temps(this);
   const Register scratch = temps.AcquireX().asUnsized();
   movePtr(fun, scratch);
@@ -1594,8 +1580,7 @@ void MacroAssembler::callWithABINoProfiler(Register fun, MoveOp::Type result) {
   callWithABIPost(stackAdjust, result);
 }
 
-void MacroAssembler::callWithABINoProfiler(const Address& fun,
-                                           MoveOp::Type result) {
+void MacroAssembler::callWithABINoProfiler(const Address& fun, ABIType result) {
   vixl::UseScratchRegisterScope temps(this);
   const Register scratch = temps.AcquireX().asUnsized();
   loadPtr(fun, scratch);
@@ -1771,12 +1756,12 @@ void MacroAssembler::comment(const char* msg) { Assembler::comment(msg); }
 // ========================================================================
 // wasm support
 
-CodeOffset MacroAssembler::wasmTrapInstruction() {
+FaultingCodeOffset MacroAssembler::wasmTrapInstruction() {
   AutoForbidPoolsAndNops afp(this,
                              /* max number of instructions in scope = */ 1);
-  CodeOffset offs(currentOffset());
+  FaultingCodeOffset fco = FaultingCodeOffset(currentOffset());
   Unreachable();
-  return offs;
+  return fco;
 }
 
 void MacroAssembler::wasmBoundsCheck32(Condition cond, Register index,
@@ -2230,8 +2215,11 @@ static void LoadExclusive(MacroAssembler& masm,
   bool signExtend = Scalar::isSignedIntType(srcType);
 
   // With this address form, a single native ldxr* will be emitted, and the
-  // AutoForbidPoolsAndNops ensures that the metadata is emitted at the address
-  // of the ldxr*.
+  // AutoForbidPoolsAndNops ensures that the metadata is emitted at the
+  // address of the ldxr*.  Note that the use of AutoForbidPoolsAndNops is now
+  // a "second class" solution; the right way to do this would be to have the
+  // masm.<LoadInsn> calls produce an FaultingCodeOffset, and hand that value to
+  // `masm.append`.
   MOZ_ASSERT(ptr.IsImmediateOffset() && ptr.offset() == 0);
 
   switch (Scalar::byteSize(srcType)) {
@@ -2241,7 +2229,8 @@ static void LoadExclusive(MacroAssembler& masm,
             &masm,
             /* max number of instructions in scope = */ 1);
         if (access) {
-          masm.append(*access, masm.currentOffset());
+          masm.append(*access, wasm::TrapMachineInsn::Load8,
+                      FaultingCodeOffset(masm.currentOffset()));
         }
         masm.Ldxrb(W(dest), ptr);
       }
@@ -2256,7 +2245,8 @@ static void LoadExclusive(MacroAssembler& masm,
             &masm,
             /* max number of instructions in scope = */ 1);
         if (access) {
-          masm.append(*access, masm.currentOffset());
+          masm.append(*access, wasm::TrapMachineInsn::Load16,
+                      FaultingCodeOffset(masm.currentOffset()));
         }
         masm.Ldxrh(W(dest), ptr);
       }
@@ -2271,7 +2261,8 @@ static void LoadExclusive(MacroAssembler& masm,
             &masm,
             /* max number of instructions in scope = */ 1);
         if (access) {
-          masm.append(*access, masm.currentOffset());
+          masm.append(*access, wasm::TrapMachineInsn::Load32,
+                      FaultingCodeOffset(masm.currentOffset()));
         }
         masm.Ldxr(W(dest), ptr);
       }
@@ -2286,7 +2277,8 @@ static void LoadExclusive(MacroAssembler& masm,
             &masm,
             /* max number of instructions in scope = */ 1);
         if (access) {
-          masm.append(*access, masm.currentOffset());
+          masm.append(*access, wasm::TrapMachineInsn::Load64,
+                      FaultingCodeOffset(masm.currentOffset()));
         }
         masm.Ldxr(X(dest), ptr);
       }
@@ -2300,6 +2292,9 @@ static void LoadExclusive(MacroAssembler& masm,
 
 static void StoreExclusive(MacroAssembler& masm, Scalar::Type type,
                            Register status, Register src, MemOperand ptr) {
+  // Note, these are not decorated with a TrapSite only because they are
+  // assumed to be preceded by a LoadExclusive to the same address, of the
+  // same width, so that will always take the page fault if the address is bad.
   switch (Scalar::byteSize(type)) {
     case 1:
       masm.Stxrb(W(status), W(src), ptr);
@@ -2353,22 +2348,26 @@ static void CompareExchange(MacroAssembler& masm,
     // consider it is the same for "Inner Shareable" domain.
     // Not updated gen_cmpxchg in GenerateAtomicOperations.py.
     masm.memoryBarrierBefore(sync);
-    if (access) {
-      masm.append(*access, masm.currentOffset());
-    }
-    switch (byteSize(type)) {
-      case 1:
-        masm.Casalb(R(output, targetWidth), R(newval, targetWidth), ptr);
-        break;
-      case 2:
-        masm.Casalh(R(output, targetWidth), R(newval, targetWidth), ptr);
-        break;
-      case 4:
-      case 8:
-        masm.Casal(R(output, targetWidth), R(newval, targetWidth), ptr);
-        break;
-      default:
-        MOZ_CRASH("CompareExchange unsupported type");
+    {
+      AutoForbidPoolsAndNops afp(&masm, /* number of insns = */ 1);
+      if (access) {
+        masm.append(*access, wasm::TrapMachineInsn::Atomic,
+                    FaultingCodeOffset(masm.currentOffset()));
+      }
+      switch (byteSize(type)) {
+        case 1:
+          masm.Casalb(R(output, targetWidth), R(newval, targetWidth), ptr);
+          break;
+        case 2:
+          masm.Casalh(R(output, targetWidth), R(newval, targetWidth), ptr);
+          break;
+        case 4:
+        case 8:
+          masm.Casal(R(output, targetWidth), R(newval, targetWidth), ptr);
+          break;
+        default:
+          MOZ_CRASH("CompareExchange unsupported type");
+      }
     }
     masm.memoryBarrierAfter(sync);
     SignOrZeroExtend(masm, type, targetWidth, output, output);
@@ -2417,22 +2416,26 @@ static void AtomicExchange(MacroAssembler& masm,
     // consider it is the same for "Inner Shareable" domain.
     // Not updated gen_exchange in GenerateAtomicOperations.py.
     masm.memoryBarrierBefore(sync);
-    if (access) {
-      masm.append(*access, masm.currentOffset());
-    }
-    switch (byteSize(type)) {
-      case 1:
-        masm.Swpalb(R(value, targetWidth), R(output, targetWidth), ptr);
-        break;
-      case 2:
-        masm.Swpalh(R(value, targetWidth), R(output, targetWidth), ptr);
-        break;
-      case 4:
-      case 8:
-        masm.Swpal(R(value, targetWidth), R(output, targetWidth), ptr);
-        break;
-      default:
-        MOZ_CRASH("AtomicExchange unsupported type");
+    {
+      AutoForbidPoolsAndNops afp(&masm, /* number of insns = */ 1);
+      if (access) {
+        masm.append(*access, wasm::TrapMachineInsn::Atomic,
+                    FaultingCodeOffset(masm.currentOffset()));
+      }
+      switch (byteSize(type)) {
+        case 1:
+          masm.Swpalb(R(value, targetWidth), R(output, targetWidth), ptr);
+          break;
+        case 2:
+          masm.Swpalh(R(value, targetWidth), R(output, targetWidth), ptr);
+          break;
+        case 4:
+        case 8:
+          masm.Swpal(R(value, targetWidth), R(output, targetWidth), ptr);
+          break;
+        default:
+          MOZ_CRASH("AtomicExchange unsupported type");
+      }
     }
     masm.memoryBarrierAfter(sync);
     SignOrZeroExtend(masm, type, targetWidth, output, output);
@@ -2481,35 +2484,39 @@ static void AtomicFetchOp(MacroAssembler& masm,
     // Not updated gen_fetchop in GenerateAtomicOperations.py.
     masm.memoryBarrierBefore(sync);
 
-#define FETCH_OP_CASE(op, arg)                                              \
-  if (access) {                                                             \
-    masm.append(*access, masm.currentOffset());                             \
-  }                                                                         \
-  switch (byteSize(type)) {                                                 \
-    case 1:                                                                 \
-      if (wantResult) {                                                     \
-        masm.Ld##op##alb(R(arg, targetWidth), R(output, targetWidth), ptr); \
-      } else {                                                              \
-        masm.St##op##lb(R(arg, targetWidth), ptr);                          \
-      }                                                                     \
-      break;                                                                \
-    case 2:                                                                 \
-      if (wantResult) {                                                     \
-        masm.Ld##op##alh(R(arg, targetWidth), R(output, targetWidth), ptr); \
-      } else {                                                              \
-        masm.St##op##lh(R(arg, targetWidth), ptr);                          \
-      }                                                                     \
-      break;                                                                \
-    case 4:                                                                 \
-    case 8:                                                                 \
-      if (wantResult) {                                                     \
-        masm.Ld##op##al(R(arg, targetWidth), R(output, targetWidth), ptr);  \
-      } else {                                                              \
-        masm.St##op##l(R(arg, targetWidth), ptr);                           \
-      }                                                                     \
-      break;                                                                \
-    default:                                                                \
-      MOZ_CRASH("AtomicFetchOp unsupported type");                          \
+#define FETCH_OP_CASE(op, arg)                                                \
+  {                                                                           \
+    AutoForbidPoolsAndNops afp(&masm, /* num insns = */ 1);                   \
+    if (access) {                                                             \
+      masm.append(*access, wasm::TrapMachineInsn::Atomic,                     \
+                  FaultingCodeOffset(masm.currentOffset()));                  \
+    }                                                                         \
+    switch (byteSize(type)) {                                                 \
+      case 1:                                                                 \
+        if (wantResult) {                                                     \
+          masm.Ld##op##alb(R(arg, targetWidth), R(output, targetWidth), ptr); \
+        } else {                                                              \
+          masm.St##op##lb(R(arg, targetWidth), ptr);                          \
+        }                                                                     \
+        break;                                                                \
+      case 2:                                                                 \
+        if (wantResult) {                                                     \
+          masm.Ld##op##alh(R(arg, targetWidth), R(output, targetWidth), ptr); \
+        } else {                                                              \
+          masm.St##op##lh(R(arg, targetWidth), ptr);                          \
+        }                                                                     \
+        break;                                                                \
+      case 4:                                                                 \
+      case 8:                                                                 \
+        if (wantResult) {                                                     \
+          masm.Ld##op##al(R(arg, targetWidth), R(output, targetWidth), ptr);  \
+        } else {                                                              \
+          masm.St##op##l(R(arg, targetWidth), ptr);                           \
+        }                                                                     \
+        break;                                                                \
+      default:                                                                \
+        MOZ_CRASH("AtomicFetchOp unsupported type");                          \
+    }                                                                         \
   }
 
     switch (op) {

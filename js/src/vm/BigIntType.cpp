@@ -87,6 +87,7 @@
 #include "mozilla/Range.h"
 #include "mozilla/RangedPtr.h"
 #include "mozilla/Span.h"  // mozilla::Span
+#include "mozilla/Try.h"
 #include "mozilla/WrappingOperations.h"
 
 #include <functional>
@@ -96,14 +97,13 @@
 
 #include "jsnum.h"
 
-#include "gc/Allocator.h"
+#include "gc/GCEnum.h"
 #include "js/BigInt.h"
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/StableStringChars.h"
 #include "js/Utility.h"
 #include "util/CheckedArithmetic.h"
 #include "util/DifferentialTesting.h"
-#include "vm/JSContext.h"
 #include "vm/StaticStrings.h"
 
 #include "gc/GCContext-inl.h"
@@ -154,7 +154,7 @@ BigInt* BigInt::createUninitialized(JSContext* cx, size_t digitLength,
   MOZ_ASSERT(x->isNegative() == isNegative);
 
   if (digitLength > InlineDigitsLength) {
-    x->heapDigits_ = js::AllocateBigIntDigits(cx, x, digitLength);
+    x->heapDigits_ = js::AllocateCellBuffer<Digit>(cx, x, digitLength);
     if (!x->heapDigits_) {
       // |x| is partially initialized, expose it as a BigInt using inline digits
       // to the GC.
@@ -201,7 +201,7 @@ size_t BigInt::sizeOfExcludingThisInNursery(
 
   const Nursery& nursery = runtimeFromMainThread()->gc.nursery();
   if (nursery.isInside(heapDigits_)) {
-    // See |AllocateBigIntDigits()|.
+    // Buffer allocations are aligned to the size of JS::Value.
     return RoundUp(digitLength() * sizeof(Digit), sizeof(Value));
   }
 
@@ -1487,8 +1487,8 @@ BigInt* BigInt::destructivelyTrimHighZeroDigits(JSContext* cx, BigInt* x) {
     MOZ_ASSERT(x->hasHeapDigits());
 
     size_t oldLength = x->digitLength();
-    Digit* newdigits =
-        js::ReallocateBigIntDigits(cx, x, x->heapDigits_, oldLength, newLength);
+    Digit* newdigits = js::ReallocateCellBuffer<Digit>(
+        cx, x, x->heapDigits_, oldLength, newLength, js::MallocArena);
     if (!newdigits) {
       return nullptr;
     }
@@ -3829,7 +3829,7 @@ BigInt* JS::NumberToBigInt(JSContext* cx, double num) {
 
 template <typename CharT>
 static inline BigInt* StringToBigIntHelper(JSContext* cx,
-                                           Range<const CharT>& chars) {
+                                           const Range<const CharT>& chars) {
   bool parseError = false;
   BigInt* bi = ParseStringBigIntLiteral(cx, chars, &parseError);
   if (!bi) {
@@ -3843,11 +3843,12 @@ static inline BigInt* StringToBigIntHelper(JSContext* cx,
   return bi;
 }
 
-BigInt* JS::StringToBigInt(JSContext* cx, Range<const Latin1Char> chars) {
+BigInt* JS::StringToBigInt(JSContext* cx,
+                           const Range<const Latin1Char>& chars) {
   return StringToBigIntHelper(cx, chars);
 }
 
-BigInt* JS::StringToBigInt(JSContext* cx, Range<const char16_t> chars) {
+BigInt* JS::StringToBigInt(JSContext* cx, const Range<const char16_t>& chars) {
   return StringToBigIntHelper(cx, chars);
 }
 

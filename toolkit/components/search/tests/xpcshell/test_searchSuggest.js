@@ -8,17 +8,11 @@
 
 "use strict";
 
-const { AppConstants } = ChromeUtils.importESModule(
-  "resource://gre/modules/AppConstants.sys.mjs"
-);
 const { FormHistory } = ChromeUtils.importESModule(
   "resource://gre/modules/FormHistory.sys.mjs"
 );
 const { SearchSuggestionController } = ChromeUtils.importESModule(
   "resource://gre/modules/SearchSuggestionController.sys.mjs"
-);
-const { PromiseUtils } = ChromeUtils.importESModule(
-  "resource://gre/modules/PromiseUtils.sys.mjs"
 );
 const { TelemetryTestUtils } = ChromeUtils.importESModule(
   "resource://testing-common/TelemetryTestUtils.sys.mjs"
@@ -805,10 +799,7 @@ add_task(async function unresolvable_server() {
   Assert.equal(result.local[0].value, "Unresolvable Server Entry");
   Assert.equal(result.remote.length, 0);
 
-  // This latency assert fails on Windows 7 (NT version 6.1), so skip it there.
-  if (!AppConstants.isPlatformAndVersionAtMost("win", "6.1")) {
-    assertLatencyHistogram(histogram, true);
-  }
+  assertLatencyHistogram(histogram, true);
 });
 
 // Exception handling
@@ -860,7 +851,7 @@ add_task(async function test_userContextId() {
     userContextId
   ) {
     Assert.equal(userContextId, 1);
-    return PromiseUtils.defer();
+    return Promise.withResolvers();
   };
 
   controller.fetch("test", false, getEngine, 1);

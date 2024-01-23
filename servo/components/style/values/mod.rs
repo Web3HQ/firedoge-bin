@@ -92,10 +92,6 @@ where
     serialize_name(&ident, dest)
 }
 
-fn nan_inf_enabled() -> bool {
-    static_prefs::pref!("layout.css.nan-inf.enabled")
-}
-
 /// Serialize a number with calc, and NaN/infinity handling (if enabled)
 pub fn serialize_number<W>(v: f32, was_calc: bool, dest: &mut CssWriter<W>) -> fmt::Result
 where
@@ -118,7 +114,7 @@ where
         dest.write_str("calc(")?;
     }
 
-    if !v.is_finite() && nan_inf_enabled() {
+    if !v.is_finite() {
         // https://drafts.csswg.org/css-values/#calc-error-constants:
         // "While not technically numbers, these keywords act as numeric values,
         // similar to e and pi. Thus to get an infinite length, for example,
@@ -177,15 +173,27 @@ impl cssparser::ToCss for AtomString {
     where
         W: Write,
     {
+        // Wrap in quotes to form a string literal
+        dest.write_char('"')?;
         #[cfg(feature = "servo")]
         {
-            cssparser::CssStringWriter::new(dest).write_str(self.as_ref())
+            cssparser::CssStringWriter::new(dest).write_str(self.as_ref())?;
         }
         #[cfg(feature = "gecko")]
         {
             self.0
-                .with_str(|s| cssparser::CssStringWriter::new(dest).write_str(s))
+                .with_str(|s| cssparser::CssStringWriter::new(dest).write_str(s))?;
         }
+        dest.write_char('"')
+    }
+}
+
+impl style_traits::ToCss for AtomString {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        cssparser::ToCss::to_css(self, dest)
     }
 }
 
@@ -496,6 +504,7 @@ impl<A: Debug, B: Debug> Debug for Either<A, B> {
 #[derive(
     Clone,
     Debug,
+    Default,
     Eq,
     Hash,
     MallocSizeOf,

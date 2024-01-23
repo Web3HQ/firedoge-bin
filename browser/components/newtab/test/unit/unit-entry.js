@@ -155,6 +155,9 @@ const TEST_GLOBAL = {
   browserSearchRegion: "US",
   BrowserWindowTracker: { getTopWindow() {} },
   ChromeUtils: {
+    defineLazyGetter(object, name, f) {
+      updateGlobalOrObject(object)[name] = f();
+    },
     defineModuleGetter: updateGlobalOrObject,
     defineESModuleGetters: updateGlobalOrObject,
     generateQI() {
@@ -494,11 +497,7 @@ const TEST_GLOBAL = {
     },
   },
   XPCOMUtils: {
-    defineLazyGetter(object, name, f) {
-      updateGlobalOrObject(object)[name] = f();
-    },
     defineLazyGlobalGetters: updateGlobalOrObject,
-    defineLazyModuleGetter: updateGlobalOrObject,
     defineLazyModuleGetters: updateGlobalOrObject,
     defineLazyServiceGetter: updateGlobalOrObject,
     defineLazyServiceGetters: updateGlobalOrObject,
@@ -628,6 +627,11 @@ const TEST_GLOBAL = {
         set() {},
       },
     },
+    newtabHandoffPreference: {
+      enabled: {
+        set() {},
+      },
+    },
     pocket: {
       enabled: {
         set() {},
@@ -650,6 +654,9 @@ const TEST_GLOBAL = {
       topicClick: {
         record() {},
       },
+      shim: {
+        set() {},
+      },
     },
     topsites: {
       enabled: {
@@ -665,6 +672,21 @@ const TEST_GLOBAL = {
         record() {},
       },
       rows: {
+        set() {},
+      },
+      showPrivacyClick: {
+        record() {},
+      },
+      dismiss: {
+        record() {},
+      },
+      prefChanged: {
+        record() {},
+      },
+      sponsoredTilesConfigured: {
+        set() {},
+      },
+      sponsoredTilesReceived: {
         set() {},
       },
     },
@@ -697,6 +719,9 @@ const TEST_GLOBAL = {
       submit() {},
     },
     topSites: {
+      submit() {},
+    },
+    spoc: {
       submit() {},
     },
   },

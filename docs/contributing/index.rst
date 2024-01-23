@@ -13,6 +13,17 @@ development process and source code documentation.
    pocket-guide-shipping-firefox
    editor
    reviews
+   levelling-up
+   how_to_submit_a_patch
+
+
+.. toctree::
+   :caption: Code reviews
+   :maxdepth: 1
+
+   Code_Review_FAQ
+   reviewer_checklist
+
 
 .. toctree::
    :caption: The Mercurial Version Control System
@@ -39,3 +50,4 @@ development process and source code documentation.
    build/building_mobile_firefox
    build/supported
    engineering_show_and_tell
+   filing-good-bugs

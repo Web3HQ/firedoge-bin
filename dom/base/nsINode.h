@@ -192,21 +192,46 @@ enum class NodeSelectorFlags : uint32_t {
   /// child's later siblings must also be restyled.
   HasSlowSelectorLaterSiblings = 1 << 3,
 
+  /// HasSlowSelector* was set by the presence of :nth (But not of).
+  HasSlowSelectorNth = 1 << 4,
+
   /// A child of this node might be matched by :nth-child(.. of <selector>) or
   /// :nth-last-child(.. of <selector>). If a DOM mutation may have caused the
   /// selector to either match or no longer match that child, the child's
   /// siblings are restyled.
-  HasSlowSelectorNthOf = 1 << 4,
+  HasSlowSelectorNthOf = 1 << 5,
+
+  /// All instances of :nth flags.
+  HasSlowSelectorNthAll = HasSlowSelectorNthOf | HasSlowSelectorNth,
 
   /// Set of selector flags that may trigger a restyle on DOM append, with
   /// restyle on siblings or a single parent (And perhaps their subtrees).
   AllSimpleRestyleFlagsForAppend = HasEmptySelector | HasSlowSelector |
-                                   HasEdgeChildSelector | HasSlowSelectorNthOf,
+                                   HasEdgeChildSelector | HasSlowSelectorNthAll,
 
   /// Set of selector flags that may trigger a restyle as a result of any
   /// DOM mutation.
   AllSimpleRestyleFlags =
       AllSimpleRestyleFlagsForAppend | HasSlowSelectorLaterSiblings,
+
+  // This node was evaluated as an anchor for a relative selector.
+  RelativeSelectorAnchor = 1 << 6,
+
+  // This node was evaluated as an anchor for a relative selector, and that
+  // relative selector was not the subject of the overall selector.
+  RelativeSelectorAnchorNonSubject = 1 << 7,
+
+  // This node's sibling(s) performed a relative selector search to this node.
+  RelativeSelectorSearchDirectionSibling = 1 << 8,
+
+  // This node's ancestor(s) performed a relative selector search to this node.
+  RelativeSelectorSearchDirectionAncestor = 1 << 9,
+
+  // This node's sibling(s) and ancestor(s), and/or this node's ancestor's
+  // sibling(s) performed a relative selector search to this node.
+  RelativeSelectorSearchDirectionAncestorSibling =
+      RelativeSelectorSearchDirectionSibling |
+      RelativeSelectorSearchDirectionAncestor,
 };
 
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(NodeSelectorFlags);
@@ -849,6 +874,9 @@ class nsINode : public mozilla::dom::EventTarget {
   }
 
   virtual bool IsSVGAnimationElement() const { return false; }
+  virtual bool IsSVGComponentTransferFunctionElement() const { return false; }
+  virtual bool IsSVGFilterPrimitiveElement() const { return false; }
+  virtual bool IsSVGFilterPrimitiveChildElement() const { return false; }
   virtual bool IsSVGGeometryElement() const { return false; }
   virtual bool IsSVGGraphicsElement() const { return false; }
 
@@ -888,6 +916,14 @@ class nsINode : public mozilla::dom::EventTarget {
     return IsAnyOfHTMLElements(nsGkAtoms::h1, nsGkAtoms::h2, nsGkAtoms::h3,
                                nsGkAtoms::h4, nsGkAtoms::h5, nsGkAtoms::h6);
   }
+
+  /**
+   * Check whether the conditional processing attributes other than
+   * systemLanguage "return true" if they apply to and are specified
+   * on the given SVG element. Returns true if this element should be
+   * rendered, false if it should not.
+   */
+  virtual bool PassesConditionalProcessingTests() const { return true; }
 
   /**
    * Insert a content node before another or at the end.
@@ -1388,6 +1424,12 @@ class nsINode : public mozilla::dom::EventTarget {
   inline bool IsEditable() const;
 
   /**
+   * Check if this node is an editing host. For avoiding confusion, this always
+   * returns false if the node is in the design mode document.
+   */
+  inline bool IsEditingHost() const;
+
+  /**
    * Check if this node is in design mode or not.  When this returns true and:
    * - if this is a Document node, it's the design mode root.
    * - if this is a content node, it's connected, it's not in a shadow tree
@@ -1468,7 +1510,7 @@ class nsINode : public mozilla::dom::EventTarget {
    *
    * @return The shadow host, if this is in shadow tree, or null.
    */
-  nsIContent* GetContainingShadowHost() const;
+  mozilla::dom::Element* GetContainingShadowHost() const;
 
   bool IsInSVGUseShadowTree() const {
     return !!GetContainingSVGUseShadowHost();
@@ -2364,6 +2406,8 @@ class nsINode : public mozilla::dom::EventTarget {
   nsSlots* mSlots;
 };
 
+NON_VIRTUAL_ADDREF_RELEASE(nsINode)
+
 inline nsINode* mozilla::dom::EventTarget::GetAsNode() {
   return IsNode() ? AsNode() : nullptr;
 }
@@ -2402,7 +2446,7 @@ inline nsISupports* ToSupports(nsINode* aPointer) { return aPointer; }
 #define NS_IMPL_FROMNODE_GENERIC(_class, _check, _const)                 \
   template <typename T>                                                  \
   static auto FromNode(_const T& aNode)                                  \
-      ->decltype(static_cast<_const _class*>(&aNode)) {                  \
+      -> decltype(static_cast<_const _class*>(&aNode)) {                 \
     return aNode._check ? static_cast<_const _class*>(&aNode) : nullptr; \
   }                                                                      \
   template <typename T>                                                  \
@@ -2415,7 +2459,7 @@ inline nsISupports* ToSupports(nsINode* aPointer) { return aPointer; }
   }                                                                      \
   template <typename T>                                                  \
   static auto FromEventTarget(_const T& aEventTarget)                    \
-      ->decltype(static_cast<_const _class*>(&aEventTarget)) {           \
+      -> decltype(static_cast<_const _class*>(&aEventTarget)) {          \
     return aEventTarget.IsNode() && aEventTarget.AsNode()->_check        \
                ? static_cast<_const _class*>(&aEventTarget)              \
                : nullptr;                                                \

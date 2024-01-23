@@ -43,6 +43,7 @@
 #identity-popup[connection=secure] [when-connection~=secure],
 #identity-popup[connection=chrome] [when-connection~=chrome],
 #identity-popup[connection=file] [when-connection~=file],
+#identity-popup[connection=associated] [when-connection~=associated],
 #identity-popup[connection=extension] [when-connection~=extension],
 #identity-popup[connection=cert-error-page] [when-connection~=cert-error-page],
 #identity-popup[connection=net-error-page] [when-connection~=net-error-page],
@@ -140,7 +141,7 @@
 
 #protections-popup .panel-header > h1 > span {
   /* The protections popup panel header text needs a different calculation because it contains an info button.
-   * icon-full-width and icon-margin are included twice to compensate for the margin-inline-start of the text,
+   * icon-full-width is included twice to compensate for the margin-inline-start of the text,
    * used to center it even if the header includes a info button. See .panel-header-with-info-button */
   max-width: calc(var(--popup-width)
                   - var(--arrowpanel-menuitem-margin-inline) * 2
@@ -213,6 +214,10 @@
 
 #identity-popup[connection=file] .identity-popup-security-connection {
   list-style-image: url(chrome://global/skin/icons/page-portrait.svg);
+}
+
+#identity-popup[connection=associated] .identity-popup-security-connection {
+  list-style-image: url(chrome://global/skin/icons/info.svg);
 }
 
 #identity-popup[connection^=secure] .identity-popup-security-connection {
@@ -722,7 +727,7 @@
   background-repeat: no-repeat;
   background-position: center;
 
-  fill: #0090ED;
+  fill: light-dark(#0090ED, #80EBFF);
 }
 
 .protections-popup-shim-allow-hint-icon {
@@ -735,11 +740,6 @@
 
 .protections-popup-list-host-shim-allow-indicator {
   width: 16px;
-}
-
-:root[lwt-popup-brighttext] .protections-popup-shim-allow-hint-icon,
-:root[lwt-popup-brighttext] .protections-popup-list-host-shim-allow-indicator {
-  fill: #80EBFF;
 }
 
 .protections-popup-shim-allow-hint-icon {

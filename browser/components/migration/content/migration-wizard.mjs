@@ -23,12 +23,14 @@ export class MigrationWizard extends HTMLElement {
   #importButton = null;
   #importFromFileButton = null;
   #chooseImportFromFile = null;
+  #getPermissionsButton = null;
   #safariPermissionButton = null;
   #safariPasswordImportSkipButton = null;
   #safariPasswordImportSelectButton = null;
   #selectAllCheckbox = null;
   #resourceSummary = null;
   #expandedDetails = false;
+  #extensionsSuccessLink = null;
 
   static get markup() {
     return `
@@ -62,8 +64,22 @@ export class MigrationWizard extends HTMLElement {
               <span class="error-icon" role="img"></span>
               <div data-l10n-id="migration-wizard-import-browser-no-resources"></div>
             </div>
-            <div data-l10n-id="migration-wizard-selection-list" class="resource-selection-preamble deemphasized-text hide-on-no-resources-error"></div>
-            <details class="resource-selection-details hide-on-no-resources-error">
+
+            <div class="no-permissions-message">
+              <p data-l10n-id="migration-no-permissions-message">
+              </p>
+              <p data-l10n-id="migration-no-permissions-instructions">
+              </p>
+              <ol>
+                <li data-l10n-id="migration-no-permissions-instructions-step1"></li>
+                <li class="migration-no-permissions-instructions-step2" data-l10n-id="migration-no-permissions-instructions-step2" data-l10n-args='{"permissionsPath": "" }'>
+                  <code></code>
+                </li>
+              </ol>
+            </div>
+
+            <div data-l10n-id="migration-wizard-selection-list" class="resource-selection-preamble deemphasized-text hide-on-error"></div>
+            <details class="resource-selection-details hide-on-error">
               <summary id="resource-selection-summary">
                 <div class="selected-data-header" data-l10n-id="migration-all-available-data-label"></div>
                 <div class="selected-data deemphasized-text">&nbsp;</div>
@@ -77,7 +93,7 @@ export class MigrationWizard extends HTMLElement {
                   <input type="checkbox"/><span default-data-l10n-id="migration-bookmarks-option-label" ie-edge-data-l10n-id="migration-favorites-option-label"></span>
                 </label>
                 <label id="logins-and-passwords" data-resource-type="PASSWORDS">
-                  <input type="checkbox"/><span data-l10n-id="migration-logins-and-passwords-option-label"></span>
+                  <input type="checkbox"/><span data-l10n-id="migration-passwords-option-label"></span>
                 </label>
                 <label id="history" data-resource-type="HISTORY">
                   <input type="checkbox"/><span data-l10n-id="migration-history-option-label"></span>
@@ -103,6 +119,7 @@ export class MigrationWizard extends HTMLElement {
               <button class="cancel-close" data-l10n-id="migration-cancel-button-label"></button>
               <button id="import-from-file" class="primary" data-l10n-id="migration-import-from-file-button-label"></button>
               <button id="import" class="primary" data-l10n-id="migration-import-button-label"></button>
+              <button id="get-permissions" class="primary" data-l10n-id="migration-continue-button-label"></button>
             </moz-button-group>
           </div>
 
@@ -118,7 +135,7 @@ export class MigrationWizard extends HTMLElement {
 
               <div data-resource-type="PASSWORDS" class="resource-progress-group">
                 <span class="progress-icon-parent"><span class="progress-icon" role="img"></span></span>
-                <span data-l10n-id="migration-logins-and-passwords-option-label"></span>
+                <span data-l10n-id="migration-passwords-option-label"></span>
                 <span class="message-text deemphasized-text">&nbsp;</span>
                 <a class="support-text deemphasized-text"></a>
               </div>
@@ -133,7 +150,7 @@ export class MigrationWizard extends HTMLElement {
               <div data-resource-type="EXTENSIONS" class="resource-progress-group">
                 <span class="progress-icon-parent"><span class="progress-icon" role="img"></span></span>
                 <span data-l10n-id="migration-extensions-option-label"></span>
-                <a class="message-text deemphasized-text"></a>
+                <a id="extensions-success-link" href="about:addons" class="message-text deemphasized-text"></a>
                 <span class="message-text deemphasized-text"></span>
                 <a class="support-text deemphasized-text"></a>
               </div>
@@ -311,6 +328,8 @@ export class MigrationWizard extends HTMLElement {
       "#choose-import-from-file"
     );
     this.#chooseImportFromFile.addEventListener("click", this);
+    this.#getPermissionsButton = shadow.querySelector("#get-permissions");
+    this.#getPermissionsButton.addEventListener("click", this);
 
     this.#browserProfileSelector.addEventListener("click", this);
     this.#resourceTypeList = shadow.querySelector("#resource-type-list");
@@ -332,6 +351,11 @@ export class MigrationWizard extends HTMLElement {
       "#safari-password-import-select"
     );
     this.#safariPasswordImportSelectButton.addEventListener("click", this);
+
+    this.#extensionsSuccessLink = shadow.querySelector(
+      "#extensions-success-link"
+    );
+    this.#extensionsSuccessLink.addEventListener("click", this);
 
     this.#shadowRoot = shadow;
   }
@@ -494,10 +518,42 @@ export class MigrationWizard extends HTMLElement {
       "div[name='page-selection']"
     );
     selectionPage.setAttribute("migrator-type", panelItem.getAttribute("type"));
+
+    // Safari currently has a special flow for requesting permissions that
+    // occurs _after_ resource selection, so we don't show this message
+    // for that migrator.
+    let showNoPermissionsMessage =
+      panelItem.getAttribute("type") ==
+        MigrationWizardConstants.MIGRATOR_TYPES.BROWSER &&
+      !panelItem.hasPermissions &&
+      panelItem.getAttribute("key") != "safari";
+
+    selectionPage.toggleAttribute("no-permissions", showNoPermissionsMessage);
+    if (showNoPermissionsMessage) {
+      let step2 = selectionPage.querySelector(
+        ".migration-no-permissions-instructions-step2"
+      );
+      step2.setAttribute(
+        "data-l10n-args",
+        JSON.stringify({ permissionsPath: panelItem.permissionsPath })
+      );
+
+      this.dispatchEvent(
+        new CustomEvent("MigrationWizard:PermissionsNeeded", {
+          bubbles: true,
+          detail: {
+            key,
+          },
+        })
+      );
+    }
+
     selectionPage.toggleAttribute(
       "no-resources",
       panelItem.getAttribute("type") ==
-        MigrationWizardConstants.MIGRATOR_TYPES.BROWSER && !resourceTypes.length
+        MigrationWizardConstants.MIGRATOR_TYPES.BROWSER &&
+        !resourceTypes.length &&
+        panelItem.hasPermissions
     );
   }
 
@@ -548,6 +604,7 @@ export class MigrationWizard extends HTMLElement {
       opt.displayName = migrator.displayName;
       opt.resourceTypes = migrator.resourceTypes;
       opt.hasPermissions = migrator.hasPermissions;
+      opt.permissionsPath = migrator.permissionsPath;
       opt.brandImage = migrator.brandImage;
 
       let button = opt.shadowRoot.querySelector("button");
@@ -649,6 +706,8 @@ export class MigrationWizard extends HTMLElement {
     let resourceGroups = progressPage.querySelectorAll(
       ".resource-progress-group"
     );
+    this.#extensionsSuccessLink.textContent = "";
+
     let totalProgressGroups = Object.keys(state.progress).length;
     let remainingProgressGroups = totalProgressGroups;
     let totalWarnings = 0;
@@ -663,7 +722,6 @@ export class MigrationWizard extends HTMLElement {
 
       let progressIcon = group.querySelector(".progress-icon");
       let messageText = group.querySelector("span.message-text");
-      let extensionsSuccessLink = group.querySelector("a.message-text");
       let supportLink = group.querySelector(".support-text");
 
       let labelSpan = group.querySelector("span[default-data-l10n-id]");
@@ -681,10 +739,7 @@ export class MigrationWizard extends HTMLElement {
         }
       }
       messageText.textContent = "";
-      if (extensionsSuccessLink) {
-        extensionsSuccessLink.textContent = "";
-        extensionsSuccessLink.removeAttribute("href");
-      }
+
       if (supportLink) {
         supportLink.textContent = "";
         supportLink.removeAttribute("href");
@@ -698,10 +753,6 @@ export class MigrationWizard extends HTMLElement {
           );
           progressIcon.setAttribute("state", "loading");
           messageText.textContent = "";
-          if (extensionsSuccessLink) {
-            extensionsSuccessLink.textContent = "";
-            extensionsSuccessLink.removeAttribute("href");
-          }
           supportLink.textContent = "";
           supportLink.removeAttribute("href");
           // With no status text, we re-insert the &nbsp; so that the status
@@ -721,8 +772,7 @@ export class MigrationWizard extends HTMLElement {
             MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.EXTENSIONS
           ) {
             messageText.textContent = "";
-            extensionsSuccessLink.href = "about:addons";
-            extensionsSuccessLink.textContent =
+            this.#extensionsSuccessLink.textContent =
               state.progress[resourceType].message;
           }
           remainingProgressGroups--;
@@ -755,8 +805,7 @@ export class MigrationWizard extends HTMLElement {
             MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.EXTENSIONS
           ) {
             messageText.textContent = "";
-            extensionsSuccessLink.href = "about:addons";
-            extensionsSuccessLink.textContent =
+            this.#extensionsSuccessLink.textContent =
               state.progress[resourceType].message;
           }
           remainingProgressGroups--;
@@ -1096,6 +1145,20 @@ export class MigrationWizard extends HTMLElement {
   }
 
   /**
+   * Sends a request to get read permissions for the data associated
+   * with the selected browser.
+   */
+  #getPermissions() {
+    let migrationEventDetail = this.#gatherMigrationEventDetails();
+    this.dispatchEvent(
+      new CustomEvent("MigrationWizard:GetPermissions", {
+        bubbles: true,
+        detail: migrationEventDetail,
+      })
+    );
+  }
+
+  /**
    * Changes selected-data-header text and selected-data text based on
    * how many resources are checked
    */
@@ -1263,6 +1326,15 @@ export class MigrationWizard extends HTMLElement {
           }
         } else if (event.target == this.#safariPasswordImportSelectButton) {
           this.#selectSafariPasswordFile();
+        } else if (event.target == this.#extensionsSuccessLink) {
+          this.dispatchEvent(
+            new CustomEvent("MigrationWizard:OpenAboutAddons", {
+              bubbles: true,
+            })
+          );
+          event.preventDefault();
+        } else if (event.target == this.#getPermissionsButton) {
+          this.#getPermissions();
         }
         break;
       }

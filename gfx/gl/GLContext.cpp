@@ -66,7 +66,8 @@ namespace gl {
 using namespace mozilla::gfx;
 using namespace mozilla::layers;
 
-MOZ_THREAD_LOCAL(uintptr_t) GLContext::sCurrentContext;
+// Zero-initialized after init().
+MOZ_THREAD_LOCAL(const GLContext*) GLContext::sCurrentContext;
 
 // If adding defines, don't forget to undefine symbols. See #undef block below.
 // clang-format off
@@ -284,10 +285,7 @@ GLContext::GLContext(const GLContextDesc& desc, GLContext* sharedContext,
       mSharedContext(sharedContext),
       mOwningThreadId(Some(PlatformThread::CurrentId())),
       mWorkAroundDriverBugs(
-          StaticPrefs::gfx_work_around_driver_bugs_AtStartup()) {
-  MOZ_ALWAYS_TRUE(sCurrentContext.init());
-  sCurrentContext.set(0);
-}
+          StaticPrefs::gfx_work_around_driver_bugs_AtStartup()) {}
 
 GLContext::~GLContext() {
   NS_ASSERTION(
@@ -303,6 +301,18 @@ GLContext::~GLContext() {
     ReportOutstandingNames();
   }
 #endif
+  // Ensure we clear sCurrentContext if we were the last context set and avoid
+  // the memory getting reused.
+  if (sCurrentContext.init() && sCurrentContext.get() == this) {
+    sCurrentContext.set(nullptr);
+  }
+}
+
+/*static*/
+void GLContext::InvalidateCurrentContext() {
+  if (sCurrentContext.init()) {
+    sCurrentContext.set(nullptr);
+  }
 }
 
 /*static*/
@@ -654,6 +664,7 @@ bool GLContext::InitImpl() {
       "Gallium 0.4 on llvmpipe",
       "Intel HD Graphics 3000 OpenGL Engine",
       "Microsoft Basic Render Driver",
+      "Samsung Xclipse 920",
       "Unknown"};
 
   mRenderer = GLRenderer::Other;
@@ -750,6 +761,10 @@ bool GLContext::InitImpl() {
     if (IsMesa()) {
       // DrawElementsInstanced hangs the driver.
       MarkUnsupported(GLFeature::robust_buffer_access_behavior);
+    }
+
+    if (Renderer() == GLRenderer::SamsungXclipse920) {
+      MarkUnsupported(GLFeature::invalidate_framebuffer);
     }
   }
 
@@ -899,25 +914,6 @@ bool GLContext::InitImpl() {
       // prevents occasional driver crash.
       mNeedsFlushBeforeDeleteFB = true;
     }
-#ifdef MOZ_WIDGET_ANDROID
-    if ((Renderer() == GLRenderer::AdrenoTM305 ||
-         Renderer() == GLRenderer::AdrenoTM320 ||
-         Renderer() == GLRenderer::AdrenoTM330) &&
-        jni::GetAPIVersion() < 21) {
-      // Bug 1164027. Driver crashes when functions such as
-      // glTexImage2D fail due to virtual memory exhaustion.
-      mTextureAllocCrashesOnMapFailure = true;
-    }
-#endif
-#if MOZ_WIDGET_ANDROID
-    if (Renderer() == GLRenderer::SGX540 && jni::GetAPIVersion() <= 15) {
-      // Bug 1288446. Driver sometimes crashes when uploading data to a
-      // texture if the render target has changed since the texture was
-      // rendered from. Calling glCheckFramebufferStatus after
-      // glFramebufferTexture2D prevents the crash.
-      mNeedsCheckAfterAttachTextureToFb = true;
-    }
-#endif
 
     // -
 
@@ -1652,15 +1648,6 @@ void GLContext::InitExtensions() {
       // Bug 980048
       MarkExtensionUnsupported(OES_EGL_sync);
     }
-
-#ifdef MOZ_WIDGET_ANDROID
-    if (Vendor() == GLVendor::Imagination &&
-        Renderer() == GLRenderer::SGX544MP && jni::GetAPIVersion() < 21) {
-      // Bug 1026404
-      MarkExtensionUnsupported(OES_EGL_image);
-      MarkExtensionUnsupported(OES_EGL_image_external);
-    }
-#endif
 
     if (Vendor() == GLVendor::ARM && (Renderer() == GLRenderer::Mali400MP ||
                                       Renderer() == GLRenderer::Mali450MP)) {
@@ -2419,14 +2406,14 @@ bool GLContext::MakeCurrent(bool aForce) const {
 
   if (MOZ_LIKELY(!aForce)) {
     bool isCurrent;
-    if (mUseTLSIsCurrent) {
-      isCurrent = (sCurrentContext.get() == reinterpret_cast<uintptr_t>(this));
+    if (mUseTLSIsCurrent && sCurrentContext.init()) {
+      isCurrent = (sCurrentContext.get() == this);
     } else {
       isCurrent = IsCurrentImpl();
     }
     if (MOZ_LIKELY(isCurrent)) {
       MOZ_ASSERT(IsCurrentImpl() ||
-                 !MakeCurrentImpl());  // Might have lost context.
+                 MakeCurrentImpl());  // Might have lost context.
       return true;
     }
   }
@@ -2439,7 +2426,9 @@ bool GLContext::MakeCurrent(bool aForce) const {
   }
   if (!MakeCurrentImpl()) return false;
 
-  sCurrentContext.set(reinterpret_cast<uintptr_t>(this));
+  if (sCurrentContext.init()) {
+    sCurrentContext.set(this);
+  }
   return true;
 }
 

@@ -221,7 +221,6 @@ static const char* gCallbackPrefsForSocketProcess[] = {
     "network.trr.",
     "doh-rollout.",
     "network.dns.disableIPv6",
-    "network.dns.skipTRR-when-parental-control-enabled",
     "network.offline-mirrors-connectivity",
     "network.disable-localhost-when-offline",
     "network.proxy.parse_pac_on_socket_process",
@@ -424,6 +423,13 @@ nsresult nsIOService::InitializeCaptivePortalService() {
 
 nsresult nsIOService::InitializeSocketTransportService() {
   nsresult rv = NS_OK;
+
+  if (AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
+    LOG(
+        ("nsIOService aborting InitializeSocketTransportService because of app "
+         "shutdown"));
+    return NS_ERROR_ILLEGAL_DURING_SHUTDOWN;
+  }
 
   if (!mSocketTransportService) {
     mSocketTransportService =
@@ -957,6 +963,13 @@ nsIOService::HostnameIsSharedIPAddress(nsIURI* aURI, bool* aResult) {
 }
 
 NS_IMETHODIMP
+nsIOService::IsValidHostname(const nsACString& inHostname, bool* aResult) {
+  *aResult = net_IsValidHostName(inHostname);
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsIOService::GetProtocolFlags(const char* scheme, uint32_t* flags) {
   NS_ENSURE_ARG_POINTER(scheme);
 
@@ -1011,10 +1024,8 @@ nsIOService::NewFileURI(nsIFile* file, nsIURI** result) {
 already_AddRefed<nsIURI> nsIOService::CreateExposableURI(nsIURI* aURI) {
   MOZ_ASSERT(aURI, "Must have a URI");
   nsCOMPtr<nsIURI> uri = aURI;
-
-  nsAutoCString userPass;
-  uri->GetUserPass(userPass);
-  if (!userPass.IsEmpty()) {
+  bool hasUserPass;
+  if (NS_SUCCEEDED(aURI->GetHasUserPass(&hasUserPass)) && hasUserPass) {
     DebugOnly<nsresult> rv = NS_MutateURI(uri).SetUserPass(""_ns).Finalize(uri);
     MOZ_ASSERT(NS_SUCCEEDED(rv) && uri, "Mutating URI should never fail");
   }

@@ -358,8 +358,7 @@ void RemoteWorkerManager::LaunchInternal(
           }
         });
 
-    MOZ_ALWAYS_SUCCEEDS(
-        SchedulerGroup::Dispatch(TaskCategory::Other, r.forget()));
+    MOZ_ALWAYS_SUCCEEDS(SchedulerGroup::Dispatch(r.forget()));
   }
 
   RefPtr<RemoteWorkerParent> workerActor = MakeAndAddRef<RemoteWorkerParent>();
@@ -500,7 +499,7 @@ RemoteWorkerServiceParent* RemoteWorkerManager::SelectTargetActor(
   }
 
   // Extension principal workers are allowed to run on the parent process
-  // when "extension.webextensions.remote" pref is false.
+  // when "extensions.webextensions.remote" pref is false.
   if (aProcessId == base::GetCurrentProcId() &&
       aData.remoteType().Equals(NOT_REMOTE_TYPE) &&
       !StaticPrefs::extensions_webextensions_remote() &&
@@ -621,7 +620,7 @@ void RemoteWorkerManager::LaunchNewContentProcess(
                          });
       });
 
-  SchedulerGroup::Dispatch(TaskCategory::Other, r.forget());
+  SchedulerGroup::Dispatch(r.forget());
 }
 
 }  // namespace dom

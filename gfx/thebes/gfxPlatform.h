@@ -777,6 +777,8 @@ class gfxPlatform : public mozilla::layers::MemoryPressureListener {
     mSwapChainInfo = mozilla::Some(aInfo);
   }
 
+  static void DisableRemoteCanvas();
+
   static bool HasVariationFontSupport();
 
   // you probably want to use gfxVars::UseWebRender() instead of this
@@ -860,10 +862,10 @@ class gfxPlatform : public mozilla::layers::MemoryPressureListener {
   void InitBackendPrefs(BackendPrefsData&& aPrefsData);
 
   /**
-   * Content-process only. Requests device preferences from the parent process
-   * and updates any cached settings.
+   * Content-process only. Updates device preferences from the parent process,
+   * if we've received any.
    */
-  void FetchAndImportContentDeviceData();
+  void ImportCachedContentDeviceData();
   virtual void ImportContentDeviceData(
       const mozilla::gfx::ContentDeviceData& aData);
 
@@ -885,6 +887,13 @@ class gfxPlatform : public mozilla::layers::MemoryPressureListener {
    * child should send a sync message to ask parent for color profile
    */
   const mozilla::gfx::ContentDeviceData* GetInitContentDeviceData();
+
+  /**
+   * If inside a child process and have ever received a
+   * SetXPCOMProcessAttributes message, this contains the cmsOutputProfileData
+   * from that message.
+   */
+  mozilla::Maybe<nsTArray<uint8_t>>& GetCMSOutputProfileData();
 
   /**
    * Increase the global device counter after a device has been removed/reset.

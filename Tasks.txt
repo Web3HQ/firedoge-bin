@@ -1,14 +1,16 @@
-Firedoge works:
+Firefox->Firedoge customization works reference:
 https://github.com/mozilla/gecko-dev/commit/6d2a4e81c444ed2060844c1d76fd24a744b999e0
 https://github.com/mozilla/gecko-dev/commit/f58d4b4e84d965dcc90ef24510ccf5055054db30
 -
 /media/daniella/B/git/Web3HQ/firedoge
-/media/daniella/B/git/Web3HQ/firedoge-bin
-/media/daniella/B/git/Web3HQ/firedoge-bin/browser/branding/unofficial/stubinstaller
-/media/daniella/B/git/Web3HQ/firedoge-bin/browser/branding/unofficial/msix/Assets
-/media/daniella/B/git/Web3HQ/firedoge-bin/browser/branding/unofficial
-/media/daniella/B/git/Web3HQ/firedoge-bin/browser/branding/unofficial/content
+/home/daniella/Documents/git/Web3HQ/firedoge-bin
+/home/daniella/Documents/git/Web3HQ/firedoge-bin/browser/branding/unofficial/stubinstaller
+/home/daniella/Documents/git/Web3HQ/firedoge-bin/browser/branding/unofficial/msix/Assets
+has disappeared: /home/daniella/Documents/git/Web3HQ/firedoge-bin/branding/unofficial
+has disappeared: /home/daniella/Documents/git/Web3HQ/firedoge-bin/branding/unofficial/content
 -
 check if all of the custom assets are paired to what Firedoge used to be.
 
+PowerPoint:
 - fix SVG logotype paddings, fix icon+logotype to make icon smaller more aligned with the text
+- use more SVGs in the Firedoge official icon!

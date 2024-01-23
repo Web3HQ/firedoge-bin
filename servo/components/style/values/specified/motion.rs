@@ -150,9 +150,7 @@ impl Parse for OffsetPathFunction {
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
-        use crate::values::specified::basic_shape::{
-            AllowedBasicShapes, DefaultPosition, ShapeType,
-        };
+        use crate::values::specified::basic_shape::{AllowedBasicShapes, ShapeType};
 
         // <offset-path> = <ray()> | <url> | <basic-shape>
         // https://drafts.fxtf.org/motion-1/#typedef-offset-path
@@ -175,14 +173,8 @@ impl Parse for OffsetPathFunction {
             AllowedBasicShapes::PATH
         };
 
-        BasicShape::parse(
-            context,
-            input,
-            allowed_shapes,
-            ShapeType::Outline,
-            DefaultPosition::Context,
-        )
-        .map(OffsetPathFunction::Shape)
+        BasicShape::parse(context, input, allowed_shapes, ShapeType::Outline)
+            .map(OffsetPathFunction::Shape)
     }
 }
 
@@ -205,8 +197,8 @@ impl Parse for OffsetPath {
                     .ok();
             }
 
-            if static_prefs::pref!("layout.css.motion-path-coord-box.enabled")
-                && coord_box.is_none()
+            if static_prefs::pref!("layout.css.motion-path-coord-box.enabled") &&
+                coord_box.is_none()
             {
                 coord_box = input.try_parse(CoordBox::parse).ok();
                 if coord_box.is_some() {

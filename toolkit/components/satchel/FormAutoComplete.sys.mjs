@@ -8,9 +8,7 @@ import { GenericAutocompleteItem } from "resource://gre/modules/FillHelpers.sys.
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
-  FormLikeFactory: "resource://gre/modules/FormLikeFactory.sys.mjs",
-  LoginHelper: "resource://gre/modules/LoginHelper.sys.mjs",
-  SignUpFormRuleset: "resource://gre/modules/SignUpFormRuleset.sys.mjs",
+  FormScenarios: "resource://gre/modules/FormScenarios.sys.mjs",
 });
 
 const formFillController = Cc[
@@ -539,7 +537,6 @@ export class FormAutoComplete {
       return;
     }
 
-    this.log(`autoCompleteSearch(${aUntrimmedSearchString})`);
     const searchString = aUntrimmedSearchString.trim().toLowerCase();
     const prevResult = aPreviousResult?.wrappedJSObject;
     if (prevResult?.canSearchIncrementally(searchString)) {
@@ -552,7 +549,9 @@ export class FormAutoComplete {
         client,
         aInputName,
         searchString,
-        this.getScenarioName(aField),
+        lazy.FormScenarios.detect({ input: aField }).signUpForm
+          ? "SignUpFormScenario"
+          : "",
         ({ formHistoryEntries, externalEntries }) => {
           formHistoryEntries ??= [];
           externalEntries ??= [];
@@ -569,7 +568,7 @@ export class FormAutoComplete {
             ...externalEntries.map(
               entry =>
                 new GenericAutocompleteItem(
-                  entry.icon,
+                  entry.image,
                   entry.title,
                   entry.subtitle,
                   entry.fillMessageName,
@@ -583,34 +582,6 @@ export class FormAutoComplete {
         }
       );
     }
-  }
-
-  getScenarioName(input) {
-    if (!input) {
-      return "";
-    }
-
-    // Running simple heuristics first, because running the SignUpFormRuleset is expensive
-    if (
-      !(
-        lazy.LoginHelper.isInferredEmailField(input) ||
-        lazy.LoginHelper.isInferredUsernameField(input)
-      )
-    ) {
-      return "";
-    }
-
-    const formRoot = lazy.FormLikeFactory.findRootForField(input);
-
-    if (!HTMLFormElement.isInstance(formRoot)) {
-      return "";
-    }
-
-    const threshold = lazy.LoginHelper.signupDetectionConfidenceThreshold;
-    const { rules, type } = lazy.SignUpFormRuleset;
-    const results = rules.against(formRoot);
-    const score = results.get(formRoot).scoreFor(type);
-    return score > threshold ? "SignUpFormScenario" : "";
   }
 
   getDataListSuggestions(aField) {

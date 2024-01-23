@@ -20,6 +20,7 @@
 #include "mozilla/layers/PImageBridgeChild.h"
 #include "mozilla/layers/TextureForwarder.h"
 #include "mozilla/Mutex.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/webrender/WebRenderTypes.h"
 #include "nsRegion.h"  // for nsIntRegion
 #include "mozilla/gfx/Rect.h"
@@ -153,6 +154,8 @@ class ImageBridgeChild final : public PImageBridgeChild,
 
   void BeginTransaction();
   void EndTransaction();
+
+  FixedSizeSmallShmemSectionAllocator* GetTileLockAllocator() override;
 
   /**
    * Returns the ImageBridgeChild's thread.
@@ -302,13 +305,15 @@ class ImageBridgeChild final : public PImageBridgeChild,
 
   PTextureChild* CreateTexture(
       const SurfaceDescriptor& aSharedData, ReadLockDescriptor&& aReadLock,
-      LayersBackend aLayersBackend, TextureFlags aFlags, uint64_t aSerial,
+      LayersBackend aLayersBackend, TextureFlags aFlags,
+      const dom::ContentParentId& aContentId, uint64_t aSerial,
       wr::MaybeExternalImageId& aExternalImageId) override;
 
   bool IsSameProcess() const override;
 
-  void UpdateFwdTransactionId() override { ++mFwdTransactionId; }
-  uint64_t GetFwdTransactionId() override { return mFwdTransactionId; }
+  FwdTransactionCounter& GetFwdTransactionCounter() override {
+    return mFwdTransactionCounter;
+  }
 
   bool InForwarderThread() override { return InImageBridgeChildThread(); }
 
@@ -341,8 +346,9 @@ class ImageBridgeChild final : public PImageBridgeChild,
   uint32_t mNamespace;
 
   CompositableTransaction* mTxn;
+  UniquePtr<FixedSizeSmallShmemSectionAllocator> mSectionAllocator;
 
-  bool mCanSend;
+  mozilla::Atomic<bool> mCanSend;
   mozilla::Atomic<bool> mDestroyed;
 
   /**
@@ -350,7 +356,7 @@ class ImageBridgeChild final : public PImageBridgeChild,
    * It is incrementaed by UpdateFwdTransactionId() in each BeginTransaction()
    * call.
    */
-  uint64_t mFwdTransactionId;
+  FwdTransactionCounter mFwdTransactionCounter;
 
   /**
    * Hold TextureClients refs until end of their usages on host side.

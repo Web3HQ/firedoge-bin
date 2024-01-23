@@ -37,7 +37,6 @@
 #include "GLConsts.h"
 #include "GLDefs.h"
 #include "GLTypes.h"
-#include "GLVendor.h"
 #include "nsRegionFwd.h"
 #include "nsString.h"
 #include "GLContextTypes.h"
@@ -173,12 +172,15 @@ enum class GLRenderer {
   GalliumLlvmpipe,
   IntelHD3000,
   MicrosoftBasicRenderDriver,
+  SamsungXclipse920,
   Other
 };
 
 class GLContext : public GenericAtomicRefCounted, public SupportsWeakPtr {
  public:
-  static MOZ_THREAD_LOCAL(uintptr_t) sCurrentContext;
+  static MOZ_THREAD_LOCAL(const GLContext*) sCurrentContext;
+
+  static void InvalidateCurrentContext();
 
   const GLContextDesc mDesc;
 
@@ -190,9 +192,12 @@ class GLContext : public GenericAtomicRefCounted, public SupportsWeakPtr {
     const bool mWasTlsOk;
 
    public:
-    explicit TlsScope(GLContext* const gl)
+    explicit TlsScope(GLContext* const gl, bool invalidate = false)
         : mGL(gl), mWasTlsOk(gl && gl->mUseTLSIsCurrent) {
       if (mGL) {
+        if (invalidate) {
+          InvalidateCurrentContext();
+        }
         mGL->mUseTLSIsCurrent = true;
       }
     }
@@ -2090,9 +2095,6 @@ class GLContext : public GenericAtomicRefCounted, public SupportsWeakPtr {
     mSymbols.fFramebufferTexture2D(target, attachmentPoint, textureTarget,
                                    texture, level);
     AFTER_GL_CALL;
-    if (mNeedsCheckAfterAttachTextureToFb) {
-      fCheckFramebufferStatus(target);
-    }
   }
 
   void fFramebufferTextureLayer(GLenum target, GLenum attachment,
@@ -3657,7 +3659,6 @@ class GLContext : public GenericAtomicRefCounted, public SupportsWeakPtr {
   bool mNeedsTextureSizeChecks = false;
   bool mNeedsFlushBeforeDeleteFB = false;
   bool mTextureAllocCrashesOnMapFailure = false;
-  bool mNeedsCheckAfterAttachTextureToFb = false;
   const bool mWorkAroundDriverBugs;
   mutable uint64_t mSyncGLCallCount = 0;
 

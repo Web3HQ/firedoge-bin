@@ -368,6 +368,9 @@ uint32_t Http2Session::ReadTimeoutTick(PRIntervalTime now) {
          this, pingTimeout));
     if ((now - mPingSentEpoch) >= pingTimeout) {
       LOG3(("Http2Session::ReadTimeoutTick %p Ping Timer Exhaustion\n", this));
+      if (mConnection) {
+        mConnection->SetCloseReason(ConnectionCloseReason::IDLE_TIMEOUT);
+      }
       mPingSentEpoch = 0;
       if (isTrr) {
         // These must be set this way to ensure we gracefully restart all
@@ -574,8 +577,8 @@ already_AddRefed<nsHttpConnection> Http2Session::CreateTunnelStream(
       this, mCurrentBrowserId, aHttpTransaction->ConnectionInfo(),
       aIsWebSocket);
 
-  RefPtr<nsHttpConnection> newConn =
-      refStream->CreateHttpConnection(aHttpTransaction, aCallbacks, aRtt);
+  RefPtr<nsHttpConnection> newConn = refStream->CreateHttpConnection(
+      aHttpTransaction, aCallbacks, aRtt, aIsWebSocket);
 
   mTunnelStreams.AppendElement(std::move(refStream));
   return newConn.forget();
@@ -2175,6 +2178,7 @@ nsresult Http2Session::RecvGoAway(Http2Session* self) {
     return self->SessionError(PROTOCOL_ERROR);
   }
 
+  self->mConnection->SetCloseReason(ConnectionCloseReason::GO_AWAY);
   self->mShouldGoAway = true;
   self->mGoAwayID = NetworkEndian::readUint32(self->mInputFrameBuffer.get() +
                                               kFrameHeaderBytes);
@@ -4103,7 +4107,13 @@ nsresult Http2Session::ConfirmTLSProfile() {
   }
 
   uint16_t kea = ssl->GetKEAUsed();
-  if (kea != ssl_kea_dh && kea != ssl_kea_ecdh) {
+  if (kea == ssl_kea_ecdh_hybrid && !StaticPrefs::security_tls_enable_kyber()) {
+    LOG3(("Http2Session::ConfirmTLSProfile %p FAILED due to disabled KEA %d\n",
+          this, kea));
+    return SessionError(INADEQUATE_SECURITY);
+  }
+
+  if (kea != ssl_kea_dh && kea != ssl_kea_ecdh && kea != ssl_kea_ecdh_hybrid) {
     LOG3(("Http2Session::ConfirmTLSProfile %p FAILED due to invalid KEA %d\n",
           this, kea));
     return SessionError(INADEQUATE_SECURITY);

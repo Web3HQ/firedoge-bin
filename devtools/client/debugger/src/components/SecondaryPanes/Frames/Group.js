@@ -2,20 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
-import PropTypes from "prop-types";
+import React, { Component } from "devtools/client/shared/vendor/react";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
 
-import { getLibraryFromUrl } from "../../../utils/pause/frames";
+import { getLibraryFromUrl } from "../../../utils/pause/frames/index";
 
 import AccessibleImage from "../../shared/AccessibleImage";
 import FrameComponent from "./Frame";
-
-import "./Group.css";
-
 import Badge from "../../shared/Badge";
 import FrameIndent from "./FrameIndent";
 
-const classnames = require("devtools/client/shared/classnames.js");
+const classnames = require("resource://devtools/client/shared/classnames.js");
 
 function FrameLocation({ frame, expanded }) {
   const library = frame.library || getLibraryFromUrl(frame);
@@ -111,31 +108,23 @@ export default class Group extends Component {
       {
         className: "frames-list",
       },
-      group.reduce((acc, frame, i) => {
-        if (this.isSelectable) {
-          acc.push(
-            React.createElement(FrameIndent, {
-              key: `frame-indent-${i}`,
-            })
-          );
-        }
-        return acc.concat(
-          React.createElement(FrameComponent, {
-            frame: frame,
-            showFrameContextMenu: showFrameContextMenu,
-            hideLocation: true,
-            key: frame.id,
-            selectedFrame: selectedFrame,
-            selectFrame: selectFrame,
-            selectLocation: selectLocation,
-            shouldMapDisplayName: false,
-            displayFullUrl: displayFullUrl,
-            getFrameTitle: getFrameTitle,
-            disableContextMenu: disableContextMenu,
-            panel: panel,
-          })
-        );
-      }, [])
+      group.map(frame =>
+        React.createElement(FrameComponent, {
+          frame: frame,
+          showFrameContextMenu: showFrameContextMenu,
+          hideLocation: true,
+          key: frame.id,
+          selectedFrame: selectedFrame,
+          selectFrame: selectFrame,
+          selectLocation: selectLocation,
+          shouldMapDisplayName: false,
+          displayFullUrl: displayFullUrl,
+          getFrameTitle: getFrameTitle,
+          disableContextMenu: disableContextMenu,
+          panel: panel,
+          isInGroup: true,
+        })
+      )
     );
   }
 

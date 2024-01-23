@@ -200,9 +200,9 @@ bool CookieCommons::CheckNameAndValueSize(const CookieStruct& aCookieData) {
 
 bool CookieCommons::CheckName(const CookieStruct& aCookieData) {
   const char illegalNameCharacters[] = {
-      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-      0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-      0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x00};
+      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+      0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+      0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x3B, 0x3D, 0x7F, 0x00};
 
   const auto* start = aCookieData.name().BeginReading();
   const auto* end = aCookieData.name().EndReading();
@@ -397,6 +397,12 @@ already_AddRefed<Cookie> CookieCommons::CreateCookieFromDocument(
     }
   }
 
+  bool mustBePartitioned =
+      isForeignAndNotAddon &&
+      aDocument->CookieJarSettings()->GetCookieBehavior() ==
+          nsICookieService::BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN &&
+      !aDocument->UsingStorageAccess();
+
   // If we are here, we have been already accepted by the anti-tracking.
   // We just need to check if we have to be in session-only mode.
   CookieStatus cookieStatus = CookieStatusForWindow(innerWindow, principalURI);
@@ -415,7 +421,8 @@ already_AddRefed<Cookie> CookieCommons::CreateCookieFromDocument(
   bool canSetCookie = false;
   CookieService::CanSetCookie(principalURI, baseDomain, cookieData,
                               requireHostMatch, cookieStatus, cookieString,
-                              false, isForeignAndNotAddon, crc, canSetCookie);
+                              false, isForeignAndNotAddon, mustBePartitioned,
+                              crc, canSetCookie);
 
   if (!canSetCookie) {
     return nullptr;
@@ -471,11 +478,18 @@ already_AddRefed<nsICookieJarSettings> CookieCommons::GetCookieJarSettings(
 }
 
 // static
-bool CookieCommons::ShouldIncludeCrossSiteCookieForDocument(Cookie* aCookie) {
+bool CookieCommons::ShouldIncludeCrossSiteCookieForDocument(
+    Cookie* aCookie, dom::Document* aDocument) {
   MOZ_ASSERT(aCookie);
+  MOZ_ASSERT(aDocument);
 
   int32_t sameSiteAttr = 0;
   aCookie->GetSameSite(&sameSiteAttr);
+
+  if (aDocument->CookieJarSettings()->GetPartitionForeign() &&
+      StaticPrefs::network_cookie_cookieBehavior_optInPartitioning()) {
+    return false;
+  }
 
   return sameSiteAttr == nsICookie::SAMESITE_NONE;
 }

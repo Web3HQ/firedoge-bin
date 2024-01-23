@@ -29,6 +29,7 @@
 
 #include "jstypes.h"
 
+#include "builtin/String.h"
 #include "double-conversion/double-conversion.h"
 #include "frontend/ParserAtom.h"  // frontend::{ParserAtomsTable, TaggedParserAtomIndex}
 #include "jit/InlinableNatives.h"
@@ -808,6 +809,14 @@ MOZ_ALWAYS_INLINE static T* BackfillInt32InBuffer(int32_t si, T* buffer,
 
 template <AllowGC allowGC>
 JSLinearString* js::Int32ToString(JSContext* cx, int32_t si) {
+  return js::Int32ToStringWithHeap<allowGC>(cx, si, gc::Heap::Default);
+}
+template JSLinearString* js::Int32ToString<CanGC>(JSContext* cx, int32_t si);
+template JSLinearString* js::Int32ToString<NoGC>(JSContext* cx, int32_t si);
+
+template <AllowGC allowGC>
+JSLinearString* js::Int32ToStringWithHeap(JSContext* cx, int32_t si,
+                                          gc::Heap heap) {
   if (JSLinearString* str = LookupInt32ToString(cx, si)) {
     return str;
   }
@@ -818,8 +827,7 @@ JSLinearString* js::Int32ToString(JSContext* cx, int32_t si) {
       BackfillInt32InBuffer(si, buffer, std::size(buffer), &length);
 
   mozilla::Range<const Latin1Char> chars(start, length);
-  JSInlineString* str =
-      NewInlineString<allowGC>(cx, chars, js::gc::Heap::Default);
+  JSInlineString* str = NewInlineString<allowGC>(cx, chars, heap);
   if (!str) {
     return nullptr;
   }
@@ -830,10 +838,12 @@ JSLinearString* js::Int32ToString(JSContext* cx, int32_t si) {
   CacheNumber(cx, si, str);
   return str;
 }
-
-template JSLinearString* js::Int32ToString<CanGC>(JSContext* cx, int32_t si);
-
-template JSLinearString* js::Int32ToString<NoGC>(JSContext* cx, int32_t si);
+template JSLinearString* js::Int32ToStringWithHeap<CanGC>(JSContext* cx,
+                                                          int32_t si,
+                                                          gc::Heap heap);
+template JSLinearString* js::Int32ToStringWithHeap<NoGC>(JSContext* cx,
+                                                         int32_t si,
+                                                         gc::Heap heap);
 
 JSLinearString* js::Int32ToStringPure(JSContext* cx, int32_t si) {
   AutoUnsafeCallWithABI unsafe;
@@ -1867,8 +1877,16 @@ JSLinearString* js::IndexToString(JSContext* cx, uint32_t index) {
   return str;
 }
 
-JSString* js::Int32ToStringWithBase(JSContext* cx, int32_t i, int32_t base) {
-  return NumberToStringWithBase<CanGC>(cx, double(i), base);
+JSString* js::Int32ToStringWithBase(JSContext* cx, int32_t i, int32_t base,
+                                    bool lowerCase) {
+  Rooted<JSString*> str(cx, NumberToStringWithBase<CanGC>(cx, double(i), base));
+  if (!str) {
+    return nullptr;
+  }
+  if (lowerCase) {
+    return str;
+  }
+  return StringToUpperCase(cx, str);
 }
 
 bool js::NumberValueToStringBuffer(const Value& v, StringBuffer& sb) {

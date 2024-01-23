@@ -19,7 +19,7 @@
 #if CONFIG_VP8_ENCODER || CONFIG_VP9_ENCODER
 #include "vpx/vp8cx.h"
 #endif
-#include "vpx/vpx_encoder.h"
+#include "vpx/vpx_tpl.h"
 
 namespace libvpx_test {
 
@@ -86,7 +86,7 @@ class TwopassStatsStore {
 // level of abstraction will be fleshed out as more tests are written.
 class Encoder {
  public:
-  Encoder(vpx_codec_enc_cfg_t cfg, unsigned long deadline,
+  Encoder(vpx_codec_enc_cfg_t cfg, vpx_enc_deadline_t deadline,
           const unsigned long init_flags, TwopassStatsStore *stats)
       : cfg_(cfg), deadline_(deadline), init_flags_(init_flags), stats_(stats) {
     memset(&encoder_, 0, sizeof(encoder_));
@@ -177,7 +177,7 @@ class Encoder {
     cfg_ = *cfg;
   }
 
-  void set_deadline(unsigned long deadline) { deadline_ = deadline; }
+  void set_deadline(vpx_enc_deadline_t deadline) { deadline_ = deadline; }
 
  protected:
   virtual vpx_codec_iface_t *CodecInterface() const = 0;
@@ -196,7 +196,7 @@ class Encoder {
 
   vpx_codec_ctx_t encoder_;
   vpx_codec_enc_cfg_t cfg_;
-  unsigned long deadline_;
+  vpx_enc_deadline_t deadline_;
   unsigned long init_flags_;
   TwopassStatsStore *stats_;
 };
@@ -264,7 +264,7 @@ class EncoderTest {
 
   const CodecFactory *codec_;
   // Hook to determine whether to decode frame after encoding
-  virtual bool DoDecode() const { return 1; }
+  virtual bool DoDecode() const { return true; }
 
   // Hook to handle encode/decode mismatch
   virtual void MismatchHook(const vpx_image_t *img1, const vpx_image_t *img2);
@@ -291,7 +291,7 @@ class EncoderTest {
   vpx_codec_enc_cfg_t cfg_;
   vpx_codec_dec_cfg_t dec_cfg_;
   unsigned int passes_;
-  unsigned long deadline_;
+  vpx_enc_deadline_t deadline_;
   TwopassStatsStore stats_;
   unsigned long init_flags_;
   vpx_enc_frame_flags_t frame_flags_;

@@ -15,6 +15,7 @@
 #include "mozilla/LazyIdleThread.h"
 #include "mozilla/LookAndFeel.h"
 #include "mozilla/Sprintf.h"
+#include "mozilla/Try.h"
 #include "jsapi.h"
 #include "js/PropertyAndElement.h"  // JS_SetProperty
 #include "mozilla/dom/Promise.h"
@@ -57,6 +58,7 @@
 #  include <unistd.h>
 #  include <fstream>
 #  include "mozilla/Tokenizer.h"
+#  include "mozilla/widget/LSBUtils.h"
 #  include "nsCharSeparatedTokenizer.h"
 
 #  include <map>
@@ -930,7 +932,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
   return NS_OK;
 }
 
-#if defined(XP_WIN) && (_WIN32_WINNT < 0x0A00) || defined(__MINGW32__)
+#if defined(__MINGW32__)
 WINBASEAPI
 BOOL WINAPI IsUserCetAvailableInEnvironment(_In_ DWORD UserCetEnvironment);
 
@@ -972,6 +974,12 @@ nsresult nsSystemInfo::Init() {
   SetInt32Property(u"memmapalign"_ns, PR_GetMemMapAlignment());
   SetUint64Property(u"memsize"_ns, PR_GetPhysicalMemorySize());
   SetUint32Property(u"umask"_ns, nsSystemInfo::gUserUmask);
+
+#ifdef HAVE_64BIT_BUILD
+  SetUint32Property(u"archbits"_ns, 64);
+#else
+  SetUint32Property(u"archbits"_ns, 32);
+#endif
 
   uint64_t virtualMem = 0;
 
@@ -1144,6 +1152,14 @@ nsresult nsSystemInfo::Init() {
   AndroidSystemInfo info;
   GetAndroidSystemInfo(&info);
   SetupAndroidInfo(info);
+#endif
+
+#if defined(XP_LINUX) && !defined(ANDROID)
+  nsCString dist, desc, release, codename;
+  if (widget::lsb::GetLSBRelease(dist, desc, release, codename)) {
+    SetPropertyAsACString(u"distro"_ns, dist);
+    SetPropertyAsACString(u"distroVersion"_ns, release);
+  }
 #endif
 
 #if defined(XP_LINUX) && defined(MOZ_SANDBOX)

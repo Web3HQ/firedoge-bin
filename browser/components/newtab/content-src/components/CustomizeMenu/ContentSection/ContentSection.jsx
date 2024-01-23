@@ -26,8 +26,8 @@ export class ContentSection extends React.PureComponent {
   }
 
   onPreferenceSelect(e) {
-    let prefName = e.target.getAttribute("preference");
-    const eventSource = e.target.getAttribute("eventSource"); // TOP_SITES, TOP_STORIES, HIGHLIGHTS
+    // eventSource: TOP_SITES | TOP_STORIES | HIGHLIGHTS
+    const { preference, eventSource } = e.target.dataset;
     let value;
     if (e.target.nodeName === "SELECT") {
       value = parseInt(e.target.value, 10);
@@ -36,8 +36,13 @@ export class ContentSection extends React.PureComponent {
       if (eventSource) {
         this.inputUserEvent(eventSource, value);
       }
+    } else if (e.target.nodeName === "MOZ-TOGGLE") {
+      value = e.target.pressed;
+      if (eventSource) {
+        this.inputUserEvent(eventSource, value);
+      }
     }
-    this.props.setPref(prefName, value);
+    this.props.setPref(preference, value);
   }
 
   componentDidMount() {
@@ -105,38 +110,23 @@ export class ContentSection extends React.PureComponent {
     return (
       <div className="home-section">
         <div id="shortcuts-section" className="section">
-          <label className="switch">
-            <input
-              id="shortcuts-toggle"
-              checked={topSitesEnabled}
-              type="checkbox"
-              onChange={this.onPreferenceSelect}
-              preference="feeds.topsites"
-              aria-labelledby="custom-shortcuts-title"
-              aria-describedby="custom-shortcuts-subtitle"
-              eventSource="TOP_SITES"
-            />
-            <span className="slider" role="presentation"></span>
-          </label>
+          <moz-toggle
+            id="shortcuts-toggle"
+            pressed={topSitesEnabled || null}
+            onToggle={this.onPreferenceSelect}
+            data-preference="feeds.topsites"
+            data-eventSource="TOP_SITES"
+            data-l10n-id="newtab-custom-shortcuts-toggle"
+            data-l10n-attrs="label, description"
+          />
           <div>
-            <h2 id="custom-shortcuts-title" className="title">
-              <label
-                htmlFor="shortcuts-toggle"
-                data-l10n-id="newtab-custom-shortcuts-title"
-              ></label>
-            </h2>
-            <p
-              id="custom-shortcuts-subtitle"
-              className="subtitle"
-              data-l10n-id="newtab-custom-shortcuts-subtitle"
-            ></p>
             <div className="more-info-top-wrapper">
               <div className="more-information" ref={this.topSitesDrawerRef}>
                 <select
                   id="row-selector"
                   className="selector"
                   name="row-count"
-                  preference="topSitesRows"
+                  data-preference="topSitesRows"
                   value={topSitesRowsCount}
                   onChange={this.onPreferenceSelect}
                   disabled={!topSitesEnabled}
@@ -172,8 +162,8 @@ export class ContentSection extends React.PureComponent {
                       checked={showSponsoredTopSitesEnabled}
                       type="checkbox"
                       onChange={this.onPreferenceSelect}
-                      preference="showSponsoredTopSites"
-                      eventSource="SPONSORED_TOP_SITES"
+                      data-preference="showSponsoredTopSites"
+                      data-eventSource="SPONSORED_TOP_SITES"
                     />
                     <label
                       className="sponsored"
@@ -190,30 +180,18 @@ export class ContentSection extends React.PureComponent {
         {pocketRegion && (
           <div id="pocket-section" className="section">
             <label className="switch">
-              <input
+              <moz-toggle
                 id="pocket-toggle"
-                checked={pocketEnabled}
-                type="checkbox"
-                onChange={this.onPreferenceSelect}
-                preference="feeds.section.topstories"
-                aria-labelledby="custom-pocket-title"
+                pressed={pocketEnabled || null}
+                onToggle={this.onPreferenceSelect}
                 aria-describedby="custom-pocket-subtitle"
-                eventSource="TOP_STORIES"
+                data-preference="feeds.section.topstories"
+                data-eventSource="TOP_STORIES"
+                data-l10n-id="newtab-custom-pocket-toggle"
+                data-l10n-attrs="label, description"
               />
-              <span className="slider" role="presentation"></span>
             </label>
             <div>
-              <h2 id="custom-pocket-title" className="title">
-                <label
-                  htmlFor="pocket-toggle"
-                  data-l10n-id="newtab-custom-pocket-title"
-                ></label>
-              </h2>
-              <p
-                id="custom-pocket-subtitle"
-                className="subtitle"
-                data-l10n-id="newtab-custom-pocket-subtitle"
-              />
               {(mayHaveSponsoredStories || mayHaveRecentSaves) && (
                 <div className="more-info-pocket-wrapper">
                   <div className="more-information" ref={this.pocketDrawerRef}>
@@ -226,8 +204,8 @@ export class ContentSection extends React.PureComponent {
                           checked={showSponsoredPocketEnabled}
                           type="checkbox"
                           onChange={this.onPreferenceSelect}
-                          preference="showSponsored"
-                          eventSource="POCKET_SPOCS"
+                          data-preference="showSponsored"
+                          data-eventSource="POCKET_SPOCS"
                         />
                         <label
                           className="sponsored"
@@ -245,8 +223,8 @@ export class ContentSection extends React.PureComponent {
                           checked={showRecentSavesEnabled}
                           type="checkbox"
                           onChange={this.onPreferenceSelect}
-                          preference="showRecentSaves"
-                          eventSource="POCKET_RECENT_SAVES"
+                          data-preference="showRecentSaves"
+                          data-eventSource="POCKET_RECENT_SAVES"
                         />
                         <label
                           className="sponsored"
@@ -264,32 +242,16 @@ export class ContentSection extends React.PureComponent {
 
         <div id="recent-section" className="section">
           <label className="switch">
-            <input
+            <moz-toggle
               id="highlights-toggle"
-              checked={highlightsEnabled}
-              type="checkbox"
-              onChange={this.onPreferenceSelect}
-              preference="feeds.section.highlights"
-              eventSource="HIGHLIGHTS"
-              aria-labelledby="custom-recent-title"
-              aria-describedby="custom-recent-subtitle"
+              pressed={highlightsEnabled || null}
+              onToggle={this.onPreferenceSelect}
+              data-preference="feeds.section.highlights"
+              data-eventSource="HIGHLIGHTS"
+              data-l10n-id="newtab-custom-recent-toggle"
+              data-l10n-attrs="label, description"
             />
-            <span className="slider" role="presentation"></span>
           </label>
-          <div>
-            <h2 id="custom-recent-title" className="title">
-              <label
-                htmlFor="highlights-toggle"
-                data-l10n-id="newtab-custom-recent-title"
-              ></label>
-            </h2>
-
-            <p
-              id="custom-recent-subtitle"
-              className="subtitle"
-              data-l10n-id="newtab-custom-recent-subtitle"
-            />
-          </div>
         </div>
 
         <span className="divider" role="separator"></span>

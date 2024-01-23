@@ -17,7 +17,9 @@
 #include "mozilla/Atomics.h"
 #include "mozilla/Attributes.h"  // for override
 #include "mozilla/DebugOnly.h"
+#include "mozilla/Mutex.h"
 #include "mozilla/RefPtr.h"  // for RefPtr, RefCounted
+#include "mozilla/dom/ipc/IdType.h"
 #include "mozilla/gfx/2D.h"  // for DrawTarget
 #include "mozilla/gfx/CriticalSection.h"
 #include "mozilla/gfx/Point.h"  // for IntSize
@@ -69,6 +71,7 @@ class SharedSurfaceTextureData;
 class TextureClientPool;
 #endif
 class TextureForwarder;
+struct RemoteTextureOwnerId;
 
 /**
  * TextureClient is the abstraction that allows us to share data between the
@@ -98,6 +101,9 @@ enum TextureAllocationFlags {
 
   // Do not use an accelerated texture type.
   ALLOC_DO_NOT_ACCELERATE = 1 << 8,
+
+  // Force allocation of remote/recorded texture, or fail if not possible.
+  ALLOC_FORCE_REMOTE = 1 << 9,
 };
 
 enum class BackendSelector { Content, Canvas };
@@ -185,9 +191,6 @@ class TextureReadLock {
   virtual LockType GetType() = 0;
 
   virtual NonBlockingTextureReadLock* AsNonBlockingLock() { return nullptr; }
-
- protected:
-  NS_DECL_OWNINGTHREAD
 };
 
 class NonBlockingTextureReadLock : public TextureReadLock {
@@ -222,6 +225,10 @@ class TextureData {
           canConcurrentlyReadLock(true) {}
   };
 
+  static TextureData* Create(
+      TextureType aTextureType, gfx::SurfaceFormat aFormat,
+      const gfx::IntSize& aSize, TextureAllocationFlags aAllocFlags,
+      gfx::BackendType aBackendType = gfx::BackendType::NONE);
   static TextureData* Create(TextureForwarder* aAllocator,
                              gfx::SurfaceFormat aFormat, gfx::IntSize aSize,
                              KnowsCompositor* aKnowsCompositor,
@@ -230,11 +237,17 @@ class TextureData {
                              TextureAllocationFlags aAllocFlags);
 
   static bool IsRemote(KnowsCompositor* aKnowsCompositor,
-                       BackendSelector aSelector);
+                       BackendSelector aSelector,
+                       gfx::SurfaceFormat aFormat = gfx::SurfaceFormat::UNKNOWN,
+                       gfx::IntSize aSize = gfx::IntSize(1, 1));
 
   MOZ_COUNTED_DTOR_VIRTUAL(TextureData)
 
+  virtual TextureType GetTextureType() const { return TextureType::Last; }
+
   virtual void FillInfo(TextureData::Info& aInfo) const = 0;
+
+  virtual void InvalidateContents() {}
 
   virtual bool Lock(OpenMode aMode) = 0;
 
@@ -253,6 +266,8 @@ class TextureData {
   virtual already_AddRefed<gfx::SourceSurface> BorrowSnapshot() {
     return nullptr;
   }
+
+  virtual void ReturnSnapshot(already_AddRefed<gfx::SourceSurface> aSnapshot) {}
 
   virtual bool BorrowMappedData(MappedTextureData&) { return false; }
 
@@ -310,6 +325,12 @@ class TextureData {
   virtual mozilla::ipc::FileDescriptor GetAcquireFence() {
     return mozilla::ipc::FileDescriptor();
   }
+
+  virtual void SetRemoteTextureOwnerId(RemoteTextureOwnerId) {}
+
+  virtual bool RequiresRefresh() const { return false; }
+
+  virtual void UseCompositableForwarder(CompositableForwarder* aForwarder) {}
 
  protected:
   MOZ_COUNTED_DEFAULT_CTOR(TextureData)
@@ -446,6 +467,8 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
 
   already_AddRefed<gfx::SourceSurface> BorrowSnapshot();
 
+  void ReturnSnapshot(already_AddRefed<gfx::SourceSurface> aSnapshot);
+
   /**
    * Similar to BorrowDrawTarget but provides direct access to the texture's
    * bits instead of a DrawTarget.
@@ -554,7 +577,8 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
    * Should be called only once per TextureClient.
    * The TextureClient must not be locked when calling this method.
    */
-  bool InitIPDLActor(KnowsCompositor* aKnowsCompositor);
+  bool InitIPDLActor(KnowsCompositor* aKnowsCompositor,
+                     const dom::ContentParentId& aContentId);
 
   /**
    * Return a pointer to the IPDLActor.
@@ -621,9 +645,28 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
 
   uint64_t GetLastFwdTransactionId() { return mFwdTransactionId; }
 
-  TextureReadLock* GetReadLock() { return mReadLock; }
+  bool HasReadLock() const {
+    MutexAutoLock lock(mMutex);
+    return !!mReadLock;
+  }
 
-  bool IsReadLocked() const;
+  int32_t GetNonBlockingReadLockCount() {
+    MutexAutoLock lock(mMutex);
+    if (NS_WARN_IF(!mReadLock)) {
+      MOZ_ASSERT_UNREACHABLE("No read lock created yet?");
+      return 0;
+    }
+    MOZ_ASSERT(mReadLock->AsNonBlockingLock(),
+               "Can only check locked for non-blocking locks!");
+    return mReadLock->AsNonBlockingLock()->GetReadCount();
+  }
+
+  bool IsReadLocked();
+
+  bool ShouldReadLock() const {
+    return bool(mFlags & (TextureFlags::NON_BLOCKING_READ_LOCK |
+                          TextureFlags::BLOCKING_READ_LOCK));
+  }
 
   bool TryReadLock();
   void ReadUnlock();
@@ -664,8 +707,9 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
       LayersBackend aLayersBackend, TextureFlags aTextureFlags,
       TextureAllocationFlags flags = ALLOC_DEFAULT);
 
-  void EnableReadLock();
-  void EnableBlockingReadLock();
+  void EnsureHasReadLock() MOZ_REQUIRES(mMutex);
+  void EnableReadLock() MOZ_REQUIRES(mMutex);
+  void EnableBlockingReadLock() MOZ_REQUIRES(mMutex);
 
   /**
    * Called once, during the destruction of the Texture, on the thread in which
@@ -693,14 +737,16 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
   void UnlockActor() const;
 
   TextureData::Info mInfo;
+  mutable Mutex mMutex;
 
   RefPtr<LayersIPCChannel> mAllocator;
   RefPtr<TextureChild> mActor;
   RefPtr<ITextureClientRecycleAllocator> mRecycleAllocator;
-  RefPtr<TextureReadLock> mReadLock;
+  RefPtr<TextureReadLock> mReadLock MOZ_GUARDED_BY(mMutex);
 
   TextureData* mData;
   RefPtr<gfx::DrawTarget> mBorrowedDrawTarget;
+  bool mBorrowedSnapshot = false;
 
   TextureFlags mFlags;
 
@@ -711,7 +757,7 @@ class TextureClient : public AtomicRefCountedWithFinalize<TextureClient> {
   uint32_t mExpectedDtRefs;
 #endif
   bool mIsLocked;
-  bool mIsReadLocked;
+  bool mIsReadLocked MOZ_GUARDED_BY(mMutex);
   // This member tracks that the texture was written into until the update
   // is sent to the compositor. We need this remember to lock mReadLock on
   // behalf of the compositor just before sending the notification.

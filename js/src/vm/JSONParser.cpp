@@ -22,11 +22,11 @@
 
 #include "builtin/Array.h"            // NewDenseCopiedArray
 #include "ds/IdValuePair.h"           // IdValuePair
-#include "gc/Allocator.h"             // CanGC
+#include "gc/GCEnum.h"                // CanGC
 #include "gc/Tracer.h"                // JS::TraceRoot
 #include "js/AllocPolicy.h"           // ReportOutOfMemory
 #include "js/CharacterEncoding.h"     // JS::ConstUTF8CharsZ
-#include "js/ColumnNumber.h"          // JS::ColumnNumberZeroOrigin
+#include "js/ColumnNumber.h"          // JS::ColumnNumberOneOrigin
 #include "js/ErrorReport.h"           // JS_ReportErrorNumberASCII
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/GCVector.h"              // JS::GCVector
@@ -585,55 +585,36 @@ void JSONTokenizer<CharT, ParserT, StringBuilderT>::getTextPosition(
   *line = row;
 }
 
+// JSONFullParseHandlerAnyChar uses an AutoSelectGCHeap to switch to allocating
+// in the tenured heap if we trigger more than one nursery collection.
+//
+// JSON parsing allocates from the leaves of the tree upwards (unlike
+// structured clone deserialization which works from the root
+// downwards). Because of this it doesn't necessarily make sense to stop
+// nursery allocation after the first collection as this doesn't doom the
+// whole data structure to being tenured. We don't know ahead of time how
+// big the resulting data structure will be but after two nursery
+// collections then at least half of it will end up tenured.
+
 JSONFullParseHandlerAnyChar::JSONFullParseHandlerAnyChar(JSContext* cx)
-    : cx(cx), freeElements(cx), freeProperties(cx) {
-  JS::AddGCNurseryCollectionCallback(cx, &NurseryCollectionCallback, this);
-}
+    : cx(cx), gcHeap(cx, 1), freeElements(cx), freeProperties(cx) {}
 
 JSONFullParseHandlerAnyChar::JSONFullParseHandlerAnyChar(
     JSONFullParseHandlerAnyChar&& other) noexcept
     : cx(other.cx),
       v(other.v),
       parseType(other.parseType),
+      gcHeap(cx, 1),
       freeElements(std::move(other.freeElements)),
-      freeProperties(std::move(other.freeProperties)) {
-  JS::AddGCNurseryCollectionCallback(cx, &NurseryCollectionCallback, this);
-}
+      freeProperties(std::move(other.freeProperties)) {}
 
 JSONFullParseHandlerAnyChar::~JSONFullParseHandlerAnyChar() {
-  JS::RemoveGCNurseryCollectionCallback(cx, &NurseryCollectionCallback, this);
-
   for (size_t i = 0; i < freeElements.length(); i++) {
     js_delete(freeElements[i]);
   }
 
   for (size_t i = 0; i < freeProperties.length(); i++) {
     js_delete(freeProperties[i]);
-  }
-}
-
-/* static */
-void JSONFullParseHandlerAnyChar::NurseryCollectionCallback(
-    JSContext* cx, JS::GCNurseryProgress progress, JS::GCReason reason,
-    void* data) {
-  auto* handler = static_cast<JSONFullParseHandlerAnyChar*>(data);
-
-  // Switch to allocating in the tenured heap if we trigger more than one
-  // nursery collection.
-  //
-  // JSON parsing allocates from the leaves of the tree upwards (unlike
-  // structured clone deserialization which works from the root
-  // downwards). Because of this it doesn't necessarily make sense to stop
-  // nursery allocation after the first collection as this doesn't doom the
-  // whole data structure to being tenured. We don't know ahead of time how big
-  // the resulting data structure will be but after two nursery collections then
-  // at least half of it will end up tenured.
-
-  if (progress == JS::GCNurseryProgress::GC_NURSERY_COLLECTION_END) {
-    handler->nurseryCollectionCount++;
-    if (handler->nurseryCollectionCount == 2) {
-      handler->gcHeap = gc::Heap::Tenured;
-    }
   }
 }
 
@@ -1114,7 +1095,7 @@ void JSONSyntaxParseHandler<CharT>::reportError(const char* msg,
   metadata.isMuted = false;
   metadata.filename = JS::ConstUTF8CharsZ("");
   metadata.lineNumber = 0;
-  metadata.columnNumber = JS::ColumnNumberZeroOrigin::zero();
+  metadata.columnNumber = JS::ColumnNumberOneOrigin();
 
   ReportJSONSyntaxError(fc, std::move(metadata), JSMSG_JSON_BAD_PARSE, msg,
                         lineString, columnString);

@@ -45,6 +45,7 @@ class Clipboard;
 class LockManager;
 class HTMLMediaElement;
 class AudioContext;
+class WakeLockJS;
 }  // namespace dom
 namespace webgpu {
 class Instance;
@@ -85,6 +86,7 @@ class XRSystem;
 class StorageManager;
 class MediaCapabilities;
 class MediaSession;
+class UserActivation;
 struct ShareData;
 class WindowGlobalChild;
 
@@ -128,6 +130,7 @@ class Navigator final : public nsISupports, public nsWrapperCache {
   bool GlobalPrivacyControl();
   Geolocation* GetGeolocation(ErrorResult& aRv);
   Promise* GetBattery(ErrorResult& aRv);
+  dom::WakeLockJS* WakeLock();
 
   bool CanShare(const ShareData& aData);
   already_AddRefed<Promise> Share(const ShareData& aData, ErrorResult& aRv);
@@ -249,6 +252,8 @@ class Navigator final : public nsISupports, public nsWrapperCache {
   AutoplayPolicy GetAutoplayPolicy(HTMLMediaElement& aElement);
   AutoplayPolicy GetAutoplayPolicy(AudioContext& aContext);
 
+  already_AddRefed<dom::UserActivation> UserActivation();
+
  private:
   void ValidateShareData(const ShareData& aData, ErrorResult& aRv);
   RefPtr<MediaKeySystemAccessManager> mMediaKeySystemAccessManager;
@@ -296,6 +301,8 @@ class Navigator final : public nsISupports, public nsWrapperCache {
   RefPtr<webgpu::Instance> mWebGpu;
   RefPtr<Promise> mSharePromise;  // Web Share API related
   RefPtr<dom::LockManager> mLocks;
+  RefPtr<dom::UserActivation> mUserActivation;
+  RefPtr<dom::WakeLockJS> mWakeLock;
 };
 
 }  // namespace mozilla::dom

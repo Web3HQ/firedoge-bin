@@ -43,12 +43,12 @@ function promiseSiteDataManagerSitesUpdated() {
 
 function is_element_visible(aElement, aMsg) {
   isnot(aElement, null, "Element should not be null, when checking visibility");
-  ok(!BrowserTestUtils.is_hidden(aElement), aMsg);
+  ok(!BrowserTestUtils.isHidden(aElement), aMsg);
 }
 
 function is_element_hidden(aElement, aMsg) {
   isnot(aElement, null, "Element should not be null, when checking visibility");
-  ok(BrowserTestUtils.is_hidden(aElement), aMsg);
+  ok(BrowserTestUtils.isHidden(aElement), aMsg);
 }
 
 function promiseLoadSubDialog(aURL) {
@@ -230,8 +230,11 @@ async function addTestData(data) {
 }
 
 function promiseCookiesCleared() {
-  return TestUtils.topicObserved("cookie-changed", (subj, data) => {
-    return data === "cleared";
+  return TestUtils.topicObserved("cookie-changed", subj => {
+    return (
+      subj.QueryInterface(Ci.nsICookieNotification).action ==
+      Ci.nsICookieNotification.ALL_COOKIES_CLEARED
+    );
   });
 }
 

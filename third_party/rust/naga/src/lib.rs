@@ -279,6 +279,8 @@ An override expression can be evaluated at pipeline creation time.
 mod arena;
 pub mod back;
 mod block;
+#[cfg(feature = "compact")]
+pub mod compact;
 pub mod front;
 pub mod keywords;
 pub mod proc;
@@ -298,6 +300,9 @@ use serde::Serialize;
 /// Width of a boolean type, in bytes.
 pub const BOOL_WIDTH: Bytes = 1;
 
+/// Width of abstract types, in bytes.
+pub const ABSTRACT_WIDTH: Bytes = 8;
+
 /// Hash map that is faster but not resilient to DoS attacks.
 pub type FastHashMap<K, T> = rustc_hash::FxHashMap<K, T>;
 /// Hash set that is faster but not resilient to DoS attacks.
@@ -308,12 +313,13 @@ pub type FastHashSet<K> = rustc_hash::FxHashSet<K>;
 pub type FastIndexSet<K> =
     indexmap::IndexSet<K, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
+/// Insertion-order-preserving hash map (`IndexMap<K, V>`), but with the same
+/// hasher as `FastHashMap<K, V>` (faster but not resilient to DoS attacks).
+pub type FastIndexMap<K, V> =
+    indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
 /// Map of expressions that have associated variable names
-pub(crate) type NamedExpressions = indexmap::IndexMap<
-    Handle<Expression>,
-    String,
-    std::hash::BuildHasherDefault<rustc_hash::FxHasher>,
->;
+pub(crate) type NamedExpressions = FastIndexMap<Handle<Expression>, String>;
 
 /// Early fragment tests.
 ///
@@ -467,6 +473,29 @@ pub enum ScalarKind {
     Float,
     /// Boolean type.
     Bool,
+
+    /// WGSL abstract integer type.
+    ///
+    /// These are forbidden by validation, and should never reach backends.
+    AbstractInt,
+
+    /// Abstract floating-point type.
+    ///
+    /// These are forbidden by validation, and should never reach backends.
+    AbstractFloat,
+}
+
+/// Characteristics of a scalar type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub struct Scalar {
+    /// How the value's bits are to be interpreted.
+    pub kind: ScalarKind,
+
+    /// This size of the value in bytes.
+    pub width: Bytes,
 }
 
 /// Size of an array.
@@ -596,8 +625,10 @@ pub enum StorageFormat {
     Rgba8Snorm,
     Rgba8Uint,
     Rgba8Sint,
+    Bgra8Unorm,
 
     // Packed 32-bit formats
+    Rgb10a2Uint,
     Rgb10a2Unorm,
     Rg11b10Float,
 
@@ -672,21 +703,17 @@ pub struct Type {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum TypeInner {
     /// Number of integral or floating-point kind.
-    Scalar { kind: ScalarKind, width: Bytes },
+    Scalar(Scalar),
     /// Vector of numbers.
-    Vector {
-        size: VectorSize,
-        kind: ScalarKind,
-        width: Bytes,
-    },
-    /// Matrix of floats.
+    Vector { size: VectorSize, scalar: Scalar },
+    /// Matrix of numbers.
     Matrix {
         columns: VectorSize,
         rows: VectorSize,
-        width: Bytes,
+        scalar: Scalar,
     },
     /// Atomic scalar.
-    Atomic { kind: ScalarKind, width: Bytes },
+    Atomic(Scalar),
     /// Pointer to another type.
     ///
     /// Pointers to scalars and vectors should be treated as equivalent to
@@ -732,8 +759,7 @@ pub enum TypeInner {
     /// [`TypeResolution::Value`]: proc::TypeResolution::Value
     ValuePointer {
         size: Option<VectorSize>,
-        kind: ScalarKind,
-        width: Bytes,
+        scalar: Scalar,
         space: AddressSpace,
     },
 
@@ -850,11 +876,16 @@ pub enum TypeInner {
 #[cfg_attr(feature = "deserialize", derive(Deserialize))]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum Literal {
+    /// May not be NaN or infinity.
     F64(f64),
+    /// May not be NaN or infinity.
     F32(f32),
     U32(u32),
     I32(i32),
+    I64(i64),
     Bool(bool),
+    AbstractInt(i64),
+    AbstractFloat(f64),
 }
 
 #[derive(Debug, PartialEq)]
@@ -922,6 +953,8 @@ pub enum Binding {
     /// [`Fragment`]: crate::ShaderStage::Fragment
     Location {
         location: u32,
+        /// Indicates the 2nd input to the blender when dual-source blending.
+        second_blend_source: bool,
         interpolation: Option<Interpolation>,
         sampling: Option<Sampling>,
     },
@@ -971,7 +1004,11 @@ pub struct LocalVariable {
     pub ty: Handle<Type>,
     /// Initial value for this variable.
     ///
-    /// Expression handle lives in const_expressions
+    /// This handle refers to this `LocalVariable`'s function's
+    /// [`expressions`] arena, but it is required to be an evaluated
+    /// constant expression.
+    ///
+    /// [`expressions`]: Function::expressions
     pub init: Option<Handle<Expression>>,
 }
 
@@ -982,7 +1019,8 @@ pub struct LocalVariable {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum UnaryOperator {
     Negate,
-    Not,
+    LogicalNot,
+    BitwiseNot,
 }
 
 /// Operation that can be applied on two values.
@@ -1103,8 +1141,6 @@ pub enum RelationalFunction {
     Any,
     IsNan,
     IsInf,
-    IsFinite,
-    IsNormal,
 }
 
 /// Built-in shader function for math.
@@ -1943,6 +1979,28 @@ pub struct EntryPoint {
     pub function: Function,
 }
 
+/// Return types predeclared for the frexp, modf, and atomicCompareExchangeWeak built-in functions.
+///
+/// These cannot be spelled in WGSL source.
+///
+/// Stored in [`SpecialTypes::predeclared_types`] and created by [`Module::generate_predeclared_type`].
+#[derive(Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "clone", derive(Clone))]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub enum PredeclaredType {
+    AtomicCompareExchangeWeakResult(Scalar),
+    ModfResult {
+        size: Option<VectorSize>,
+        width: Bytes,
+    },
+    FrexpResult {
+        size: Option<VectorSize>,
+        width: Bytes,
+    },
+}
+
 /// Set of special types that can be optionally generated by the frontends.
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "clone", derive(Clone))]
@@ -1961,6 +2019,12 @@ pub struct SpecialTypes {
     /// Call [`Module::generate_ray_intersection_type`] to populate
     /// this if needed and return the handle.
     pub ray_intersection: Option<Handle<Type>>,
+
+    /// Types for predeclared wgsl types instantiated on demand.
+    ///
+    /// Call [`Module::generate_predeclared_type`] to populate this if
+    /// needed and return the handle.
+    pub predeclared_types: FastIndexMap<PredeclaredType, Handle<Type>>,
 }
 
 /// Shader module.

@@ -3,10 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
 
-const { XPCOMUtils } = ChromeUtils.importESModule(
-  "resource://gre/modules/XPCOMUtils.sys.mjs"
-);
-
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -20,7 +16,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "log", () => {
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
   const { Logger } = ChromeUtils.importESModule(
     "resource://messaging-system/lib/Logger.sys.mjs"
   );
@@ -1069,6 +1065,51 @@ const ASRouterTriggerListeners = new Map([
           this._triggerHandler(win.gBrowser.selectedBrowser, {
             id: this.id,
           });
+        }
+      },
+      uninit() {
+        if (this._initialized) {
+          lazy.EveryWindow.unregisterCallback(this.id);
+          this._initialized = false;
+          this._triggerHandler = null;
+        }
+      },
+    },
+  ],
+  [
+    "cookieBannerHandled",
+    {
+      id: "cookieBannerHandled",
+      _initialized: false,
+      _triggerHandler: null,
+
+      init(triggerHandler) {
+        this._triggerHandler = triggerHandler;
+        if (!this._initialized) {
+          lazy.EveryWindow.registerCallback(
+            this.id,
+            win => {
+              win.addEventListener("cookiebannerhandled", this);
+            },
+            win => {
+              win.removeEventListener("cookiebannerhandled", this);
+            }
+          );
+          this._initialized = true;
+        }
+      },
+      handleEvent(event) {
+        if (this._initialized) {
+          const browser =
+            event.detail.windowContext.rootFrameLoader?.ownerElement;
+          const win = browser?.ownerGlobal;
+          // We only want to show messages in the active browser window.
+          if (
+            win === Services.wm.getMostRecentBrowserWindow() &&
+            browser === win.gBrowser.selectedBrowser
+          ) {
+            this._triggerHandler(browser, { id: this.id });
+          }
         }
       },
       uninit() {

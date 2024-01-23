@@ -14,7 +14,6 @@ ChromeUtils.defineESModuleGetters(this, {
   AboutReaderParent: "resource:///actors/AboutReaderParent.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
 });
 
 var { ExtensionError } = ExtensionUtils;
@@ -239,20 +238,6 @@ global.TabContext = class extends EventEmitter {
   }
 };
 
-// This promise is used to wait for the search service to be initialized.
-// None of the code in the WebExtension modules requests that initialization.
-// It is assumed that it is started at some point. That might never happen,
-// e.g. if the application shuts down before the search service initializes.
-ChromeUtils.defineLazyGetter(global, "searchInitialized", () => {
-  if (Services.search.isInitialized) {
-    return Promise.resolve();
-  }
-  return ExtensionUtils.promiseObserved(
-    "browser-search-service",
-    (_, data) => data == "init-complete"
-  );
-});
-
 class WindowTracker extends WindowTrackerBase {
   addProgressListener(window, listener) {
     window.gBrowser.addTabsProgressListener(listener);
@@ -456,7 +441,7 @@ class TabTracker extends TabTrackerBase {
   deferredForTabOpen(nativeTab) {
     let deferred = this._deferredTabOpenEvents.get(nativeTab);
     if (!deferred) {
-      deferred = PromiseUtils.defer();
+      deferred = Promise.withResolvers();
       this._deferredTabOpenEvents.set(nativeTab, deferred);
       deferred.promise.then(() => {
         this._deferredTabOpenEvents.delete(nativeTab);
@@ -1056,11 +1041,6 @@ class Window extends WindowBase {
         window.restore();
         if (window.windowState !== window.STATE_NORMAL) {
           window.restore();
-        }
-        if (window.windowState !== window.STATE_NORMAL) {
-          // And on OS-X, where normal vs. maximized is basically a heuristic,
-          // we need to cheat.
-          window.sizeToContent();
         }
         break;
 

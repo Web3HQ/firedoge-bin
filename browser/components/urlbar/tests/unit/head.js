@@ -16,7 +16,6 @@ ChromeUtils.defineESModuleGetters(this, {
   HttpServer: "resource://testing-common/httpd.sys.mjs",
   PlacesTestUtils: "resource://testing-common/PlacesTestUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
   SearchTestUtils: "resource://testing-common/SearchTestUtils.sys.mjs",
   TestUtils: "resource://testing-common/TestUtils.sys.mjs",
   UrlbarController: "resource:///modules/UrlbarController.sys.mjs",
@@ -234,11 +233,18 @@ function makeTestServer(port = -1) {
  * onto the search query.
  *
  * @param {Function} suggestionsFn
- *        A function that returns an array of suggestion strings given a
- *        search string.  If not given, a default function is used.
+ *   A function that returns an array of suggestion strings given a
+ *   search string.  If not given, a default function is used.
+ * @param {object} options
+ *   Options for the check.
+ * @param {string} [options.name]
+ *   The name of the engine to install.
  * @returns {nsISearchEngine} The new engine.
  */
-async function addTestSuggestionsEngine(suggestionsFn = null) {
+async function addTestSuggestionsEngine(
+  suggestionsFn = null,
+  { name = SUGGESTIONS_ENGINE_NAME } = {}
+) {
   // This port number should match the number in engine-suggestions.xml.
   let server = makeTestServer();
   server.registerPathHandler("/suggest", (req, resp) => {
@@ -252,14 +258,14 @@ async function addTestSuggestionsEngine(suggestionsFn = null) {
     resp.write(JSON.stringify(data));
   });
   await SearchTestUtils.installSearchExtension({
-    name: SUGGESTIONS_ENGINE_NAME,
+    name,
     search_url: `http://localhost:${server.identity.primaryPort}/search`,
     suggest_url: `http://localhost:${server.identity.primaryPort}/suggest`,
     suggest_url_get_params: "?q={searchTerms}",
     // test_search_suggestions_aliases.js uses the search form.
     search_form: `http://localhost:${server.identity.primaryPort}/search?q={searchTerms}`,
   });
-  let engine = Services.search.getEngineByName("Suggestions");
+  let engine = Services.search.getEngineByName(name);
   return engine;
 }
 
@@ -318,6 +324,43 @@ async function addTestTailSuggestionsEngine(suggestionsFn = null) {
   return engine;
 }
 
+/**
+ * Creates a function that can be provided to the new engine
+ * utility function to mimic a search engine that returns
+ * rich suggestions.
+ *
+ * @param {string} searchStr
+ *        The string being searched for.
+ *
+ * @returns {object}
+ *        A JSON object mimicing the data format returned by
+ *        a search engine.
+ */
+function defaultRichSuggestionsFn(searchStr) {
+  let suffixes = ["toronto", "tunisia", "tacoma", "taipei"];
+  return [
+    "what time is it in t",
+    suffixes.map(s => searchStr + s.slice(1)),
+    [],
+    {
+      "google:irrelevantparameter": [],
+      "google:suggestdetail": suffixes.map((suffix, i) => {
+        // Set every other suggestion as a rich suggestion so we can
+        // test how they are handled and ordered when interleaved.
+        if (i % 2) {
+          return {};
+        }
+        return {
+          a: "description",
+          dc: "#FFFFFF",
+          i: "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
+          t: "Title",
+        };
+      }),
+    },
+  ];
+}
+
 async function addOpenPages(uri, count = 1, userContextId = 0) {
   for (let i = 0; i < count; i++) {
     await UrlbarProviderOpenTabs.registerOpenTab(
@@ -344,7 +387,7 @@ async function removeOpenPages(aUri, aCount = 1, aUserContextId = 0) {
  * suggestions.
  */
 function testEngine_setup() {
-  add_task(async function setup() {
+  add_setup(async () => {
     await cleanupPlaces();
     let engine = await addTestSuggestionsEngine();
     let oldDefaultEngine = await Services.search.getDefault();
@@ -420,6 +463,17 @@ function makeBookmarkResult(
       icon: [typeof iconUri != "undefined" ? iconUri : `page-icon:${uri}`],
       title: [title, UrlbarUtils.HIGHLIGHT.TYPED],
       tags: [tags, UrlbarUtils.HIGHLIGHT.TYPED],
+      isBlockable:
+        source == UrlbarUtils.RESULT_SOURCE.HISTORY ? true : undefined,
+      blockL10n:
+        source == UrlbarUtils.RESULT_SOURCE.HISTORY
+          ? { id: "urlbar-result-menu-remove-from-history" }
+          : undefined,
+      helpUrl:
+        source == UrlbarUtils.RESULT_SOURCE.HISTORY
+          ? Services.urlFormatter.formatURLPref("app.support.baseURL") +
+            "awesome-bar-result-menu"
+          : undefined,
     })
   );
 
@@ -448,6 +502,11 @@ function makeFormHistoryResult(queryContext, { suggestion, engineName }) {
       engine: engineName,
       suggestion: [suggestion, UrlbarUtils.HIGHLIGHT.SUGGESTED],
       lowerCaseSuggestion: suggestion.toLocaleLowerCase(),
+      isBlockable: true,
+      blockL10n: { id: "urlbar-result-menu-remove-from-history" },
+      helpUrl:
+        Services.urlFormatter.formatURLPref("app.support.baseURL") +
+        "awesome-bar-result-menu",
     })
   );
 }
@@ -507,9 +566,14 @@ function makeOmniboxResult(
  *   The page title.
  * @param {string} [options.iconUri]
  *   A URI for the page icon.
+ * @param {number} [options.userContextId]
+ *   A id of the userContext in which the tab is located.
  * @returns {UrlbarResult}
  */
-function makeTabSwitchResult(queryContext, { uri, title, iconUri }) {
+function makeTabSwitchResult(
+  queryContext,
+  { uri, title, iconUri, userContextId }
+) {
   return new UrlbarResult(
     UrlbarUtils.RESULT_TYPE.TAB_SWITCH,
     UrlbarUtils.RESULT_SOURCE.TABS,
@@ -518,6 +582,7 @@ function makeTabSwitchResult(queryContext, { uri, title, iconUri }) {
       title: [title, UrlbarUtils.HIGHLIGHT.TYPED],
       // Check against undefined so consumers can pass in the empty string.
       icon: typeof iconUri != "undefined" ? iconUri : `page-icon:${uri}`,
+      userContextId: [userContextId || 0],
     })
   );
 }
@@ -696,7 +761,7 @@ function makeSearchResult(
 ) {
   // Tail suggestion common cases, handled here to reduce verbosity in tests.
   if (tail) {
-    if (!tailPrefix) {
+    if (!tailPrefix && !isRichSuggestion) {
       tailPrefix = "… ";
     }
     if (!tailOffsetIndex) {
@@ -751,6 +816,12 @@ function makeSearchResult(
       result.payload.suggestion.toLocaleLowerCase();
     result.payload.trending = trending;
     result.isRichSuggestion = isRichSuggestion;
+  }
+
+  if (isRichSuggestion) {
+    result.payload.icon =
+      "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+    result.payload.description = "description";
   }
 
   if (providerName) {
@@ -810,6 +881,19 @@ function makeVisitResult(
 
   if (fallbackTitle) {
     payload.fallbackTitle = [fallbackTitle, UrlbarUtils.HIGHLIGHT.TYPED];
+  }
+
+  if (
+    !heuristic &&
+    providerName != "AboutPages" &&
+    providerName != "PreloadedSites" &&
+    source == UrlbarUtils.RESULT_SOURCE.HISTORY
+  ) {
+    payload.isBlockable = true;
+    payload.blockL10n = { id: "urlbar-result-menu-remove-from-history" };
+    payload.helpUrl =
+      Services.urlFormatter.formatURLPref("app.support.baseURL") +
+      "awesome-bar-result-menu";
   }
 
   if (iconUri) {
@@ -872,7 +956,7 @@ async function check_results({
   // updates.
   // This is not a problem in real life, but autocomplete tests should
   // return reliable resultsets, thus we have to wait.
-  await PlacesTestUtils.promiseAsyncUpdates();
+  await PlacesFrecencyRecalculator.recalculateAnyOutdatedFrecencies();
 
   const controller = UrlbarTestUtils.newMockController({
     input: {

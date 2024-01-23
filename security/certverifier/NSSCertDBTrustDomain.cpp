@@ -72,8 +72,8 @@ NSSCertDBTrustDomain::NSSCertDBTrustDomain(
     unsigned int minRSABits, ValidityCheckingMode validityCheckingMode,
     NetscapeStepUpPolicy netscapeStepUpPolicy, CRLiteMode crliteMode,
     const OriginAttributes& originAttributes,
-    const Vector<Input>& thirdPartyRootInputs,
-    const Vector<Input>& thirdPartyIntermediateInputs,
+    const nsTArray<Input>& thirdPartyRootInputs,
+    const nsTArray<Input>& thirdPartyIntermediateInputs,
     const Maybe<nsTArray<nsTArray<uint8_t>>>& extraCertificates,
     /*out*/ nsTArray<nsTArray<uint8_t>>& builtChain,
     /*optional*/ PinningTelemetryInfo* pinningTelemetryInfo,
@@ -100,8 +100,6 @@ NSSCertDBTrustDomain::NSSCertDBTrustDomain(
       mHostname(hostname),
       mCertStorage(do_GetService(NS_CERT_STORAGE_CID)),
       mOCSPStaplingStatus(CertVerifier::OCSP_STAPLING_NEVER_CHECKED),
-      mSCTListFromCertificate(),
-      mSCTListFromOCSPStapling(),
       mBuiltInRootsModule(SECMOD_FindModule(kRootModuleName)),
       mOCSPFetchStatus(OCSPFetchStatus::NotFetched) {}
 

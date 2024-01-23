@@ -27,6 +27,7 @@ struct GObjectRefPtrTraits {
 
 GOBJECT_TRAITS(GtkWidget)
 GOBJECT_TRAITS(GFile)
+GOBJECT_TRAITS(GFileMonitor)
 GOBJECT_TRAITS(GMenu)
 GOBJECT_TRAITS(GMenuItem)
 GOBJECT_TRAITS(GSimpleAction)
@@ -41,6 +42,7 @@ GOBJECT_TRAITS(GCancellable)
 GOBJECT_TRAITS(GtkIMContext)
 GOBJECT_TRAITS(GUnixFDList)
 GOBJECT_TRAITS(GtkCssProvider)
+GOBJECT_TRAITS(GDBusMethodInvocation)
 
 #undef GOBJECT_TRAITS
 

@@ -8,19 +8,13 @@ ChromeUtils.defineESModuleGetters(this, {
   sinon: "resource://testing-common/Sinon.sys.mjs",
 });
 
-const _handleWDBAResultStub = sinon
-  .stub(ShellService, "_handleWDBAResult")
-  .callsFake(async () => {
-    throw new Error("from _handleWDBAResultStub");
-  });
+const setDefaultBrowserUserChoiceStub = async () => {
+  throw Components.Exception("", Cr.NS_ERROR_WDBA_NO_PROGID);
+};
 
-const _callExternalDefaultBrowserAgentStub = sinon
-  .stub(ShellService, "_callExternalDefaultBrowserAgent")
-  .callsFake(async () => ({
-    async wait() {
-      return { exitCode: 0 };
-    },
-  }));
+const defaultAgentStub = sinon
+  .stub(ShellService, "defaultAgent")
+  .value({ setDefaultBrowserUserChoiceAsync: setDefaultBrowserUserChoiceStub });
 
 const _userChoiceImpossibleTelemetryResultStub = sinon
   .stub(ShellService, "_userChoiceImpossibleTelemetryResult")
@@ -35,8 +29,7 @@ const shellStub = sinon
   .value({ setDefaultBrowser: setDefaultStub });
 
 registerCleanupFunction(() => {
-  _handleWDBAResultStub.restore();
-  _callExternalDefaultBrowserAgentStub.restore();
+  defaultAgentStub.restore();
   _userChoiceImpossibleTelemetryResultStub.restore();
   userChoiceStub.restore();
   shellStub.restore();
@@ -46,7 +39,7 @@ registerCleanupFunction(() => {
 
 let defaultUserChoice;
 add_task(async function need_user_choice() {
-  ShellService.setDefaultBrowser();
+  await ShellService.setDefaultBrowser();
   defaultUserChoice = userChoiceStub.called;
 
   Assert.ok(
@@ -76,7 +69,7 @@ add_task(async function remote_disable() {
     },
   });
 
-  ShellService.setDefaultBrowser();
+  await ShellService.setDefaultBrowser();
 
   Assert.ok(
     userChoiceStub.notCalled,
@@ -97,7 +90,7 @@ add_task(async function restore_default() {
   setDefaultStub.resetHistory();
   ExperimentAPI._store._deleteForTests("shellService");
 
-  ShellService.setDefaultBrowser();
+  await ShellService.setDefaultBrowser();
 
   Assert.equal(
     userChoiceStub.called,
@@ -132,14 +125,17 @@ add_task(async function ensure_fallback() {
     },
   });
 
-  ShellService.setDefaultBrowser();
+  await ShellService.setDefaultBrowser();
 
   Assert.ok(userChoiceStub.called, "Set default with user choice called");
 
-  let thrown = false;
-  await userChoicePromise.catch(() => (thrown = true));
+  let message = "";
+  await userChoicePromise.catch(err => (message = err.message || ""));
 
-  Assert.ok(thrown, "Set default with user choice threw an error");
+  Assert.ok(
+    message.includes("ErrExeProgID"),
+    "Set default with user choice threw an expected error"
+  );
   Assert.ok(setDefaultStub.called, "Fallbacked to plain set default");
 
   await doCleanup();

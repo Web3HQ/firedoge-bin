@@ -19,14 +19,14 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 
 export class ParentAutocompleteOption {
-  icon;
+  image;
   title;
   subtitle;
   fillMessageName;
   fillMessageData;
 
-  constructor(icon, title, subtitle, fillMessageName, fillMessageData) {
-    this.icon = icon;
+  constructor(image, title, subtitle, fillMessageName, fillMessageData) {
+    this.image = image;
     this.title = title;
     this.subtitle = subtitle;
     this.fillMessageName = fillMessageName;
@@ -176,6 +176,7 @@ class ImportRowProcessor {
     // ignored in that case, leading to multiple logins for the same username.
     let existingLogins = await Services.logins.searchLoginsAsync({
       origin: login.origin,
+      formActionOrigin: login.formActionOrigin,
       httpRealm: login.httpRealm,
     });
 
@@ -390,7 +391,6 @@ export const LoginHelper = {
   schemeUpgrades: null,
   showAutoCompleteFooter: null,
   showAutoCompleteImport: null,
-  signupDectectionConfidenceThreshold: null,
   testOnlyUserHasInteractedWithDocument: null,
   userInputRequiredToCapture: null,
   captureInputChanges: null,
@@ -462,12 +462,6 @@ export const LoginHelper = {
     this.showAutoCompleteImport = Services.prefs.getStringPref(
       "signon.showAutoCompleteImport",
       ""
-    );
-    this.signupDetectionConfidenceThreshold = parseFloat(
-      Services.prefs.getStringPref("signon.signupDetection.confidenceThreshold")
-    );
-    this.signupDetectionEnabled = Services.prefs.getBoolPref(
-      "signon.signupDetection.enabled"
     );
 
     this.storeWhenAutocompleteOff = Services.prefs.getBoolPref(
@@ -961,7 +955,7 @@ export const LoginHelper = {
           "Can't add a login with both a httpRealm and formActionOrigin."
         );
       }
-    } else if (newLogin.httpRealm) {
+    } else if (newLogin.httpRealm || newLogin.httpRealm == "") {
       // We have a HTTP realm. Can't have a form submit URL.
       if (newLogin.formActionOrigin != null) {
         throw new Error(
@@ -1260,7 +1254,6 @@ export const LoginHelper = {
     // Get currently active tab's origin
     const openedFrom =
       window.gBrowser?.selectedTab.linkedBrowser.currentURI.spec;
-
     // If no loginGuid is set, get sanitized origin, this will return null for about:* uris
     const preselectedLogin = loginGuid ?? this.getLoginOrigin(openedFrom);
 
@@ -1270,13 +1263,14 @@ export const LoginHelper = {
     });
 
     const paramsPart = params.toString() ? `?${params}` : "";
-    const fragmentsPart = preselectedLogin
-      ? `#${window.encodeURIComponent(preselectedLogin)}`
-      : "";
-    const destination = `about:logins${paramsPart}${fragmentsPart}`;
 
-    // We assume that managementURL has a '?' already
-    window.openTrustedLinkIn(destination, "tab");
+    const browser = window.gBrowser ?? window.opener?.gBrowser;
+
+    const tab = browser.addTrustedTab(`about:logins${paramsPart}`, {
+      inBackground: false,
+    });
+
+    tab.setAttribute("preselect-login", preselectedLogin);
   },
 
   /**
@@ -1352,6 +1346,7 @@ export const LoginHelper = {
     if (
       !(
         acFieldName == "username" ||
+        acFieldName == "webauthn" ||
         // Bug 1540154: Some sites use tel/email on their username fields.
         acFieldName == "email" ||
         acFieldName == "tel" ||

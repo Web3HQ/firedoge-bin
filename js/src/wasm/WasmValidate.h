@@ -59,6 +59,7 @@ struct ModuleEnvironment {
   MutableTypeContext types;
   FuncDescVector funcs;
   uint32_t numFuncImports;
+  uint32_t numGlobalImports;
   GlobalDescVector globals;
   TagDescVector tags;
   TableDescVector tables;
@@ -97,6 +98,7 @@ struct ModuleEnvironment {
       : kind(kind),
         features(features),
         numFuncImports(0),
+        numGlobalImports(0),
         funcImportsOffsetStart(UINT32_MAX),
         typeDefsOffsetStart(UINT32_MAX),
         memoriesOffsetStart(UINT32_MAX),
@@ -124,9 +126,12 @@ struct ModuleEnvironment {
 #undef WASM_FEATURE
   Shareable sharedMemoryEnabled() const { return features.sharedMemory; }
   bool simdAvailable() const { return features.simd; }
-  bool intrinsicsEnabled() const { return features.intrinsics; }
 
   bool isAsmJS() const { return kind == ModuleKind::AsmJS; }
+  // A builtin module is a host constructed wasm module that exports host
+  // functionality, using special opcodes. Otherwise, it has the same rules
+  // as wasm modules and so it does not get a new ModuleKind.
+  bool isBuiltinModule() const { return features.isBuiltinModule; }
 
   bool hugeMemoryEnabled(uint32_t memoryIndex) const {
     return !isAsmJS() && memoryIndex < memories.length() &&
@@ -242,11 +247,13 @@ class NothingVector {
   Nothing unused_;
 
  public:
+  bool reserve(size_t size) { return true; }
   bool resize(size_t length) { return true; }
   Nothing& operator[](size_t) { return unused_; }
   Nothing& back() { return unused_; }
   size_t length() const { return 0; }
   bool append(Nothing& nothing) { return true; }
+  void infallibleAppend(Nothing& nothing) {}
 };
 
 struct ValidatingPolicy {
