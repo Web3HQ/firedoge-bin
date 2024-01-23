@@ -44,15 +44,11 @@ user_pref("network.http.phishy-userpass-length", 255);
 // Disable safebrowsing components
 user_pref("browser.safebrowsing.blockedURIs.enabled", false);
 user_pref("browser.safebrowsing.downloads.enabled", false);
-user_pref("browser.safebrowsing.passwords.enabled", false);
 user_pref("browser.safebrowsing.malware.enabled", false);
 user_pref("browser.safebrowsing.phishing.enabled", false);
 user_pref("browser.safebrowsing.update.enabled", false);
 // Automatically unload beforeunload alerts
 user_pref("dom.disable_beforeunload", true);
-// Enable implicit keyframes since the common animation interpolation test
-// function assumes this is available.
-user_pref("dom.animations-api.implicit-keyframes.enabled", true);
 // Disable high DPI
 user_pref("layout.css.devPixelsPerPx", "1.0");
 // Enable the parallel styling code.
@@ -63,19 +59,21 @@ user_pref("media.block-autoplay-until-in-foreground", false);
 // Disable dark scrollbars as it can be semi-transparent that many reftests
 // don't expect.
 user_pref("widget.disable-dark-scrollbar", true);
+// Disable scrollbar animations. Otherwise reftests that use overlay scrollbars
+// (only Android right now), might get a snapshot at different times during the
+// animation.
+user_pref("ui.scrollbarFadeDuration", 0);
 // Don't enable paint suppression when the background is unknown. While paint
 // is suppressed, synthetic click events and co. go to the old page, which can
 // be confusing for tests that send click events before the first paint.
 user_pref("nglayout.initialpaint.unsuppress_with_no_background", true);
 user_pref("media.block-autoplay-until-in-foreground", false);
-// Force a light color scheme unless explicitly overriden by pref.
+// Force a light color scheme unless explicitly overridden by pref.
 user_pref("layout.css.prefers-color-scheme.content-override", 1);
 // Force OffscreenCanvas support
 user_pref("gfx.offscreencanvas.enabled", true);
-user_pref("dom.workers.requestAnimationFrame", true);
 // A lot of tests use the Reporting API for observing things
 user_pref("dom.reporting.enabled", true);
-user_pref("layout.css.font-loading-api.workers.enabled", true);
 // Enable WebDriver BiDi experimental commands and events during tests.
 user_pref("remote.experimental.enabled", true);
 // Disable always partitioning storage with the Storage Access API
@@ -92,6 +90,11 @@ user_pref("gecko.handlerService.defaultHandlersVersion", 100);
 user_pref("security.webauth.webauthn_enable_softtoken", true);
 // Disable hardware WebAuthn authenticators.
 user_pref("security.webauth.webauthn_enable_usbtoken", false);
-user_pref("security.webauth.webauthn_enable_android_fido2", false);
 // Disable the WebAuthn direct attestation consent prompt.
 user_pref("security.webauth.webauthn_testing_allow_direct_attestation", true);
+// Enable WebAuthn conditional mediation.
+user_pref("security.webauthn.enable_conditional_mediation", true);
+// Disable captive portal service
+user_pref("network.captive-portal-service.enabled", false);
+// Enable http2 websockets support
+user_pref("network.http.http2.websockets", true);

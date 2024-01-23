@@ -537,11 +537,8 @@ set_define("MOZ_WAYLAND", depends_if(wayland_headers)(lambda _: True))
 
 # Hardware-accelerated video decode with VAAPI and V4L2 on Linux
 # ==============================================================
-@depends(target, toolkit_gtk)
-def vaapi(target, toolkit_gtk):
-    # VAAPI is mostly used on x86(-64) but is sometimes used on ARM/ARM64 SOCs.
-    if target.cpu in ("arm", "aarch64", "x86", "x86_64") and toolkit_gtk:
-        return True
+set_config("MOZ_ENABLE_VAAPI", True, when=toolkit_gtk)
+set_define("MOZ_ENABLE_VAAPI", True, when=toolkit_gtk)
 
 
 @depends(target, toolkit_gtk)
@@ -552,11 +549,8 @@ def v4l2(target, toolkit_gtk):
         return True
 
 
-set_config("MOZ_ENABLE_VAAPI", True, when=vaapi)
 set_config("MOZ_ENABLE_V4L2", True, when=v4l2)
-set_define("MOZ_ENABLE_VAAPI", True, when=vaapi)
 set_define("MOZ_ENABLE_V4L2", True, when=v4l2)
-
 
 # GL Provider
 # ==============================================================
@@ -709,9 +703,11 @@ def wmf(value, target, _):
         return True
 
 
-@depends(c_compiler, when=wmf)
-def wmfmediaengine(c_compiler):
-    return c_compiler and c_compiler.type == "clang-cl"
+@depends(artifact_builds, c_compiler, when=wmf)
+def wmfmediaengine(artifact_builds, c_compiler):
+    if c_compiler:
+        return c_compiler.type == "clang-cl"
+    return bool(artifact_builds)
 
 
 set_config("MOZ_WMF", wmf)
@@ -827,13 +823,11 @@ def eme_choices(target, wmf):
         return ("widevine",)
 
 
-# Widevine is enabled by default in desktop browser builds, except
-# on aarch64 Windows.
-@depends(build_project, eme_choices, target)
-def eme_default(build_project, choices, target):
+# Widevine is enabled by default in desktop browser builds.
+@depends(build_project, eme_choices)
+def eme_default(build_project, choices):
     if build_project == "browser":
-        if target.kernel != "WINNT" or target.cpu != "aarch64":
-            return choices
+        return choices
 
 
 option(
@@ -854,15 +848,6 @@ def eme_modules(value):
 # Fallback to an empty list when eme_choices is empty, setting eme_modules to
 # None.
 set_config("MOZ_EME_MODULES", eme_modules | dependable([]))
-
-
-@depends(eme_modules, target, when=eme_modules)
-def eme_win32_artifact(modules, target):
-    if "widevine" in modules and target.kernel == "WINNT" and target.cpu == "aarch64":
-        return True
-
-
-set_config("MOZ_EME_WIN32_ARTIFACT", eme_win32_artifact)
 
 
 # Media Foundation CDM support
@@ -1418,7 +1403,6 @@ def x11_libs(webrtc):
             "xdamage",
             "xfixes",
             "xi",
-            "xtst",
         ]
     return libs
 
@@ -1497,36 +1481,36 @@ with only_when("--enable-compile-environment"):
             and target.cpu in ("arm", "aarch64", "x86", "x86_64")
         )
 
-    @depends("--enable-release", enable_linker)
-    def default_elfhack(release, linker):
-        # Disable elfhack when explicitly building with --enable-linker=lld
-        if linker and linker.origin != "default" and linker[0] in ("lld", "mold"):
-            return False
-        return bool(release)
-
     option(
         "--disable-elf-hack",
-        default=default_elfhack,
+        nargs="?",
+        choices=("legacy", "relr"),
         help="{Enable|Disable} elf hacks",
         when=has_elfhack,
     )
 
+    @depends("--enable-elf-hack", when=has_elfhack)
+    def may_enable_legacy_elfhack(enable):
+        if enable and enable != ("relr",):
+            return enable
+
+    @depends("--enable-elf-hack", when=has_elfhack)
+    def may_enable_relrhack(enable):
+        if enable and enable != ("legacy",):
+            return enable
+
     @depends(
         have_arc4random,
         android_version,
-        depends("--enable-elf-hack", when=has_elfhack)(lambda x: x),
         when=target_has_linux_kernel,
     )
-    def may_use_pack_relative_relocs(have_arc4random, android_version, elfhack):
+    def may_use_pack_relative_relocs(have_arc4random, android_version):
         # Packed relative relocations are only supported on Android since
         # version 11 (API 30), and in glibc since version 2.36.
         # glibc 2.36 also added the arc4random function, which is our proxy
         # to detect this (or newer) version being used.
         # When targetting those newer versions, we allow ourselves to use
-        # packed relative relocations rather than elfhack. We still prefer
-        # elfhack when explicitly enabled.
-        if elfhack and elfhack.origin != "default":
-            return False
+        # packed relative relocations rather than elfhack.
         if android_version:
             return android_version >= 30
         return have_arc4random
@@ -1536,14 +1520,14 @@ with only_when("--enable-compile-environment"):
         extra_toolchain_flags,
         linker_ldflags,
         readelf,
-        when=may_use_pack_relative_relocs,
+        when=may_use_pack_relative_relocs | may_enable_relrhack,
     )
     @checking("for -z pack-relative-relocs option to ld", bool)
     @imports(_from="__builtin__", _import="FileNotFoundError")
     @imports("os")
     @imports(_from="tempfile", _import="mkstemp")
     @imports("textwrap")
-    def pack_relative_relocs(
+    def has_pack_relative_relocs(
         c_compiler,
         extra_toolchain_flags,
         linker_ldflags,
@@ -1603,28 +1587,125 @@ with only_when("--enable-compile-environment"):
             except FileNotFoundError:
                 pass
 
-    add_old_configure_assignment("PACK_REL_RELOC_FLAGS", pack_relative_relocs)
+    @depends(
+        has_pack_relative_relocs,
+        may_enable_legacy_elfhack,
+        may_enable_relrhack,
+        may_use_pack_relative_relocs,
+        when=has_pack_relative_relocs,
+    )
+    def pack_relative_relocs_flags(
+        flags,
+        may_enable_legacy_elfhack,
+        may_enable_relrhack,
+        may_use_pack_relative_relocs,
+    ):
+        # When relrhack is enabled, we don't pass the flag to the linker because
+        # relrhack will take care of it.
+        if may_enable_relrhack and may_enable_relrhack.origin != "default":
+            return None
+        # if elfhack is explicitly enabled instead of relrhack, we prioritize it
+        # over packed relative relocs.
+        if may_enable_legacy_elfhack and may_enable_legacy_elfhack.origin != "default":
+            return None
+        if may_use_pack_relative_relocs:
+            return flags
+
+    add_old_configure_assignment("PACK_REL_RELOC_FLAGS", pack_relative_relocs_flags)
 
     @depends(
         select_linker,
-        pack_relative_relocs,
-        "--enable-elf-hack",
+        pack_relative_relocs_flags,
+        has_pack_relative_relocs,
+        may_enable_legacy_elfhack,
+        may_enable_relrhack,
         when=has_elfhack,
     )
-    def use_elf_hack(linker, pack_relative_relocs, elfhack):
-        if elfhack:
-            # If elfhack was not manually enabled and packed relative relocations
-            # can be used, then don't enable elfhack even if it would normally have.
-            if elfhack.origin == "default" and pack_relative_relocs:
-                return
-            if linker and linker.KIND == "lld":
+    def which_elf_hack(
+        linker,
+        pack_relative_relocs_flags,
+        has_pack_relative_relocs,
+        may_enable_legacy_elfhack,
+        may_enable_relrhack,
+    ):
+        if pack_relative_relocs_flags:
+            return
+        if may_enable_relrhack:
+            if has_pack_relative_relocs:
+                return "relr"
+            elif (
+                may_enable_relrhack.origin != "default"
+                and not may_enable_legacy_elfhack
+            ):
                 die(
-                    "Cannot enable elfhack with lld."
-                    " Use --enable-linker=bfd, --enable-linker=gold, or --disable-elf-hack"
+                    "Cannot enable relrhack without linker support for -z pack-relative-relocs"
                 )
-            return True
+        if may_enable_legacy_elfhack:
+            if linker and linker.KIND in ("lld", "mold"):
+                if may_enable_legacy_elfhack.origin != "default":
+                    die(
+                        f"Cannot enable elfhack with {linker.KIND}."
+                        " Use --enable-linker=bfd, --enable-linker=gold, or --disable-elf-hack"
+                    )
+            else:
+                return "legacy"
 
-    set_config("USE_ELF_HACK", use_elf_hack)
+    set_config(
+        "USE_ELF_HACK", True, when=depends(which_elf_hack)(lambda x: x == "legacy")
+    )
+
+    use_relrhack = depends(which_elf_hack)(lambda x: x == "relr")
+    set_config("RELRHACK", True, when=use_relrhack)
+
+    @depends(c_compiler, linker_ldflags, when=use_relrhack)
+    def relrhack_real_linker(c_compiler, linker_ldflags):
+        ld = "ld"
+        for flag in linker_ldflags:
+            if flag.startswith("-fuse-ld="):
+                ld = "ld." + flag[len("-fuse-ld=") :]
+        ld = check_cmd_output(
+            c_compiler.compiler, f"--print-prog-name={ld}", *c_compiler.flags
+        )
+        return ld.rstrip()
+
+    @depends(relrhack_real_linker, when=use_relrhack)
+    def relrhack_linker(ld):
+        return os.path.basename(ld)
+
+    set_config("RELRHACK_LINKER", relrhack_linker)
+
+    std_filesystem = host_cxx_compiler.try_run(
+        header="#include <filesystem>",
+        body='auto foo = std::filesystem::absolute("");',
+        flags=host_linker_ldflags,
+        when=use_relrhack,
+        onerror=lambda: None,
+    )
+
+    stdcxxfs = host_cxx_compiler.try_run(
+        header="#include <filesystem>",
+        body='auto foo = std::filesystem::absolute("");',
+        flags=depends(host_linker_ldflags)(
+            lambda flags: (flags or []) + ["-lstdc++fs"]
+        ),
+        check_msg="whether std::filesystem requires -lstdc++fs",
+        when=use_relrhack & depends(std_filesystem)(lambda x: not x),
+        onerror=lambda: None,
+    )
+
+    set_config("RELRHACK_LIBS", ["stdc++fs"], when=stdcxxfs)
+
+    @depends(build_environment, relrhack_real_linker, when=use_relrhack)
+    def relrhack_ldflags(build_env, ld):
+        flags = [
+            "-B",
+            os.path.join(build_env.topobjdir, "build", "unix", "elfhack"),
+        ]
+        if os.path.basename(ld) != ld:
+            flags.append(f"-Wl,--real-linker,{ld}")
+        return flags
+
+    set_config("RELRHACK_LDFLAGS", relrhack_ldflags)
 
 
 @depends(build_environment)
@@ -2494,7 +2575,7 @@ def wasm_sandboxing_libraries():
 @depends(dependable(wasm_sandboxing_libraries), build_project)
 def default_wasm_sandboxing_libraries(libraries, build_project):
     if build_project != "tools/rusttests":
-        non_default_libs = {"soundtouch"}
+        non_default_libs = {}
 
         return tuple(l for l in libraries if l not in non_default_libs)
 
@@ -2662,6 +2743,35 @@ def wasm_sandboxing_config_defines():
 
 
 wasm_sandboxing_config_defines()
+
+
+with only_when(compile_environment & wasm_sandboxing.hunspell):
+    clock_in_wasi_sysroot = wasm_cc.try_run(
+        header="#include <time.h>",
+        body="clock();",
+        check_msg="for clock() in wasi sysroot",
+        flags=depends(wasi_sysroot_flags)(
+            lambda sysroot_flags: ["-Werror"] + sysroot_flags
+        ),
+    )
+
+    wasi_emulated_clock = wasm_cc.try_run(
+        header="#include <time.h>",
+        body="clock();",
+        check_msg="for emulated clock() in wasi sysroot",
+        flags=depends(wasi_sysroot_flags)(
+            lambda sysroot_flags: [
+                "-Werror",
+                "-D_WASI_EMULATED_PROCESS_CLOCKS",
+                "-lwasi-emulated-process-clocks",
+            ]
+            + sysroot_flags
+        ),
+        when=depends(clock_in_wasi_sysroot)(lambda x: not x),
+        onerror=lambda: die("Can't find clock() in wasi sysroot."),
+    )
+
+    set_config("MOZ_WASI_EMULATED_CLOCK", True, when=wasi_emulated_clock)
 
 
 # new Notification Store implementation
@@ -3062,7 +3172,6 @@ with only_when(toolkit_gtk):
 
     with only_when("--enable-dbus"):
         pkg_check_modules("MOZ_DBUS", "dbus-1 >= 0.60")
-        pkg_check_modules("MOZ_DBUS_GLIB", "dbus-glib-1 >= 0.60")
 
         set_config("MOZ_ENABLE_DBUS", True)
         set_define("MOZ_ENABLE_DBUS", True)

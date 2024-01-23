@@ -15,19 +15,16 @@
 #include "mozilla/TextUtils.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdlib>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
-#include <stddef.h>
 #include <stdint.h>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include "jsnum.h"
-#include "jstypes.h"
 #include "NamespaceImports.h"
 
 #include "builtin/temporal/Duration.h"
@@ -35,8 +32,8 @@
 #include "builtin/temporal/PlainTime.h"
 #include "builtin/temporal/TemporalTypes.h"
 #include "builtin/temporal/TemporalUnit.h"
-#include "builtin/temporal/TimeZone.h"
 #include "gc/Barrier.h"
+#include "gc/Tracer.h"
 #include "js/ErrorReport.h"
 #include "js/friend/ErrorMessages.h"
 #include "js/GCAPI.h"
@@ -107,7 +104,18 @@ struct TimeSpec final {
   PlainTime time;
 };
 
-struct TimeZoneOffset final {
+struct TimeZoneUTCOffset final {
+  // ±1 for time zones with an offset, otherwise 0.
+  int32_t sign = 0;
+
+  // An integer in the range [0, 23].
+  int32_t hour = 0;
+
+  // An integer in the range [0, 59].
+  int32_t minute = 0;
+};
+
+struct DateTimeUTCOffset final {
   // ±1 for time zones with an offset, otherwise 0.
   int32_t sign = 0;
 
@@ -122,12 +130,21 @@ struct TimeZoneOffset final {
 
   // An integer in the range [0, 999'999].
   int32_t fractionalPart = 0;
+
+  // Time zone with sub-minute precision.
+  bool subMinutePrecision = false;
+
+  // Convert to a TimeZoneUTCOffset.
+  TimeZoneUTCOffset toTimeZoneUTCOffset() const {
+    MOZ_ASSERT(!subMinutePrecision, "unexpected sub-minute precision");
+    return {sign, hour, minute};
+  }
 };
 
 /**
- * ParseTimeZoneOffsetString ( offsetString )
+ * ParseDateTimeUTCOffset ( offsetString )
  */
-static int64_t ParseTimeZoneOffsetString(const TimeZoneOffset& offset) {
+static int64_t ParseDateTimeUTCOffset(const DateTimeUTCOffset& offset) {
   constexpr int64_t nanoPerSec = 1'000'000'000;
 
   MOZ_ASSERT(offset.sign == -1 || offset.sign == +1);
@@ -147,12 +164,26 @@ static int64_t ParseTimeZoneOffsetString(const TimeZoneOffset& offset) {
   return result;
 }
 
+static int32_t ParseTimeZoneOffset(const TimeZoneUTCOffset& offset) {
+  MOZ_ASSERT(offset.sign == -1 || offset.sign == +1);
+  MOZ_ASSERT(0 <= offset.hour && offset.hour < 24);
+  MOZ_ASSERT(0 <= offset.minute && offset.minute < 60);
+
+  // sign × (hour × 60 + minute).
+  int32_t result = offset.sign * (offset.hour * 60 + offset.minute);
+
+  MOZ_ASSERT(std::abs(result) < UnitsPerDay(TemporalUnit::Minute),
+             "time zone offset is less than 24:00 hours");
+
+  return result;
+}
+
 /**
  * Struct to hold time zone annotations.
  */
 struct TimeZoneAnnotation final {
   // Time zone offset.
-  TimeZoneOffset offset;
+  TimeZoneUTCOffset offset;
 
   // Time zone name.
   TimeZoneName name;
@@ -172,11 +203,8 @@ struct TimeZoneAnnotation final {
  * Struct to hold any time zone parts of a parsed string.
  */
 struct TimeZoneString final {
-  // Time zone offset.
-  TimeZoneOffset offset;
-
-  // Time zone name.
-  TimeZoneName name;
+  // Date-time UTC offset.
+  DateTimeUTCOffset offset;
 
   // Time zone annotation;
   TimeZoneAnnotation annotation;
@@ -184,15 +212,21 @@ struct TimeZoneString final {
   // UTC time zone.
   bool utc = false;
 
-  static auto from(TimeZoneOffset offset) {
+  static auto from(DateTimeUTCOffset offset) {
     TimeZoneString timeZone{};
     timeZone.offset = offset;
     return timeZone;
   }
 
+  static auto from(TimeZoneUTCOffset offset) {
+    TimeZoneString timeZone{};
+    timeZone.annotation.offset = offset;
+    return timeZone;
+  }
+
   static auto from(TimeZoneName name) {
     TimeZoneString timeZone{};
-    timeZone.name = name;
+    timeZone.annotation.name = name;
     return timeZone;
   }
 
@@ -206,11 +240,6 @@ struct TimeZoneString final {
    * Returns true iff the time zone has an offset part, e.g. "+01:00".
    */
   bool hasOffset() const { return offset.sign != 0; }
-
-  /**
-   * Returns true iff the time zone has an IANA name, e.g. "Asia/Tokyo".
-   */
-  bool hasName() const { return name.present(); }
 
   /**
    * Returns true iff the time zone has an annotation.
@@ -301,6 +330,26 @@ static bool ParseISODateTime(JSContext* cx, const ZonedDateTimeString& parsed,
   // Steps 19-25. (Handled in caller.)
 
   *result = dateTime;
+  return true;
+}
+
+static bool ParseTimeZoneAnnotation(JSContext* cx,
+                                    const TimeZoneAnnotation& annotation,
+                                    JSLinearString* linear,
+                                    MutableHandle<ParsedTimeZone> result) {
+  MOZ_ASSERT(annotation.hasOffset() || annotation.hasName());
+
+  if (annotation.hasOffset()) {
+    int32_t offset = ParseTimeZoneOffset(annotation.offset);
+    result.set(ParsedTimeZone::fromOffset(offset));
+    return true;
+  }
+
+  auto* str = ToString(cx, linear, annotation.name);
+  if (!str) {
+    return false;
+  }
+  result.set(ParsedTimeZone::fromName(str));
   return true;
 }
 
@@ -611,6 +660,25 @@ class TemporalParser final {
     return true;
   }
 
+  /**
+   * Consumes the current character if it matches the predicate and then returns
+   * `true`. Otherwise returns `false`.
+   */
+  template <typename Predicate>
+  bool matches(Predicate&& predicate) {
+    if (!reader_.hasMore(1)) {
+      return false;
+    }
+
+    CharT ch = reader_.current();
+    if (!predicate(ch)) {
+      return false;
+    }
+
+    reader_.advance(1);
+    return true;
+  }
+
   // Sign :
   //   ASCIISign
   //   U+2212
@@ -688,41 +756,22 @@ class TemporalParser final {
   //   Alpha
   //   .
   //   _
-  bool hasTzLeadingChar() const {
-    if (!reader_.hasMore(1)) {
-      return false;
-    }
-
-    CharT ch = reader_.current();
-    return mozilla::IsAsciiAlpha(ch) || ch == '.' || ch == '_';
-  }
-
   bool tzLeadingChar() {
-    if (!hasTzLeadingChar()) {
-      return false;
-    }
-    reader_.advance(1);
-    return true;
+    return matches([](auto ch) {
+      return mozilla::IsAsciiAlpha(ch) || ch == '.' || ch == '_';
+    });
   }
 
   // TZChar :
   //   TZLeadingChar
+  //   DecimalDigit
   //   -
-  //   [+Legacy] +
-  //   [+Legacy] DecimalDigit
-  bool tzCharLegacy() {
-    if (!reader_.hasMore(1)) {
-      return false;
-    }
-
-    CharT ch = reader_.current();
-    if (!(mozilla::IsAsciiAlphanumeric(ch) || ch == '.' || ch == '-' ||
-          ch == '_' || ch == '+')) {
-      return false;
-    }
-
-    reader_.advance(1);
-    return true;
+  //   +
+  bool tzChar() {
+    return matches([](auto ch) {
+      return mozilla::IsAsciiAlphanumeric(ch) || ch == '.' || ch == '_' ||
+             ch == '-' || ch == '+';
+    });
   }
 
   // AnnotationCriticalFlag :
@@ -733,17 +782,9 @@ class TemporalParser final {
   //   LowercaseAlpha
   //   _
   bool aKeyLeadingChar() {
-    if (!reader_.hasMore(1)) {
-      return false;
-    }
-
-    CharT ch = reader_.current();
-    if (!(mozilla::IsAsciiLowercaseAlpha(ch) || ch == '_')) {
-      return false;
-    }
-
-    reader_.advance(1);
-    return true;
+    return matches([](auto ch) {
+      return mozilla::IsAsciiLowercaseAlpha(ch) || ch == '_';
+    });
   }
 
   // AKeyChar :
@@ -751,18 +792,10 @@ class TemporalParser final {
   //   DecimalDigit
   //   -
   bool aKeyChar() {
-    if (!reader_.hasMore(1)) {
-      return false;
-    }
-
-    CharT ch = reader_.current();
-    if (!(mozilla::IsAsciiLowercaseAlpha(ch) || mozilla::IsAsciiDigit(ch) ||
-          ch == '-' || ch == '_')) {
-      return false;
-    }
-
-    reader_.advance(1);
-    return true;
+    return matches([](auto ch) {
+      return mozilla::IsAsciiLowercaseAlpha(ch) || mozilla::IsAsciiDigit(ch) ||
+             ch == '-' || ch == '_';
+    });
   }
 
   // AnnotationValueComponent :
@@ -824,23 +857,21 @@ class TemporalParser final {
     return true;
   }
 
-  // Return true when |TimeZoneUTCOffset| can start at the current position.
-  bool hasTimeZoneUTCOffsetStart() {
+  // Return true when |DateTimeUTCOffset| can start at the current position.
+  bool hasDateTimeUTCOffsetStart() {
     return hasOneOf({'Z', 'z', '+', '-', 0x2212});
   }
 
-  mozilla::Result<TimeZoneString, ParserError> timeZoneUTCOffset();
+  mozilla::Result<TimeZoneString, ParserError> dateTimeUTCOffset();
 
-  mozilla::Result<TimeZoneOffset, ParserError> utcOffset();
+  mozilla::Result<DateTimeUTCOffset, ParserError> utcOffsetSubMinutePrecision();
 
-  mozilla::Result<TimeZoneOffset, ParserError> timeZoneUTCOffsetName() {
-    // NOTE: Equivalent to the UTCOffset parser production.
-    return utcOffset();
-  }
+  mozilla::Result<TimeZoneUTCOffset, ParserError> timeZoneUTCOffsetName();
+
+  mozilla::Result<TimeZoneAnnotation, ParserError> timeZoneIdentifier();
 
   mozilla::Result<TimeZoneAnnotation, ParserError> timeZoneAnnotation();
 
-  bool timeZoneIANANameComponent();
   mozilla::Result<TimeZoneName, ParserError> timeZoneIANAName();
 
   mozilla::Result<AnnotationKey, ParserError> annotationKey();
@@ -868,7 +899,11 @@ class TemporalParser final {
   mozilla::Result<ZonedDateTimeString, ParserError>
   parseTemporalTimeZoneString();
 
-  mozilla::Result<TimeZoneOffset, ParserError> parseTimeZoneOffsetString();
+  mozilla::Result<TimeZoneAnnotation, ParserError> parseTimeZoneIdentifier();
+
+  mozilla::Result<TimeZoneUTCOffset, ParserError> parseTimeZoneOffsetString();
+
+  mozilla::Result<DateTimeUTCOffset, ParserError> parseDateTimeUTCOffset();
 
   mozilla::Result<TemporalDurationString, ParserError>
   parseTemporalDurationString(JSContext* cx);
@@ -896,7 +931,7 @@ mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::dateTime() {
   // DateTime :
   //   Date
-  //   Date DateTimeSeparator TimeSpec TimeZoneUTCOffset?
+  //   Date DateTimeSeparator TimeSpec DateTimeUTCOffset?
   ZonedDateTimeString result = {};
 
   auto dt = date();
@@ -912,8 +947,8 @@ TemporalParser<CharT>::dateTime() {
     }
     result.time = time.unwrap();
 
-    if (hasTimeZoneUTCOffsetStart()) {
-      auto tz = timeZoneUTCOffset();
+    if (hasDateTimeUTCOffsetStart()) {
+      auto tz = dateTimeUTCOffset();
       if (tz.isErr()) {
         return tz.propagateErr();
       }
@@ -1069,17 +1104,17 @@ mozilla::Result<PlainTime, ParserError> TemporalParser<CharT>::timeSpec() {
 
 template <typename CharT>
 mozilla::Result<TimeZoneString, ParserError>
-TemporalParser<CharT>::timeZoneUTCOffset() {
-  // TimeZoneUTCOffset :
-  //   UTCOffset
+TemporalParser<CharT>::dateTimeUTCOffset() {
+  // DateTimeUTCOffset :
   //   UTCDesignator
+  //   UTCOffsetSubMinutePrecision
 
   if (utcDesignator()) {
     return TimeZoneString::UTC();
   }
 
   if (hasSign()) {
-    auto offset = utcOffset();
+    auto offset = utcOffsetSubMinutePrecision();
     if (offset.isErr()) {
       return offset.propagateErr();
     }
@@ -1090,61 +1125,31 @@ TemporalParser<CharT>::timeZoneUTCOffset() {
 }
 
 template <typename CharT>
-mozilla::Result<TimeZoneOffset, ParserError>
-TemporalParser<CharT>::utcOffset() {
-  // clang-format off
+mozilla::Result<TimeZoneUTCOffset, ParserError>
+TemporalParser<CharT>::timeZoneUTCOffsetName() {
+  // TimeZoneUTCOffsetName :
+  //   UTCOffsetMinutePrecision
   //
-  // UTCOffset :::
-  //   TemporalSign Hour
-  //   TemporalSign Hour HourSubcomponents[+Extended]
-  //   TemporalSign Hour HourSubcomponents[~Extended]
-  //
-  // TemporalSign :::
-  //   ASCIISign
-  //   <MINUS>
-  //
-  // ASCIISign ::: one of
-  //   + -
-  //
-  // Hour :::
-  //   0 DecimalDigit
-  //   1 DecimalDigit
-  //   20
-  //   21
-  //   22
-  //   23
-  //
-  // HourSubcomponents[Extended] :::
-  //   TimeSeparator[?Extended] MinuteSecond
-  //   TimeSeparator[?Extended] MinuteSecond TimeSeparator[?Extended] MinuteSecond TemporalDecimalFraction?
-  //
-  // TimeSeparator[Extended] :::
-  //   [+Extended] :
-  //   [~Extended] [empty]
-  //
-  // MinuteSecond :::
-  //   0 DecimalDigit
-  //   1 DecimalDigit
-  //   2 DecimalDigit
-  //   3 DecimalDigit
-  //   4 DecimalDigit
-  //   5 DecimalDigit
-  //
-  // TemporalDecimalFraction :::
-  //   TemporalDecimalSeparator DecimalDigit{1,9}
-  //
-  // TemporalDecimalSeparator ::: one of
-  //   . ,
-  //
-  // clang-format on
+  // UTCOffsetMinutePrecision :
+  //   Sign Hour[+Padded]
+  //   Sign Hour[+Padded] TimeSeparator[+Extended] MinuteSecond
+  //   Sign Hour[+Padded] TimeSeparator[~Extended] MinuteSecond
 
-  TimeZoneOffset result = {};
+  TimeZoneUTCOffset result = {};
 
   if (!hasSign()) {
     return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_TIMEZONE_SIGN);
   }
   result.sign = sign();
 
+  // Hour[Padded] :
+  //   [~Padded] DecimalDigit
+  //   [+Padded] 0 DecimalDigit
+  //   1 DecimalDigit
+  //   20
+  //   21
+  //   22
+  //   23
   if (auto hour = digits(2)) {
     result.hour = hour.value();
     if (!inBounds(result.hour, 0, 23)) {
@@ -1154,29 +1159,119 @@ TemporalParser<CharT>::utcOffset() {
     return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_HOUR);
   }
 
-  // Optional: :
+  // TimeSeparator[Extended] :
+  //   [+Extended] :
+  //   [~Extended] [empty]
   bool needsMinutes = character(':');
 
+  // MinuteSecond :
+  //   0 DecimalDigit
+  //   1 DecimalDigit
+  //   2 DecimalDigit
+  //   3 DecimalDigit
+  //   4 DecimalDigit
+  //   5 DecimalDigit
   if (auto minute = digits(2)) {
     result.minute = minute.value();
     if (!inBounds(result.minute, 0, 59)) {
       return mozilla::Err(JSMSG_TEMPORAL_PARSER_INVALID_MINUTE);
     }
 
-    // Optional: :
+    if (hasCharacter(':')) {
+      return mozilla::Err(JSMSG_TEMPORAL_PARSER_INVALID_SUBMINUTE_TIMEZONE);
+    }
+  } else if (needsMinutes) {
+    return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_MINUTE);
+  }
+
+  return result;
+}
+
+template <typename CharT>
+mozilla::Result<DateTimeUTCOffset, ParserError>
+TemporalParser<CharT>::utcOffsetSubMinutePrecision() {
+  // clang-format off
+  //
+  // UTCOffsetSubMinutePrecision :
+  //   UTCOffsetMinutePrecision
+  //   UTCOffsetWithSubMinuteComponents[+Extended]
+  //   UTCOffsetWithSubMinuteComponents[~Extended]
+  //
+  // UTCOffsetMinutePrecision :
+  //   Sign Hour[+Padded]
+  //   Sign Hour[+Padded] TimeSeparator[+Extended] MinuteSecond
+  //   Sign Hour[+Padded] TimeSeparator[~Extended] MinuteSecond
+  //
+  // UTCOffsetWithSubMinuteComponents[Extended] :
+  //   Sign Hour[+Padded] TimeSeparator[?Extended] MinuteSecond TimeSeparator[?Extended] MinuteSecond Fraction?
+  //
+  // clang-format on
+
+  DateTimeUTCOffset result = {};
+
+  if (!hasSign()) {
+    return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_TIMEZONE_SIGN);
+  }
+  result.sign = sign();
+
+  // Hour[Padded] :
+  //   [~Padded] DecimalDigit
+  //   [+Padded] 0 DecimalDigit
+  //   1 DecimalDigit
+  //   20
+  //   21
+  //   22
+  //   23
+  if (auto hour = digits(2)) {
+    result.hour = hour.value();
+    if (!inBounds(result.hour, 0, 23)) {
+      return mozilla::Err(JSMSG_TEMPORAL_PARSER_INVALID_HOUR);
+    }
+  } else {
+    return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_HOUR);
+  }
+
+  // TimeSeparator[Extended] :
+  //   [+Extended] :
+  //   [~Extended] [empty]
+  bool needsMinutes = character(':');
+
+  // MinuteSecond :
+  //   0 DecimalDigit
+  //   1 DecimalDigit
+  //   2 DecimalDigit
+  //   3 DecimalDigit
+  //   4 DecimalDigit
+  //   5 DecimalDigit
+  if (auto minute = digits(2)) {
+    result.minute = minute.value();
+    if (!inBounds(result.minute, 0, 59)) {
+      return mozilla::Err(JSMSG_TEMPORAL_PARSER_INVALID_MINUTE);
+    }
+
+    // TimeSeparator[Extended] :
+    //   [+Extended] :
+    //   [~Extended] [empty]
     bool needsSeconds = needsMinutes && character(':');
 
+    // MinuteSecond :
+    //   0 DecimalDigit
+    //   1 DecimalDigit
+    //   2 DecimalDigit
+    //   3 DecimalDigit
+    //   4 DecimalDigit
+    //   5 DecimalDigit
     if (auto second = digits(2)) {
       result.second = second.value();
       if (!inBounds(result.second, 0, 59)) {
         return mozilla::Err(JSMSG_TEMPORAL_PARSER_INVALID_SECOND);
       }
 
-      // TemporalDecimalFraction :::
-      //   TemporalDecimalSeparator DecimalDigit{1,9}
       if (auto fractionalPart = fraction()) {
         result.fractionalPart = fractionalPart.value();
       }
+
+      result.subMinutePrecision = true;
     } else if (needsSeconds) {
       return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_SECOND);
     }
@@ -1189,21 +1284,10 @@ TemporalParser<CharT>::utcOffset() {
 
 template <typename CharT>
 mozilla::Result<TimeZoneAnnotation, ParserError>
-TemporalParser<CharT>::timeZoneAnnotation() {
-  // TimeZoneAnnotation :
-  //   [ AnnotationCriticalFlag? TimeZoneIdentifier ]
-  //
+TemporalParser<CharT>::timeZoneIdentifier() {
   // TimeZoneIdentifier :
+  //   TimeZoneUTCOffsetName
   //   TimeZoneIANAName
-  //   TimeZoneUTCOffsetName[+Extended]
-  //   TimeZoneUTCOffsetName[~Extended]
-
-  if (!character('[')) {
-    return mozilla::Err(JSMSG_TEMPORAL_PARSER_BRACKET_BEFORE_TIMEZONE);
-  }
-
-  // Skip over the optional critical flag.
-  annotationCriticalFlag();
 
   TimeZoneAnnotation result = {};
   if (hasSign()) {
@@ -1220,6 +1304,27 @@ TemporalParser<CharT>::timeZoneAnnotation() {
     result.name = name.unwrap();
   }
 
+  return result;
+}
+
+template <typename CharT>
+mozilla::Result<TimeZoneAnnotation, ParserError>
+TemporalParser<CharT>::timeZoneAnnotation() {
+  // TimeZoneAnnotation :
+  //   [ AnnotationCriticalFlag? TimeZoneIdentifier ]
+
+  if (!character('[')) {
+    return mozilla::Err(JSMSG_TEMPORAL_PARSER_BRACKET_BEFORE_TIMEZONE);
+  }
+
+  // Skip over the optional critical flag.
+  annotationCriticalFlag();
+
+  auto result = timeZoneIdentifier();
+  if (result.isErr()) {
+    return result.propagateErr();
+  }
+
   if (!character(']')) {
     return mozilla::Err(JSMSG_TEMPORAL_PARSER_BRACKET_AFTER_TIMEZONE);
   }
@@ -1231,54 +1336,26 @@ template <typename CharT>
 mozilla::Result<TimeZoneName, ParserError>
 TemporalParser<CharT>::timeZoneIANAName() {
   // TimeZoneIANAName :
-  //   TimeZoneIANANameTail[~Legacy]
-  //   TimeZoneIANANameTail[+Legacy] but only if IsLegacyIANATimeZoneName of
-  //                                 TimeZoneIANANameTail is true
+  //   TimeZoneIANANameComponent
+  //   TimeZoneIANAName / TimeZoneIANANameComponent
   //
-  // TimeZoneIANANameTail[Legacy] :
-  //   TimeZoneIANANameComponent[?Legacy]
-  //   TimeZoneIANANameComponent[?Legacy] / TimeZoneIANANameTail[?Legacy]
+  // TimeZoneIANANameComponent :
+  //   TZLeadingChar
+  //   TimeZoneIANANameComponent TZChar
 
   size_t start = reader_.index();
 
-  // NOTE: Time zone names are parsed with legacy mode always enabled. If the
-  // name contains legacy name components, but doesn't pass the
-  // |IsLegacyIANATimeZoneName| test, it'll be rejected during the time zone
-  // name validation step which happens after parsing.
-
   do {
-    if (!timeZoneIANANameComponent()) {
+    if (!tzLeadingChar()) {
       return mozilla::Err(JSMSG_TEMPORAL_PARSER_MISSING_TIMEZONE_NAME);
+    }
+
+    // Optionally followed by a sequence of |TZChar|.
+    while (tzChar()) {
     }
   } while (character('/'));
 
   return TimeZoneName{start, reader_.index() - start};
-}
-
-template <typename CharT>
-bool TemporalParser<CharT>::timeZoneIANANameComponent() {
-  // TimeZoneIANANameComponent[Legacy] :
-  //   TZLeadingChar TZChar[?Legacy]{0, 13} but not one of . or ..
-
-  size_t index = reader_.index();
-
-  // Parse TZLeadingChar followed by up to thirteen TZChar[Legacy] characters.
-  if (!tzLeadingChar()) {
-    return false;
-  }
-  for (size_t i = 0; i < 13 && tzCharLegacy(); i++) {
-  }
-
-  // Reject if the name component matches either "." or "..".
-  size_t charactersRead = reader_.index() - index;
-  if (charactersRead == 1 && reader_.at(index) == '.') {
-    return false;
-  }
-  if (charactersRead == 2 && reader_.at(index) == '.' &&
-      reader_.at(index + 1) == '.') {
-    return false;
-  }
-  return true;
 }
 
 template <typename CharT>
@@ -1309,7 +1386,7 @@ TemporalParser<CharT>::parseTemporalInstantString() {
   // clang-format off
   //
   // TemporalInstantString :
-  //   Date DateTimeSeparator TimeSpec TimeZoneUTCOffset TimeZoneAnnotation? Annotations?
+  //   Date DateTimeSeparator TimeSpec DateTimeUTCOffset TimeZoneAnnotation? Annotations?
   //
   // clang-format on
 
@@ -1329,7 +1406,7 @@ TemporalParser<CharT>::parseTemporalInstantString() {
   }
   result.time = time.unwrap();
 
-  auto tz = timeZoneUTCOffset();
+  auto tz = dateTimeUTCOffset();
   if (tz.isErr()) {
     return tz.propagateErr();
   }
@@ -1402,15 +1479,13 @@ bool js::temporal::ParseTemporalInstantString(JSContext* cx,
     return false;
   }
 
-  // Steps 3-5.
+  // Steps 3-4.
   if (parsed.timeZone.hasOffset()) {
-    *offset = ParseTimeZoneOffsetString(parsed.timeZone.offset);
+    *offset = ParseDateTimeUTCOffset(parsed.timeZone.offset);
   } else {
     MOZ_ASSERT(parsed.timeZone.isUTC());
     *offset = 0;
   }
-
-  // Step 6.
   return true;
 }
 
@@ -1418,31 +1493,29 @@ template <typename CharT>
 mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::parseTemporalTimeZoneString() {
   // TimeZoneIdentifier :
+  //   TimeZoneUTCOffsetName
   //   TimeZoneIANAName
-  //   TimeZoneUTCOffsetName[+Extended]
-  //   TimeZoneUTCOffsetName[~Extended]
 
-  if (hasTzLeadingChar()) {
-    if (auto name = timeZoneIANAName(); name.isOk() && reader_.atEnd()) {
-      ZonedDateTimeString result = {};
-      result.timeZone = TimeZoneString::from(name.unwrap());
-      return result;
-    }
-  } else {
+  if (hasSign()) {
     if (auto offset = timeZoneUTCOffsetName();
         offset.isOk() && reader_.atEnd()) {
       ZonedDateTimeString result = {};
       result.timeZone = TimeZoneString::from(offset.unwrap());
       return result;
     }
+  } else {
+    if (auto name = timeZoneIANAName(); name.isOk() && reader_.atEnd()) {
+      ZonedDateTimeString result = {};
+      result.timeZone = TimeZoneString::from(name.unwrap());
+      return result;
+    }
   }
 
-  // Try all six parse goals from ParseISODateTime in order.
+  // Try all five parse goals from ParseISODateTime in order.
   //
   // TemporalDateTimeString
   // TemporalInstantString
   // TemporalTimeString
-  // TemporalZonedDateTimeString
   // TemporalMonthDayString
   // TemporalYearMonthString
 
@@ -1470,13 +1543,6 @@ TemporalParser<CharT>::parseTemporalTimeZoneString() {
   // Restart parsing from the start of the string.
   reader_.reset();
 
-  if (auto dt = parseTemporalZonedDateTimeString(); dt.isOk()) {
-    return dt.unwrap();
-  }
-
-  // Restart parsing from the start of the string.
-  reader_.reset();
-
   if (auto dt = parseTemporalMonthDayString(); dt.isOk()) {
     return dt.unwrap();
   }
@@ -1492,7 +1558,7 @@ TemporalParser<CharT>::parseTemporalTimeZoneString() {
 }
 
 /**
- * ParseTemporalTimeZoneString ( isoString )
+ * ParseTemporalTimeZoneString ( timeZoneString )
  */
 template <typename CharT>
 static auto ParseTemporalTimeZoneString(mozilla::Span<const CharT> str) {
@@ -1501,7 +1567,7 @@ static auto ParseTemporalTimeZoneString(mozilla::Span<const CharT> str) {
 }
 
 /**
- * ParseTemporalTimeZoneString ( isoString )
+ * ParseTemporalTimeZoneString ( timeZoneString )
  */
 static auto ParseTemporalTimeZoneString(Handle<JSLinearString*> str) {
   JS::AutoCheckCannotGC nogc;
@@ -1512,11 +1578,11 @@ static auto ParseTemporalTimeZoneString(Handle<JSLinearString*> str) {
 }
 
 /**
- * ParseTemporalTimeZoneString ( isoString )
+ * ParseTemporalTimeZoneString ( timeZoneString )
  */
 bool js::temporal::ParseTemporalTimeZoneString(
-    JSContext* cx, Handle<JSString*> str, MutableHandle<JSString*> timeZoneName,
-    int64_t* offsetNanoseconds) {
+    JSContext* cx, Handle<JSString*> str,
+    MutableHandle<ParsedTimeZone> result) {
   Rooted<JSLinearString*> linear(cx, str->ensureLinear(cx));
   if (!linear) {
     return false;
@@ -1538,32 +1604,32 @@ bool js::temporal::ParseTemporalTimeZoneString(
     return false;
   }
 
-  if (timeZone.annotation.hasOffset()) {
-    // Case 1: 19700101Z[+02:00]
-    // Case 2: 19700101+00:00[+02:00]
-    // Case 3: 19700101[+02:00]
+  if (timeZone.hasAnnotation()) {
+    // Case 1: 19700101T00:00Z[+02:00]
+    // Case 2: 19700101T00:00+00:00[+02:00]
+    // Case 3: 19700101T00:00[+02:00]
+    // Case 4: 19700101T00:00Z[Europe/Berlin]
+    // Case 5: 19700101T00:00+00:00[Europe/Berlin]
+    // Case 6: 19700101T00:00[Europe/Berlin]
 
-    *offsetNanoseconds = ParseTimeZoneOffsetString(timeZone.annotation.offset);
-  } else if (timeZone.annotation.hasName()) {
-    MOZ_ASSERT(!timeZone.hasName());
-
-    // Case 1: 19700101Z[Europe/Berlin]
-    // Case 2: 19700101+00:00[Europe/Berlin]
-    // Case 3: 19700101[Europe/Berlin]
-
-    timeZoneName.set(ToString(cx, linear, timeZone.annotation.name));
-    if (!timeZoneName) {
+    if (!ParseTimeZoneAnnotation(cx, timeZone.annotation, linear, result)) {
       return false;
     }
   } else if (timeZone.isUTC()) {
-    timeZoneName.set(cx->names().UTC);
+    result.set(ParsedTimeZone::fromName(cx->names().UTC));
   } else if (timeZone.hasOffset()) {
-    *offsetNanoseconds = ParseTimeZoneOffsetString(timeZone.offset);
-  } else if (timeZone.hasName()) {
-    timeZoneName.set(ToString(cx, linear, timeZone.name));
-    if (!timeZoneName) {
+    // ToTemporalTimeZoneSlotValue, step 7.
+    //
+    // Error reporting for sub-minute precision moved here.
+    if (timeZone.offset.subMinutePrecision) {
+      JS_ReportErrorNumberASCII(
+          cx, GetErrorMessage, nullptr,
+          JSMSG_TEMPORAL_PARSER_INVALID_SUBMINUTE_TIMEZONE);
       return false;
     }
+
+    int32_t offset = ParseTimeZoneOffset(timeZone.offset.toTimeZoneUTCOffset());
+    result.set(ParsedTimeZone::fromOffset(offset));
   } else {
     // Step 5.
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
@@ -1576,9 +1642,66 @@ bool js::temporal::ParseTemporalTimeZoneString(
 }
 
 template <typename CharT>
-mozilla::Result<TimeZoneOffset, ParserError>
+mozilla::Result<TimeZoneAnnotation, ParserError>
+TemporalParser<CharT>::parseTimeZoneIdentifier() {
+  auto result = timeZoneIdentifier();
+  if (result.isErr()) {
+    return result.propagateErr();
+  }
+  if (!reader_.atEnd()) {
+    return mozilla::Err(JSMSG_TEMPORAL_PARSER_GARBAGE_AFTER_INPUT);
+  }
+  return result;
+}
+
+/**
+ * ParseTimeZoneIdentifier ( identifier )
+ */
+template <typename CharT>
+static auto ParseTimeZoneIdentifier(mozilla::Span<const CharT> str) {
+  TemporalParser<CharT> parser(str);
+  return parser.parseTimeZoneIdentifier();
+}
+
+/**
+ * ParseTimeZoneIdentifier ( identifier )
+ */
+static auto ParseTimeZoneIdentifier(Handle<JSLinearString*> str) {
+  JS::AutoCheckCannotGC nogc;
+  if (str->hasLatin1Chars()) {
+    return ParseTimeZoneIdentifier<Latin1Char>(str->latin1Range(nogc));
+  }
+  return ParseTimeZoneIdentifier<char16_t>(str->twoByteRange(nogc));
+}
+
+/**
+ * ParseTimeZoneIdentifier ( identifier )
+ */
+bool js::temporal::ParseTimeZoneIdentifier(
+    JSContext* cx, Handle<JSString*> str,
+    MutableHandle<ParsedTimeZone> result) {
+  Rooted<JSLinearString*> linear(cx, str->ensureLinear(cx));
+  if (!linear) {
+    return false;
+  }
+
+  // Steps 1-2.
+  auto parseResult = ::ParseTimeZoneIdentifier(linear);
+  if (parseResult.isErr()) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                              parseResult.unwrapErr());
+    return false;
+  }
+  auto timeZone = parseResult.unwrap();
+
+  // Steps 3-4.
+  return ParseTimeZoneAnnotation(cx, timeZone, linear, result);
+}
+
+template <typename CharT>
+mozilla::Result<TimeZoneUTCOffset, ParserError>
 TemporalParser<CharT>::parseTimeZoneOffsetString() {
-  auto offset = utcOffset();
+  auto offset = timeZoneUTCOffsetName();
   if (offset.isErr()) {
     return offset.propagateErr();
   }
@@ -1613,7 +1736,7 @@ static auto ParseTimeZoneOffsetString(Handle<JSLinearString*> str) {
  */
 bool js::temporal::ParseTimeZoneOffsetString(JSContext* cx,
                                              Handle<JSString*> str,
-                                             int64_t* result) {
+                                             int32_t* result) {
   // Step 1. (Not applicable in our implementation.)
 
   Rooted<JSLinearString*> linear(cx, str->ensureLinear(cx));
@@ -1630,7 +1753,63 @@ bool js::temporal::ParseTimeZoneOffsetString(JSContext* cx,
   }
 
   // Steps 3-13.
-  *result = ParseTimeZoneOffsetString(parseResult.unwrap());
+  *result = ParseTimeZoneOffset(parseResult.unwrap());
+  return true;
+}
+
+template <typename CharT>
+mozilla::Result<DateTimeUTCOffset, ParserError>
+TemporalParser<CharT>::parseDateTimeUTCOffset() {
+  auto offset = utcOffsetSubMinutePrecision();
+  if (offset.isErr()) {
+    return offset.propagateErr();
+  }
+  if (!reader_.atEnd()) {
+    return mozilla::Err(JSMSG_TEMPORAL_PARSER_GARBAGE_AFTER_INPUT);
+  }
+  return offset.unwrap();
+}
+
+/**
+ * ParseDateTimeUTCOffset ( offsetString )
+ */
+template <typename CharT>
+static auto ParseDateTimeUTCOffset(mozilla::Span<const CharT> str) {
+  TemporalParser<CharT> parser(str);
+  return parser.parseDateTimeUTCOffset();
+}
+
+/**
+ * ParseDateTimeUTCOffset ( offsetString )
+ */
+static auto ParseDateTimeUTCOffset(Handle<JSLinearString*> str) {
+  JS::AutoCheckCannotGC nogc;
+  if (str->hasLatin1Chars()) {
+    return ParseDateTimeUTCOffset<Latin1Char>(str->latin1Range(nogc));
+  }
+  return ParseDateTimeUTCOffset<char16_t>(str->twoByteRange(nogc));
+}
+
+/**
+ * ParseDateTimeUTCOffset ( offsetString )
+ */
+bool js::temporal::ParseDateTimeUTCOffset(JSContext* cx, Handle<JSString*> str,
+                                          int64_t* result) {
+  Rooted<JSLinearString*> linear(cx, str->ensureLinear(cx));
+  if (!linear) {
+    return false;
+  }
+
+  // Steps 1-2.
+  auto parseResult = ::ParseDateTimeUTCOffset(linear);
+  if (parseResult.isErr()) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                              parseResult.unwrapErr());
+    return false;
+  }
+
+  // Steps 3-21.
+  *result = ParseDateTimeUTCOffset(parseResult.unwrap());
   return true;
 }
 
@@ -2117,7 +2296,7 @@ TemporalParser<CharT>::annotatedTime() {
   // clang-format off
   //
   // AnnotatedTime :
-  //   TimeDesignator TimeSpec TimeZoneUTCOffset? TimeZoneAnnotation? Annotations?
+  //   TimeDesignator TimeSpec DateTimeUTCOffset? TimeZoneAnnotation? Annotations?
   //   TimeSpecWithOptionalOffsetNotAmbiguous TimeZoneAnnotation? Annotations?
   //
   // clang-format on
@@ -2131,8 +2310,8 @@ TemporalParser<CharT>::annotatedTime() {
     }
     result.time = time.unwrap();
 
-    if (hasTimeZoneUTCOffsetStart()) {
-      auto tz = timeZoneUTCOffset();
+    if (hasDateTimeUTCOffsetStart()) {
+      auto tz = dateTimeUTCOffset();
       if (tz.isErr()) {
         return tz.propagateErr();
       }
@@ -2158,9 +2337,12 @@ TemporalParser<CharT>::annotatedTime() {
     return result;
   }
 
+  // clang-format off
+  //
   // TimeSpecWithOptionalOffsetNotAmbiguous :
-  //   TimeSpec TimeZoneUTCOffset? but not one of ValidMonthDay or
-  //   DateSpecYearMonth
+  //   TimeSpec DateTimeUTCOffset? but not one of ValidMonthDay or DateSpecYearMonth
+  //
+  // clang-format on
 
   size_t start = reader_.index();
 
@@ -2172,8 +2354,8 @@ TemporalParser<CharT>::annotatedTime() {
   }
   result.time = time.unwrap();
 
-  if (hasTimeZoneUTCOffsetStart()) {
-    auto tz = timeZoneUTCOffset();
+  if (hasDateTimeUTCOffsetStart()) {
+    auto tz = dateTimeUTCOffset();
     if (tz.isErr()) {
       return tz.propagateErr();
     }
@@ -2225,8 +2407,9 @@ TemporalParser<CharT>::annotatedTime() {
 template <typename CharT>
 mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::annotatedDateTime() {
-  // AnnotatedDateTime :
-  //   DateTime TimeZoneAnnotation? Annotations?
+  // AnnotatedDateTime[Zoned] :
+  //   [~Zoned] DateTime TimeZoneAnnotation? Annotations?
+  //   [+Zoned] DateTime TimeZoneAnnotation Annotations?
 
   auto dt = dateTime();
   if (dt.isErr()) {
@@ -2259,7 +2442,7 @@ TemporalParser<CharT>::annotatedDateTimeTimeRequired() {
   // clang-format off
   //
   // AnnotatedDateTimeTimeRequired :
-  //   Date DateTimeSeparator TimeSpec TimeZoneUTCOffset? TimeZoneAnnotation? Annotations?
+  //   Date DateTimeSeparator TimeSpec DateTimeUTCOffset? TimeZoneAnnotation? Annotations?
   //
   // clang-format on
 
@@ -2281,8 +2464,8 @@ TemporalParser<CharT>::annotatedDateTimeTimeRequired() {
   }
   result.time = time.unwrap();
 
-  if (hasTimeZoneUTCOffsetStart()) {
-    auto tz = timeZoneUTCOffset();
+  if (hasDateTimeUTCOffsetStart()) {
+    auto tz = dateTimeUTCOffset();
     if (tz.isErr()) {
       return tz.propagateErr();
     }
@@ -2551,7 +2734,7 @@ TemporalParser<CharT>::parseTemporalCalendarString() {
     return result;
   }
 
-  // Try all six parse goals from ParseISODateTime in order.
+  // Try all five parse goals from ParseISODateTime in order.
   //
   // TemporalDateTimeString
   // TemporalInstantString
@@ -2575,13 +2758,6 @@ TemporalParser<CharT>::parseTemporalCalendarString() {
   reader_.reset();
 
   if (auto dt = parseTemporalTimeString(); dt.isOk()) {
-    return dt.unwrap();
-  }
-
-  // Restart parsing from the start of the string.
-  reader_.reset();
-
-  if (auto dt = parseTemporalZonedDateTimeString(); dt.isOk()) {
     return dt.unwrap();
   }
 
@@ -2741,7 +2917,7 @@ mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::parseTemporalMonthDayString() {
   // TemporalMonthDayString :
   //   AnnotatedMonthDay
-  //   AnnotatedDateTime
+  //   AnnotatedDateTime[~Zoned]
 
   if (auto monthDay = annotatedMonthDay(); monthDay.isOk() && reader_.atEnd()) {
     auto result = monthDay.unwrap();
@@ -2840,7 +3016,7 @@ mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::parseTemporalYearMonthString() {
   // TemporalYearMonthString :
   //   AnnotatedYearMonth
-  //   AnnotatedDateTime
+  //   AnnotatedDateTime[~Zoned]
 
   if (auto yearMonth = annotatedYearMonth();
       yearMonth.isOk() && reader_.atEnd()) {
@@ -2936,8 +3112,8 @@ bool js::temporal::ParseTemporalYearMonthString(
 template <typename CharT>
 mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::parseTemporalDateTimeString() {
-  // TemporalDateTimeString :
-  //   AnnotatedDateTime
+  // TemporalDateTimeString[Zoned] :
+  //   AnnotatedDateTime[?Zoned]
 
   auto dateTime = annotatedDateTime();
   if (dateTime.isErr()) {
@@ -3031,8 +3207,14 @@ bool js::temporal::ParseTemporalDateString(JSContext* cx, Handle<JSString*> str,
 template <typename CharT>
 mozilla::Result<ZonedDateTimeString, ParserError>
 TemporalParser<CharT>::parseTemporalZonedDateTimeString() {
-  // TemporalZonedDateTimeString :
-  //   DateTime TimeZoneAnnotation Annotations?
+  // Parse goal: TemporalDateTimeString[+Zoned]
+  //
+  // TemporalDateTimeString[Zoned] :
+  //   AnnotatedDateTime[?Zoned]
+  //
+  // AnnotatedDateTime[Zoned] :
+  //   [~Zoned] DateTime TimeZoneAnnotation? Annotations?
+  //   [+Zoned] DateTime TimeZoneAnnotation Annotations?
 
   auto dt = dateTime();
   if (dt.isErr()) {
@@ -3087,7 +3269,8 @@ static auto ParseTemporalZonedDateTimeString(Handle<JSLinearString*> str) {
 bool js::temporal::ParseTemporalZonedDateTimeString(
     JSContext* cx, Handle<JSString*> str, PlainDateTime* dateTime, bool* isUTC,
     bool* hasOffset, int64_t* timeZoneOffset,
-    MutableHandle<JSString*> timeZoneName, MutableHandle<JSString*> calendar) {
+    MutableHandle<ParsedTimeZone> timeZoneName,
+    MutableHandle<JSString*> calendar) {
   Rooted<JSLinearString*> linear(cx, str->ensureLinear(cx));
   if (!linear) {
     return false;
@@ -3110,35 +3293,27 @@ bool js::temporal::ParseTemporalZonedDateTimeString(
   // Step 2. (ParseISODateTime, steps 19-21.)
   {
     MOZ_ASSERT(parsed.timeZone.hasAnnotation());
-    MOZ_ASSERT(!parsed.timeZone.hasName());
 
-    const auto& annotation = parsed.timeZone.annotation;
-
-    // Case 1: 19700101Z[+02:00]
+    // Case 1: 19700101T00:00Z[+02:00]
     // { [[Z]]: true, [[OffsetString]]: undefined, [[Name]]: "+02:00" }
     //
-    // Case 2: 19700101+00:00[+02:00]
-    // { [[Z]]: false, [[OffsetString]]: "+00:00", [[Name]]: "+02:00" }
+    // Case 2: 19700101T00:00+02:00[+02:00]
+    // { [[Z]]: false, [[OffsetString]]: "+02:00", [[Name]]: "+02:00" }
     //
     // Case 3: 19700101[+02:00]
     // { [[Z]]: false, [[OffsetString]]: undefined, [[Name]]: "+02:00" }
     //
-    // Case 4: 19700101Z[Europe/Berlin]
+    // Case 4: 19700101T00:00Z[Europe/Berlin]
     // { [[Z]]: true, [[OffsetString]]: undefined, [[Name]]: "Europe/Berlin" }
     //
-    // Case 5: 19700101+00:00[Europe/Berlin]
-    // { [[Z]]: false, [[OffsetString]]: "+00:00", [[Name]]: "Europe/Berlin" }
+    // Case 5: 19700101T00:00+01:00[Europe/Berlin]
+    // { [[Z]]: false, [[OffsetString]]: "+01:00", [[Name]]: "Europe/Berlin" }
     //
     // Case 6: 19700101[Europe/Berlin]
     // { [[Z]]: false, [[OffsetString]]: undefined, [[Name]]: "Europe/Berlin" }
 
-    if (annotation.hasOffset()) {
-      int64_t offset = ParseTimeZoneOffsetString(annotation.offset);
-      timeZoneName.set(FormatTimeZoneOffsetString(cx, offset));
-    } else {
-      timeZoneName.set(ToString(cx, linear, annotation.name));
-    }
-    if (!timeZoneName) {
+    const auto& annotation = parsed.timeZone.annotation;
+    if (!ParseTimeZoneAnnotation(cx, annotation, linear, timeZoneName)) {
       return false;
     }
 
@@ -3149,7 +3324,7 @@ bool js::temporal::ParseTemporalZonedDateTimeString(
     } else if (parsed.timeZone.hasOffset()) {
       *isUTC = false;
       *hasOffset = true;
-      *timeZoneOffset = ParseTimeZoneOffsetString(parsed.timeZone.offset);
+      *timeZoneOffset = ParseDateTimeUTCOffset(parsed.timeZone.offset);
     } else {
       *isUTC = false;
       *hasOffset = false;
@@ -3195,7 +3370,8 @@ static auto ParseTemporalRelativeToString(Handle<JSLinearString*> str) {
 bool js::temporal::ParseTemporalRelativeToString(
     JSContext* cx, Handle<JSString*> str, PlainDateTime* dateTime, bool* isUTC,
     bool* hasOffset, int64_t* timeZoneOffset,
-    MutableHandle<JSString*> timeZoneName, MutableHandle<JSString*> calendar) {
+    MutableHandle<ParsedTimeZone> timeZoneName,
+    MutableHandle<JSString*> calendar) {
   Rooted<JSLinearString*> linear(cx, str->ensureLinear(cx));
   if (!linear) {
     return false;
@@ -3225,10 +3401,6 @@ bool js::temporal::ParseTemporalRelativeToString(
 
   // Step 4. (ParseISODateTime, steps 19-22.)
   if (parsed.timeZone.hasAnnotation()) {
-    MOZ_ASSERT(!parsed.timeZone.hasName());
-
-    const auto& annotation = parsed.timeZone.annotation;
-
     // Case 1: 19700101Z[+02:00]
     // { [[Z]]: true, [[OffsetString]]: undefined, [[Name]]: "+02:00" }
     //
@@ -3247,13 +3419,8 @@ bool js::temporal::ParseTemporalRelativeToString(
     // Case 6: 19700101[Europe/Berlin]
     // { [[Z]]: false, [[OffsetString]]: undefined, [[Name]]: "Europe/Berlin" }
 
-    if (annotation.hasOffset()) {
-      int64_t offset = ParseTimeZoneOffsetString(annotation.offset);
-      timeZoneName.set(FormatTimeZoneOffsetString(cx, offset));
-    } else {
-      timeZoneName.set(ToString(cx, linear, annotation.name));
-    }
-    if (!timeZoneName) {
+    const auto& annotation = parsed.timeZone.annotation;
+    if (!ParseTimeZoneAnnotation(cx, annotation, linear, timeZoneName)) {
       return false;
     }
 
@@ -3264,7 +3431,7 @@ bool js::temporal::ParseTemporalRelativeToString(
     } else if (parsed.timeZone.hasOffset()) {
       *isUTC = false;
       *hasOffset = true;
-      *timeZoneOffset = ParseTimeZoneOffsetString(parsed.timeZone.offset);
+      *timeZoneOffset = ParseDateTimeUTCOffset(parsed.timeZone.offset);
     } else {
       *isUTC = false;
       *hasOffset = false;
@@ -3277,7 +3444,7 @@ bool js::temporal::ParseTemporalRelativeToString(
     *isUTC = false;
     *hasOffset = false;
     *timeZoneOffset = 0;
-    timeZoneName.set(nullptr);
+    timeZoneName.set(ParsedTimeZone{});
   }
 
   // Step 4. (ParseISODateTime, steps 23-24.)
@@ -3290,4 +3457,8 @@ bool js::temporal::ParseTemporalRelativeToString(
 
   // Step 4. (Return)
   return true;
+}
+
+void js::temporal::ParsedTimeZone::trace(JSTracer* trc) {
+  TraceNullableRoot(trc, &name, "ParsedTimeZone::name");
 }

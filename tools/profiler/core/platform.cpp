@@ -45,6 +45,7 @@
 #include "mozilla/MozPromise.h"
 #include "shared-libraries.h"
 #include "VTuneProfiler.h"
+#include "ETWTools.h"
 
 #include "js/ProfilingFrameIterator.h"
 #include "memory_hooks.h"
@@ -62,11 +63,15 @@
 #include "mozilla/ProfileBufferChunkManagerSingle.h"
 #include "mozilla/ProfileBufferChunkManagerWithLocalLimit.h"
 #include "mozilla/ProfileChunkedBuffer.h"
+#include "mozilla/ProfilerBandwidthCounter.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/Services.h"
 #include "mozilla/StackWalk.h"
+#include "mozilla/Try.h"
 #ifdef XP_WIN
+#  include "mozilla/NativeNt.h"
 #  include "mozilla/StackWalkThread.h"
+#  include "mozilla/WindowsStackWalkInitialization.h"
 #endif
 #include "mozilla/StaticPtr.h"
 #include "mozilla/ThreadLocal.h"
@@ -500,7 +505,8 @@ using JsFrameBuffer = mozilla::profiler::ThreadRegistrationData::JsFrameBuffer;
 class CorePS {
  private:
   CorePS()
-      : mProcessStartTime(TimeStamp::ProcessCreation())
+      : mProcessStartTime(TimeStamp::ProcessCreation()),
+        mMaybeBandwidthCounter(nullptr)
 #ifdef USE_LUL_STACKWALK
         ,
         mLul(nullptr)
@@ -513,6 +519,7 @@ class CorePS {
   ~CorePS() {
 #ifdef USE_LUL_STACKWALK
     delete sInstance->mLul;
+    delete mMaybeBandwidthCounter;
 #endif
   }
 
@@ -641,12 +648,26 @@ class CorePS {
   PS_GET_AND_SET(const nsACString&, ProcessName)
   PS_GET_AND_SET(const nsACString&, ETLDplus1)
 
+  static void SetBandwidthCounter(ProfilerBandwidthCounter* aBandwidthCounter) {
+    MOZ_ASSERT(sInstance);
+
+    sInstance->mMaybeBandwidthCounter = aBandwidthCounter;
+  }
+  static ProfilerBandwidthCounter* GetBandwidthCounter() {
+    MOZ_ASSERT(sInstance);
+
+    return sInstance->mMaybeBandwidthCounter;
+  }
+
  private:
   // The singleton instance
   static CorePS* sInstance;
 
   // The time that the process started.
   const TimeStamp mProcessStartTime;
+
+  // Network bandwidth counter for the Bandwidth feature.
+  ProfilerBandwidthCounter* mMaybeBandwidthCounter;
 
   // Info on all the registered pages.
   // InnerWindowIDs in mRegisteredPages are unique.
@@ -923,6 +944,20 @@ class ActivePS {
     if (sInstance->mMaybeCPUFreq) {
       delete sInstance->mMaybeCPUFreq;
       sInstance->mMaybeCPUFreq = nullptr;
+    }
+
+    ProfilerBandwidthCounter* counter = CorePS::GetBandwidthCounter();
+    if (counter && counter->IsRegistered()) {
+      // Because profiler_count_bandwidth_bytes does a racy
+      // profiler_feature_active check to avoid taking the lock,
+      // free'ing the memory of the counter would be crashy if the
+      // socket thread attempts to increment the counter while we are
+      // stopping the profiler.
+      // Instead, we keep the counter in CorePS and only mark it as
+      // unregistered so that the next attempt to count bytes
+      // will re-register it.
+      locked_profiler_remove_sampled_counter(aLock, counter);
+      counter->MarkUnregistered();
     }
 
     auto samplerThread = sInstance->mSamplerThread;
@@ -1601,11 +1636,49 @@ static const char* const kMainThreadName = "GeckoMain";
 ////////////////////////////////////////////////////////////////////////
 // BEGIN sampling/unwinding code
 
+// Additional registers that have to be saved when thread is paused.
+#if defined(GP_PLAT_x86_linux) || defined(GP_PLAT_x86_android) || \
+    defined(GP_ARCH_x86)
+#  define UNWINDING_REGS_HAVE_ECX_EDX
+#elif defined(GP_PLAT_amd64_linux) || defined(GP_PLAT_amd64_android) || \
+    defined(GP_PLAT_amd64_freebsd) || defined(GP_ARCH_amd64) ||         \
+    defined(__x86_64__)
+#  define UNWINDING_REGS_HAVE_R10_R12
+#elif defined(GP_PLAT_arm_linux) || defined(GP_PLAT_arm_android)
+#  define UNWINDING_REGS_HAVE_LR_R7
+#elif defined(GP_PLAT_arm64_linux) || defined(GP_PLAT_arm64_android) || \
+    defined(GP_PLAT_arm64_freebsd) || defined(GP_ARCH_arm64) ||         \
+    defined(__aarch64__)
+#  define UNWINDING_REGS_HAVE_LR_R11
+#endif
+
 // The registers used for stack unwinding and a few other sampling purposes.
 // The ctor does nothing; users are responsible for filling in the fields.
 class Registers {
  public:
-  Registers() : mPC{nullptr}, mSP{nullptr}, mFP{nullptr}, mLR{nullptr} {}
+  Registers()
+      : mPC{nullptr},
+        mSP{nullptr},
+        mFP{nullptr}
+#if defined(UNWINDING_REGS_HAVE_ECX_EDX)
+        ,
+        mEcx{nullptr},
+        mEdx{nullptr}
+#elif defined(UNWINDING_REGS_HAVE_R10_R12)
+        ,
+        mR10{nullptr},
+        mR12{nullptr}
+#elif defined(UNWINDING_REGS_HAVE_LR_R7)
+        ,
+        mLR{nullptr},
+        mR7{nullptr}
+#elif defined(UNWINDING_REGS_HAVE_LR_R11)
+        ,
+        mLR{nullptr},
+        mR11{nullptr}
+#endif
+  {
+  }
 
   void Clear() { memset(this, 0, sizeof(*this)); }
 
@@ -1615,7 +1688,20 @@ class Registers {
   Address mPC;  // Instruction pointer.
   Address mSP;  // Stack pointer.
   Address mFP;  // Frame pointer.
-  Address mLR;  // ARM link register.
+#if defined(UNWINDING_REGS_HAVE_ECX_EDX)
+  Address mEcx;  // Temp for return address.
+  Address mEdx;  // Temp for frame pointer.
+#elif defined(UNWINDING_REGS_HAVE_R10_R12)
+  Address mR10;  // Temp for return address.
+  Address mR12;  // Temp for frame pointer.
+#elif defined(UNWINDING_REGS_HAVE_LR_R7)
+  Address mLR;  // ARM link register, or temp for return address.
+  Address mR7;  // Temp for frame pointer.
+#elif defined(UNWINDING_REGS_HAVE_LR_R11)
+  Address mLR;   // ARM link register, or temp for return address.
+  Address mR11;  // Temp for frame pointer.
+#endif
+
 #if defined(GP_OS_linux) || defined(GP_OS_android) || defined(GP_OS_freebsd)
   // This contains all the registers, which means it duplicates the four fields
   // above. This is ok.
@@ -1757,8 +1843,20 @@ static uint32_t ExtractJsFrames(
       JS::ProfilingFrameIterator::RegisterState registerState;
       registerState.pc = aRegs.mPC;
       registerState.sp = aRegs.mSP;
-      registerState.lr = aRegs.mLR;
       registerState.fp = aRegs.mFP;
+#if defined(UNWINDING_REGS_HAVE_ECX_EDX)
+      registerState.tempRA = aRegs.mEcx;
+      registerState.tempFP = aRegs.mEdx;
+#elif defined(UNWINDING_REGS_HAVE_R10_R12)
+      registerState.tempRA = aRegs.mR10;
+      registerState.tempFP = aRegs.mR12;
+#elif defined(UNWINDING_REGS_HAVE_LR_R7)
+      registerState.lr = aRegs.mLR;
+      registerState.tempFP = aRegs.mR7;
+#elif defined(UNWINDING_REGS_HAVE_LR_R11)
+      registerState.lr = aRegs.mLR;
+      registerState.tempFP = aRegs.mR11;
+#endif
 
       // Non-periodic sampling passes Nothing() as the buffer write position to
       // ProfilingFrameIterator to avoid incorrectly resetting the buffer
@@ -2543,6 +2641,11 @@ static inline void DoPeriodicSample(
                  aThreadData, jsFrames, aRegs, aSamplePos, aBufferRangeStart,
                  aBuffer);
 }
+
+#undef UNWINDING_REGS_HAVE_ECX_EDX
+#undef UNWINDING_REGS_HAVE_R10_R12
+#undef UNWINDING_REGS_HAVE_LR_R7
+#undef UNWINDING_REGS_HAVE_LR_R11
 
 // END sampling/unwinding code
 ////////////////////////////////////////////////////////////////////////
@@ -3975,7 +4078,7 @@ static SamplerThread* NewSamplerThread(PSLockRef aLock, uint32_t aGeneration,
 // This function is the sampler thread.  This implementation is used for all
 // targets.
 void SamplerThread::Run() {
-  PR_SetCurrentThreadName("SamplerThread");
+  NS_SetCurrentThreadName("SamplerThread");
 
   // Features won't change during this SamplerThread's lifetime, so we can read
   // them once and store them locally.
@@ -4149,12 +4252,15 @@ void SamplerThread::Run() {
         }
 
         // handle per-process generic counters
+        double counterSampleStartDeltaMs =
+            (TimeStamp::Now() - CorePS::ProcessStartTime()).ToMilliseconds();
         const Vector<BaseProfilerCount*>& counters = CorePS::Counters(lock);
         for (auto& counter : counters) {
           if (auto sample = counter->Sample(); sample.isSampleNew) {
             // create Buffer entries for each counter
             buffer.AddEntry(ProfileBufferEntry::CounterId(counter));
-            buffer.AddEntry(ProfileBufferEntry::Time(sampleStartDeltaMs));
+            buffer.AddEntry(
+                ProfileBufferEntry::Time(counterSampleStartDeltaMs));
 #if defined(MOZ_REPLACE_MALLOC) && defined(MOZ_PROFILER_MEMORY)
             if (ActivePS::IsMemoryCounter(counter)) {
               // For the memory counter, substract the size of our buffer to
@@ -4165,10 +4271,6 @@ void SamplerThread::Run() {
                   ActivePS::ControlledChunkManager(lock).TotalSize());
             }
 #endif
-            // In the future, we may support keyed counters - for example,
-            // counters with a key which is a thread ID. For "simple" counters
-            // we'll just use a key of 0.
-            buffer.AddEntry(ProfileBufferEntry::CounterKey(0));
             buffer.AddEntry(ProfileBufferEntry::Count(sample.count));
             if (sample.number) {
               buffer.AddEntry(ProfileBufferEntry::Number(sample.number));
@@ -5142,6 +5244,7 @@ void profiler_init(void* aStackTop) {
   profiler_init_main_thread_id();
 
   VTUNE_INIT();
+  ETW::Init();
 
   MOZ_RELEASE_ASSERT(!CorePS::Exists());
 
@@ -5376,6 +5479,7 @@ void profiler_shutdown(IsFastShutdown aIsFastShutdown) {
   LOG("profiler_shutdown");
 
   VTUNE_SHUTDOWN();
+  ETW::Shutdown();
 
   MOZ_RELEASE_ASSERT(NS_IsMainThread());
   MOZ_RELEASE_ASSERT(CorePS::Exists());
@@ -5736,7 +5840,7 @@ static void TriggerPollJSSamplingOnMainThread() {
     nsCOMPtr<nsIRunnable> task =
         NS_NewRunnableFunction("TriggerPollJSSamplingOnMainThread",
                                []() { PollJSSamplingForCurrentThread(); });
-    SchedulerGroup::Dispatch(TaskCategory::Other, task.forget());
+    SchedulerGroup::Dispatch(task.forget());
   }
 }
 
@@ -5821,8 +5925,8 @@ static void locked_profiler_start(PSLockRef aLock, PowerOfTwo32 aCapacity,
     baseprofiler::profiler_stop();
   }
 
-#if defined(GP_PLAT_amd64_windows)
-  InitializeWin64ProfilerHooks();
+#if defined(GP_PLAT_amd64_windows) || defined(GP_PLAT_arm64_windows)
+  mozilla::WindowsStackWalkInitialization();
 #endif
 
   // Fall back to the default values if the passed-in values are unreasonable.
@@ -6381,6 +6485,20 @@ void profiler_remove_sampled_counter(BaseProfilerCount* aCounter) {
   locked_profiler_remove_sampled_counter(lock, aCounter);
 }
 
+void profiler_count_bandwidth_bytes(int64_t aCount) {
+  NS_ASSERTION(profiler_feature_active(ProfilerFeature::Bandwidth),
+               "Should not call profiler_count_bandwidth_bytes when the "
+               "Bandwidth feature is not set");
+
+  ProfilerBandwidthCounter* counter = CorePS::GetBandwidthCounter();
+  if (MOZ_UNLIKELY(!counter)) {
+    counter = new ProfilerBandwidthCounter();
+    CorePS::SetBandwidthCounter(counter);
+  }
+
+  counter->Add(aCount);
+}
+
 ProfilingStack* profiler_register_thread(const char* aName,
                                          void* aGuessStackTop) {
   DEBUG_LOG("profiler_register_thread(%s)", aName);
@@ -6867,7 +6985,7 @@ bool profiler_capture_backtrace_into(ProfileChunkedBuffer& aChunkedBuffer,
 
 UniquePtr<ProfileChunkedBuffer> profiler_capture_backtrace() {
   MOZ_RELEASE_ASSERT(CorePS::Exists());
-  AUTO_PROFILER_LABEL("profiler_capture_backtrace", PROFILER);
+  AUTO_PROFILER_LABEL_HOT("profiler_capture_backtrace", PROFILER);
 
   // Quick is-active and feature check before allocating a buffer.
   // If NoMarkerStacks is set, we don't want to capture a backtrace.

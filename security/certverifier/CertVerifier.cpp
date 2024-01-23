@@ -108,7 +108,7 @@ CertVerifier::CertVerifier(OcspDownloadConfig odc, OcspStrictConfig osc,
                            NetscapeStepUpPolicy netscapeStepUpPolicy,
                            CertificateTransparencyMode ctMode,
                            CRLiteMode crliteMode,
-                           const Vector<EnterpriseCert>& thirdPartyCerts)
+                           const nsTArray<EnterpriseCert>& thirdPartyCerts)
     : mOCSPDownloadConfig(odc),
       mOCSPStrict(osc == ocspStrict),
       mOCSPTimeoutSoft(ocspTimeoutSoft),
@@ -118,23 +118,15 @@ CertVerifier::CertVerifier(OcspDownloadConfig odc, OcspStrictConfig osc,
       mCTMode(ctMode),
       mCRLiteMode(crliteMode) {
   LoadKnownCTLogs();
-  for (const auto& root : thirdPartyCerts) {
-    EnterpriseCert rootCopy;
-    // Best-effort. If we run out of memory, users might see untrusted issuer
-    // errors, but the browser will probably crash before then.
-    if (NS_SUCCEEDED(rootCopy.Init(root))) {
-      Unused << mThirdPartyCerts.append(std::move(rootCopy));
-    }
-  }
+  mThirdPartyCerts = thirdPartyCerts.Clone();
   for (const auto& root : mThirdPartyCerts) {
     Input input;
     if (root.GetInput(input) == Success) {
       // mThirdPartyCerts consists of roots and intermediates.
       if (root.GetIsRoot()) {
-        // Best effort again.
-        Unused << mThirdPartyRootInputs.append(input);
+        mThirdPartyRootInputs.AppendElement(input);
       } else {
-        Unused << mThirdPartyIntermediateInputs.append(input);
+        mThirdPartyIntermediateInputs.AppendElement(input);
       }
     }
   }
@@ -854,10 +846,13 @@ Result CertVerifier::VerifySSLServerCert(
     if (peerBackCert.Init() != Success) {
       return rv;
     }
-    if (rv == Result::ERROR_UNKNOWN_ISSUER &&
+    if ((rv == Result::ERROR_UNKNOWN_ISSUER ||
+         rv == Result::ERROR_BAD_SIGNATURE ||
+         rv == Result::ERROR_INADEQUATE_KEY_USAGE) &&
         CertIsSelfSigned(peerBackCert, pinarg)) {
-      // In this case we didn't find any issuer for the certificate and the
-      // certificate is self-signed.
+      // In this case we didn't find any issuer for the certificate, or we did
+      // find other certificates with the same subject but different keys, and
+      // the certificate is self-signed.
       return Result::ERROR_SELF_SIGNED_CERT;
     }
     if (rv == Result::ERROR_UNKNOWN_ISSUER) {

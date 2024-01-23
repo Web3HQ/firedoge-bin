@@ -196,6 +196,12 @@ class EditorBase : public nsIEditor,
     return false;
   }
 
+  /**
+   * This checks whether the call with aPrincipal should or should not be
+   * treated as user input.
+   */
+  [[nodiscard]] static bool TreatAsUserInput(nsIPrincipal* aPrincipal);
+
   PresShell* GetPresShell() const;
   nsPresContext* GetPresContext() const;
   already_AddRefed<nsCaret> GetCaret() const;
@@ -849,8 +855,7 @@ class EditorBase : public nsIEditor,
     void WillDeleteContent(EditorBase& aEditorBase,
                            nsIContent& aRemovingContent);
     void DidSplitContent(EditorBase& aEditorBase, nsIContent& aSplitContent,
-                         nsIContent& aNewContent,
-                         SplitNodeDirection aSplitNodeDirection);
+                         nsIContent& aNewContent);
     void DidJoinContents(EditorBase& aEditorBase,
                          const EditorRawDOMPoint& aJoinedPoint);
     void DidInsertText(EditorBase& aEditorBase,
@@ -1206,6 +1211,7 @@ class EditorBase : public nsIEditor,
         case EditSubAction::eOutdent:
         case EditSubAction::eSetOrClearAlignment:
         case EditSubAction::eCreateOrRemoveBlock:
+        case EditSubAction::eFormatBlockForHTMLCommand:
         case EditSubAction::eMergeBlockContents:
         case EditSubAction::eRemoveList:
         case EditSubAction::eCreateOrChangeDefinitionListItem:

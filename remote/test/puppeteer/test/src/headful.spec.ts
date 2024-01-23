@@ -19,7 +19,8 @@ import os from 'os';
 import path from 'path';
 
 import expect from 'expect';
-import {PuppeteerLaunchOptions} from 'puppeteer-core/internal/node/PuppeteerNode.js';
+import {CDPSessionEvent} from 'puppeteer-core/internal/api/CDPSession.js';
+import type {PuppeteerLaunchOptions} from 'puppeteer-core/internal/node/PuppeteerNode.js';
 import {rmSync} from 'puppeteer-core/internal/node/util/fs.js';
 
 import {getTestState, isHeadless, launch} from './mocha-utils.js';
@@ -171,7 +172,7 @@ const serviceWorkerExtensionPath = path.join(
         browserWSEndpoint,
         _isPageTarget(target) {
           return (
-            target.type === 'other' && target.url.startsWith('devtools://')
+            target.type() === 'other' && target.url().startsWith('devtools://')
           );
         },
       });
@@ -268,8 +269,9 @@ const serviceWorkerExtensionPath = path.join(
         flatten: true,
         waitForDebuggerOnStart: true,
       });
-      session.on(
-        'sessionattached',
+      // TODO: Remove any.
+      (session as any).on(
+        CDPSessionEvent.SessionAttached,
         async (session: {
           on: (arg0: string, arg1: (params: any) => number) => void;
           send: (arg0: string) => any;
@@ -338,6 +340,24 @@ const serviceWorkerExtensionPath = path.join(
           return target.url().includes('devtools://');
         }),
       ]);
+      await browser.close();
+    });
+    it('should expose DevTools as a page', async () => {
+      const browser = await launchBrowser(
+        Object.assign({devtools: true}, headfulOptions)
+      );
+      const context = await browser.createIncognitoBrowserContext();
+      const [target] = await Promise.all([
+        browser.waitForTarget((target: {url: () => string | string[]}) => {
+          return target.url().includes('devtools://');
+        }),
+        context.newPage(),
+      ]);
+      const page = await target.page();
+      await page!.waitForFunction(() => {
+        // @ts-expect-error wrong context.
+        return Boolean(DevToolsAPI);
+      });
       await browser.close();
     });
   });

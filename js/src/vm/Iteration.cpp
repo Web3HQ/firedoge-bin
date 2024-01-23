@@ -24,6 +24,7 @@
 #include "builtin/Array.h"
 #include "builtin/SelfHostingDefines.h"
 #include "ds/Sort.h"
+#include "gc/GC.h"
 #include "gc/GCContext.h"
 #include "js/ForOfIterator.h"         // JS::ForOfIterator
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
@@ -792,13 +793,11 @@ static PropertyIteratorObject* NewPropertyIteratorObject(JSContext* cx) {
     return nullptr;
   }
 
-  JSObject* obj = NativeObject::create(
+  auto* res = NativeObject::create<PropertyIteratorObject>(
       cx, ITERATOR_FINALIZE_KIND, GetInitialHeap(GenericObject, clasp), shape);
-  if (!obj) {
+  if (!res) {
     return nullptr;
   }
-
-  PropertyIteratorObject* res = &obj->as<PropertyIteratorObject>();
 
   // CodeGenerator::visitIteratorStartO assumes the iterator object is not
   // inside the nursery when deciding whether a barrier is necessary.
@@ -964,9 +963,14 @@ NativeIterator::NativeIterator(JSContext* cx,
   }
   MOZ_ASSERT(static_cast<void*>(shapesEnd_) == propertyCursor_);
 
+  // Allocate any strings in the nursery until the first minor GC. After this
+  // point they will end up getting tenured anyway because they are reachable
+  // from |propIter| which will be tenured.
+  AutoSelectGCHeap gcHeap(cx);
+
   size_t numProps = props.length();
   for (size_t i = 0; i < numProps; i++) {
-    JSLinearString* str = IdToString(cx, props[i]);
+    JSLinearString* str = IdToString(cx, props[i], gcHeap);
     if (!str) {
       *hadError = true;
       return;
@@ -1973,7 +1977,7 @@ bool GlobalObject::initIteratorProto(JSContext* cx,
 
 /* static */
 template <GlobalObject::ProtoKind Kind, const JSClass* ProtoClass,
-          const JSFunctionSpec* Methods>
+          const JSFunctionSpec* Methods, const bool needsFuseProperty>
 bool GlobalObject::initObjectIteratorProto(JSContext* cx,
                                            Handle<GlobalObject*> global,
                                            Handle<JSAtom*> tag) {
@@ -1994,6 +1998,12 @@ bool GlobalObject::initObjectIteratorProto(JSContext* cx,
     return false;
   }
 
+  if constexpr (needsFuseProperty) {
+    if (!JSObject::setHasFuseProperty(cx, proto)) {
+      return false;
+    }
+  }
+
   global->initBuiltinProto(Kind, proto);
   return true;
 }
@@ -2004,9 +2014,9 @@ NativeObject* GlobalObject::getOrCreateArrayIteratorPrototype(
   return MaybeNativeObject(getOrCreateBuiltinProto(
       cx, global, ProtoKind::ArrayIteratorProto,
       cx->names().Array_Iterator_.toHandle(),
-      initObjectIteratorProto<ProtoKind::ArrayIteratorProto,
-                              &ArrayIteratorPrototypeClass,
-                              array_iterator_methods>));
+      initObjectIteratorProto<
+          ProtoKind::ArrayIteratorProto, &ArrayIteratorPrototypeClass,
+          array_iterator_methods, /* hasFuseProperty= */ true>));
 }
 
 /* static */

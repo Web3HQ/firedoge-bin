@@ -1251,11 +1251,6 @@ void EditorBase::EndPlaceholderTransaction(
   }
 }
 
-NS_IMETHODIMP EditorBase::SetShouldTxnSetSelection(bool aShould) {
-  MakeThisAllowTransactionsToChangeSelection(aShould);
-  return NS_OK;
-}
-
 NS_IMETHODIMP EditorBase::GetDocumentIsEmpty(bool* aDocumentIsEmpty) {
   MOZ_ASSERT(aDocumentIsEmpty);
   *aDocumentIsEmpty = IsEmpty();
@@ -1560,7 +1555,11 @@ bool EditorBase::CheckForClipboardCommandListener(
     return false;
   }
 
-  RefPtr<EventTarget> et = GetDOMEventTarget();
+  RefPtr<EventTarget> et = IsHTMLEditor()
+                               ? AsHTMLEditor()->ComputeEditingHost(
+                                     HTMLEditor::LimitInBodyElement::No)
+                               : GetDOMEventTarget();
+
   while (et) {
     EventListenerManager* elm = et->GetExistingListenerManager();
     if (elm && elm->HasListenersFor(aCommand)) {
@@ -2283,8 +2282,13 @@ NS_IMETHODIMP EditorBase::SetSpellcheckUserOverride(bool enable) {
 }
 
 NS_IMETHODIMP EditorBase::InsertNode(nsINode* aNodeToInsert,
-                                     nsINode* aContainer, uint32_t aOffset) {
-  nsCOMPtr<nsIContent> contentToInsert = do_QueryInterface(aNodeToInsert);
+                                     nsINode* aContainer, uint32_t aOffset,
+                                     bool aPreserveSelection,
+                                     uint8_t aOptionalArgCount) {
+  MOZ_DIAGNOSTIC_ASSERT(IsHTMLEditor());
+
+  nsCOMPtr<nsIContent> contentToInsert =
+      nsIContent::FromNodeOrNull(aNodeToInsert);
   if (NS_WARN_IF(!contentToInsert) || NS_WARN_IF(!aContainer)) {
     return NS_ERROR_NULL_POINTER;
   }
@@ -2295,6 +2299,17 @@ NS_IMETHODIMP EditorBase::InsertNode(nsINode* aNodeToInsert,
     NS_WARNING_ASSERTION(rv == NS_ERROR_EDITOR_ACTION_CANCELED,
                          "CanHandleAndMaybeDispatchBeforeInputEvent() failed");
     return EditorBase::ToGenericNSResult(rv);
+  }
+
+  // Make dispatch `input` event after stopping preserving selection.
+  AutoPlaceholderBatch treatAsOneTransaction(
+      *this,
+      ScrollSelectionIntoView::No,  // not a user interaction
+      __FUNCTION__);
+
+  Maybe<AutoTransactionsConserveSelection> preseveSelection;
+  if (aOptionalArgCount && aPreserveSelection) {
+    preseveSelection.emplace(*this);
   }
 
   const uint32_t offset = std::min(aOffset, aContainer->Length());
@@ -2407,23 +2422,10 @@ EditorBase::InsertPaddingBRElementForEmptyLastLineWithTransaction(
   return insertBRElementResult;
 }
 
-NS_IMETHODIMP EditorBase::DeleteNode(nsINode* aNode) {
-  if (NS_WARN_IF(!aNode) || NS_WARN_IF(!aNode->IsContent())) {
-    return NS_ERROR_INVALID_ARG;
-  }
-
-  AutoEditActionDataSetter editActionData(*this, EditAction::eRemoveNode);
-  nsresult rv = editActionData.CanHandleAndMaybeDispatchBeforeInputEvent();
-  if (NS_FAILED(rv)) {
-    NS_WARNING_ASSERTION(rv == NS_ERROR_EDITOR_ACTION_CANCELED,
-                         "CanHandleAndMaybeDispatchBeforeInputEvent() failed");
-    return EditorBase::ToGenericNSResult(rv);
-  }
-
-  rv = DeleteNodeWithTransaction(MOZ_KnownLive(*aNode->AsContent()));
-  NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
-                       "EditorBase::DeleteNodeWithTransaction() failed");
-  return EditorBase::ToGenericNSResult(rv);
+NS_IMETHODIMP EditorBase::DeleteNode(nsINode* aNode, bool aPreserveSelection,
+                                     uint8_t aOptionalArgCount) {
+  MOZ_ASSERT_UNREACHABLE("Do not use this API with TextEditor");
+  return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 nsresult EditorBase::DeleteNodeWithTransaction(nsIContent& aContent) {
@@ -4060,6 +4062,8 @@ EditorBase::CreateTransactionForCollapsedRange(
     // of previous editable content.
     nsIContent* previousEditableContent = HTMLEditUtils::GetPreviousContent(
         *point.GetContainer(), {WalkTreeOption::IgnoreNonEditableNode},
+        IsTextEditor() ? BlockInlineCheck::UseHTMLDefaultStyle
+                       : BlockInlineCheck::UseComputedDisplayOutsideStyle,
         anonymousDivOrEditingHost);
     if (!previousEditableContent) {
       NS_WARNING("There was no editable content before the collapsed range");
@@ -4108,6 +4112,8 @@ EditorBase::CreateTransactionForCollapsedRange(
     // next editable content.
     nsIContent* nextEditableContent = HTMLEditUtils::GetNextContent(
         *point.GetContainer(), {WalkTreeOption::IgnoreNonEditableNode},
+        IsTextEditor() ? BlockInlineCheck::UseHTMLDefaultStyle
+                       : BlockInlineCheck::UseComputedDisplayOutsideStyle,
         anonymousDivOrEditingHost);
     if (!nextEditableContent) {
       NS_WARNING("There was no editable content after the collapsed range");
@@ -4175,9 +4181,11 @@ EditorBase::CreateTransactionForCollapsedRange(
         aHowToHandleCollapsedRange == HowToHandleCollapsedRange::ExtendBackward
             ? HTMLEditUtils::GetPreviousContent(
                   point, {WalkTreeOption::IgnoreNonEditableNode},
+                  BlockInlineCheck::UseComputedDisplayOutsideStyle,
                   anonymousDivOrEditingHost)
             : HTMLEditUtils::GetNextContent(
                   point, {WalkTreeOption::IgnoreNonEditableNode},
+                  BlockInlineCheck::UseComputedDisplayOutsideStyle,
                   anonymousDivOrEditingHost);
     if (!editableContent) {
       NS_WARNING("There was no editable content around the collapsed range");
@@ -4191,9 +4199,11 @@ EditorBase::CreateTransactionForCollapsedRange(
                   HowToHandleCollapsedRange::ExtendBackward
               ? HTMLEditUtils::GetPreviousContent(
                     *editableContent, {WalkTreeOption::IgnoreNonEditableNode},
+                    BlockInlineCheck::UseComputedDisplayOutsideStyle,
                     anonymousDivOrEditingHost)
               : HTMLEditUtils::GetNextContent(
                     *editableContent, {WalkTreeOption::IgnoreNonEditableNode},
+                    BlockInlineCheck::UseComputedDisplayOutsideStyle,
                     anonymousDivOrEditingHost);
     }
     if (!editableContent) {
@@ -4557,7 +4567,7 @@ nsresult EditorBase::HandleDropEvent(DragEvent* aDropEvent) {
   // same document, jump through some hoops to determine if mouse is over
   // selection (bail) and whether user wants to copy selection or delete it.
   if (sourceNode && sourceNode->IsEditable() && srcdoc == document) {
-    bool isPointInSelection = EditorUtils::IsPointInSelection(
+    bool isPointInSelection = nsContentUtils::IsPointInSelection(
         SelectionRef(), *droppedAt.GetContainer(), droppedAt.Offset());
     if (isPointInSelection) {
       // If source document and destination document is same and dropping
@@ -5652,14 +5662,21 @@ void EditorBase::SwitchTextDirectionTo(TextDirection aTextDirection) {
 }
 
 nsresult EditorBase::SetTextDirectionTo(TextDirection aTextDirection) {
-  Element* rootElement = GetExposedRoot();
+  Element* const editingHostOrTextControlElement =
+      IsHTMLEditor() ? AsHTMLEditor()->ComputeEditingHost(
+                           HTMLEditor::LimitInBodyElement::No)
+                     : GetExposedRoot();
+  if (!editingHostOrTextControlElement) {  // Don't warn, HTMLEditor may have no
+                                           // active editing host
+    return NS_OK;
+  }
 
   if (aTextDirection == TextDirection::eLTR) {
     NS_ASSERTION(!IsLeftToRight(), "Unexpected mutually exclusive flag");
     mFlags &= ~nsIEditor::eEditorRightToLeft;
     mFlags |= nsIEditor::eEditorLeftToRight;
-    nsresult rv = rootElement->SetAttr(kNameSpaceID_None, nsGkAtoms::dir,
-                                       u"ltr"_ns, true);
+    nsresult rv = editingHostOrTextControlElement->SetAttr(
+        kNameSpaceID_None, nsGkAtoms::dir, u"ltr"_ns, true);
     NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
                          "Element::SetAttr(nsGkAtoms::dir, ltr) failed");
     return rv;
@@ -5669,8 +5686,8 @@ nsresult EditorBase::SetTextDirectionTo(TextDirection aTextDirection) {
     NS_ASSERTION(!IsRightToLeft(), "Unexpected mutually exclusive flag");
     mFlags |= nsIEditor::eEditorRightToLeft;
     mFlags &= ~nsIEditor::eEditorLeftToRight;
-    nsresult rv = rootElement->SetAttr(kNameSpaceID_None, nsGkAtoms::dir,
-                                       u"rtl"_ns, true);
+    nsresult rv = editingHostOrTextControlElement->SetAttr(
+        kNameSpaceID_None, nsGkAtoms::dir, u"rtl"_ns, true);
     NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
                          "Element::SetAttr(nsGkAtoms::dir, rtl) failed");
     return rv;
@@ -6431,16 +6448,20 @@ bool EditorBase::AutoEditActionDataSetter::IsBeforeInputEventEnabled() const {
   if (mEditorBase.IsSuppressingDispatchingInputEvent()) {
     return false;
   }
+  return EditorBase::TreatAsUserInput(mPrincipal);
+}
 
-  // If mPrincipal has set, it means that we're handling an edit action
-  // which is requested by JS.  If it's not chrome script, we shouldn't
+// static
+bool EditorBase::TreatAsUserInput(nsIPrincipal* aPrincipal) {
+  // If aPrincipal it not nullptr, it means that the caller is handling an edit
+  // action which is requested by JS.  If it's not chrome script, we shouldn't
   // dispatch "beforeinput" event.
-  if (mPrincipal && !mPrincipal->IsSystemPrincipal()) {
+  if (aPrincipal && !aPrincipal->IsSystemPrincipal()) {
     // But if it's content script of an addon, `execCommand` calls are a
     // part of browser's default action from point of view of web apps.
     // Therefore, we should dispatch `beforeinput` event.
     // https://github.com/w3c/input-events/issues/91
-    if (!mPrincipal->GetIsAddonOrExpandedAddonPrincipal()) {
+    if (!aPrincipal->GetIsAddonOrExpandedAddonPrincipal()) {
       return false;
     }
   }
@@ -6743,8 +6764,8 @@ void EditorBase::TopLevelEditSubActionData::WillDeleteContent(
 }
 
 void EditorBase::TopLevelEditSubActionData::DidSplitContent(
-    EditorBase& aEditorBase, nsIContent& aSplitContent, nsIContent& aNewContent,
-    SplitNodeDirection aSplitNodeDirection) {
+    EditorBase& aEditorBase, nsIContent& aSplitContent,
+    nsIContent& aNewContent) {
   MOZ_ASSERT(aEditorBase.AsHTMLEditor());
 
   if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
@@ -6755,14 +6776,9 @@ void EditorBase::TopLevelEditSubActionData::DidSplitContent(
     return;  // Temporarily disabled by edit sub-action handler.
   }
 
-  DebugOnly<nsresult> rvIgnored =
-      aSplitNodeDirection == SplitNodeDirection::LeftNodeIsNewOne
-          ? AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(),
-                                   EditorRawDOMPoint(&aNewContent, 0),
-                                   EditorRawDOMPoint(&aSplitContent, 0))
-          : AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(),
-                                   EditorRawDOMPoint::AtEndOf(aSplitContent),
-                                   EditorRawDOMPoint::AtEndOf(aNewContent));
+  DebugOnly<nsresult> rvIgnored = AddRangeToChangedRange(
+      *aEditorBase.AsHTMLEditor(), EditorRawDOMPoint::AtEndOf(aSplitContent),
+      EditorRawDOMPoint::AtEndOf(aNewContent));
   NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
                        "TopLevelEditSubActionData::AddRangeToChangedRange() "
                        "failed, but ignored");

@@ -66,6 +66,7 @@ struct SharedDummyTrack;
 class VideoFrameContainer;
 class VideoOutput;
 namespace dom {
+class HTMLSourceElement;
 class MediaKeys;
 class TextTrack;
 class TimeRanges;
@@ -808,10 +809,6 @@ class HTMLMediaElement : public nsGenericHTMLElement,
 
   already_AddRefed<GMPCrashHelper> CreateGMPCrashHelper() override;
 
-  nsISerialEventTarget* MainThreadEventTarget() {
-    return mMainThreadEventTarget;
-  }
-
   // Set the sink id (of the output device) that the audio will play. If aSinkId
   // is empty the default device will be set.
   already_AddRefed<Promise> SetSinkId(const nsAString& aSinkId,
@@ -1003,6 +1000,9 @@ class HTMLMediaElement : public nsGenericHTMLElement,
    * When aType is CAPTURE_AUDIO, we stop playout of audio and instead route it
    * to the DOMMediaStream. Volume and mute state will be applied to the audio
    * reaching the stream. No video tracks will be captured in this case.
+   *
+   * aGraph may be null if the stream's tracks do not need to use a
+   * specific graph.
    */
   already_AddRefed<DOMMediaStream> CaptureStreamInternal(
       StreamCaptureBehavior aFinishBehavior,
@@ -1125,7 +1125,7 @@ class HTMLMediaElement : public nsGenericHTMLElement,
    * during the resource selection algorithm. Stores the return value in
    * mSourceLoadCandidate before returning.
    */
-  Element* GetNextSource();
+  HTMLSourceElement* GetNextSource();
 
   /**
    * Changes mDelayingLoadEvent, and will call BlockOnLoad()/UnblockOnLoad()
@@ -1414,13 +1414,6 @@ class HTMLMediaElement : public nsGenericHTMLElement,
   // The current decoder. Load() has been called on this decoder.
   // At most one of mDecoder and mSrcStream can be non-null.
   RefPtr<MediaDecoder> mDecoder;
-
-  // The DocGroup-specific nsISerialEventTarget of this HTML element on the main
-  // thread.
-  nsCOMPtr<nsISerialEventTarget> mMainThreadEventTarget;
-
-  // The DocGroup-specific AbstractThread::MainThread() of this HTML element.
-  RefPtr<AbstractThread> mAbstractMainThread;
 
   // A reference to the VideoFrameContainer which contains the current frame
   // of video to display.

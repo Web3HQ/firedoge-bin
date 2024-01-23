@@ -14,8 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "GLContextTypes.h"
 #include "GLDefs.h"
-#include "GLVendor.h"
 #include "ImageContainer.h"
 #include "mozilla/Casting.h"
 #include "mozilla/CheckedInt.h"
@@ -657,12 +657,42 @@ struct Limits final {
   uint32_t maxMultiviewLayers = 0;
 };
 
+// -
+
+template <class T, size_t PaddedSize>
+struct Padded {
+ private:
+  T val = {};
+  uint8_t padding[PaddedSize - sizeof(T)] = {};
+
+ public:
+  operator T&() { return val; }
+  operator const T&() const { return val; }
+
+  auto& operator=(const T& rhs) { return val = rhs; }
+  auto& operator=(T&& rhs) { return val = std::move(rhs); }
+
+  auto& operator*() { return val; }
+  auto& operator*() const { return val; }
+  auto operator->() { return &val; }
+  auto operator->() const { return &val; }
+};
+
+// -
+
 struct InitContextResult final {
-  std::string error;
+  Padded<std::string, 32> error;  // MINGW 32-bit needs this padding.
   WebGLContextOptions options;
+  gl::GLVendor vendor;
+  bool isRgb8Renderable;
+  uint8_t _padding = {};
   webgl::Limits limits;
   EnumMask<layers::SurfaceDescriptor::Type> uploadableSdTypes;
-  gl::GLVendor vendor;
+
+  auto MutTiedFields() {
+    return std::tie(error, options, vendor, isRgb8Renderable, _padding, limits,
+                    uploadableSdTypes);
+  }
 };
 
 // -
@@ -951,6 +981,7 @@ class Element;
 class ImageBitmap;
 class ImageData;
 class OffscreenCanvas;
+class VideoFrame;
 }  // namespace dom
 
 struct TexImageSource {
@@ -964,6 +995,8 @@ struct TexImageSource {
   const dom::ImageData* mImageData = nullptr;
 
   const dom::OffscreenCanvas* mOffscreenCanvas = nullptr;
+
+  const dom::VideoFrame* mVideoFrame = nullptr;
 
   const dom::Element* mDomElem = nullptr;
   ErrorResult* mOut_error = nullptr;
@@ -1108,14 +1141,6 @@ inline Range<const T> MakeRange(const RawBuffer<T>& from) {
   return from.Data();
 }
 
-// abv = ArrayBufferView
-template <typename T>
-inline auto MakeRangeAbv(const T& abv)
-    -> Range<const typename T::element_type> {
-  abv.ComputeState();
-  return {abv.Data(), abv.Length()};
-}
-
 // -
 
 constexpr auto kUniversalAlignment = alignof(std::max_align_t);
@@ -1133,10 +1158,6 @@ template <typename T>
 inline size_t ByteSize(const Range<T>& range) {
   return range.length() * sizeof(T);
 }
-
-Maybe<Range<const uint8_t>> GetRangeFromView(const dom::ArrayBufferView& view,
-                                             GLuint elemOffset,
-                                             GLuint elemCountOverride);
 
 // -
 

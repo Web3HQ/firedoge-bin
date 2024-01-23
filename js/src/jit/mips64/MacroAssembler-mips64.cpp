@@ -1058,7 +1058,7 @@ void MacroAssemblerMIPS64Compat::move32(Imm32 imm, Register dest) {
 }
 
 void MacroAssemblerMIPS64Compat::move32(Register src, Register dest) {
-  ma_move(dest, src);
+  ma_sll(dest, src, Imm32(0));
 }
 
 void MacroAssemblerMIPS64Compat::movePtr(Register src, Register dest) {
@@ -1789,7 +1789,7 @@ void MacroAssemblerMIPS64Compat::handleFailureWithHandlerTail(
   asMasm().setupUnalignedABICall(a1);
   asMasm().passABIArg(a0);
   asMasm().callWithABI<Fn, HandleException>(
-      MoveOp::GENERAL, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
+      ABIType::General, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
 
   Label entryFrame;
   Label catch_;
@@ -1846,11 +1846,16 @@ void MacroAssemblerMIPS64Compat::handleFailureWithHandlerTail(
           StackPointer);
   jump(a0);
 
-  // If we found a finally block, this must be a baseline frame. Push two
-  // values expected by the finally block: the exception and BooleanValue(true).
+  // If we found a finally block, this must be a baseline frame. Push three
+  // values expected by the finally block: the exception, the exception stack,
+  // and BooleanValue(true).
   bind(&finally);
   ValueOperand exception = ValueOperand(a1);
   loadValue(Address(sp, ResumeFromException::offsetOfException()), exception);
+
+  ValueOperand exceptionStack = ValueOperand(a2);
+  loadValue(Address(sp, ResumeFromException::offsetOfExceptionStack()),
+            exceptionStack);
 
   loadPtr(Address(sp, ResumeFromException::offsetOfTarget()), a0);
   loadPtr(Address(sp, ResumeFromException::offsetOfFramePointer()),
@@ -1858,6 +1863,7 @@ void MacroAssemblerMIPS64Compat::handleFailureWithHandlerTail(
   loadPtr(Address(sp, ResumeFromException::offsetOfStackPointer()), sp);
 
   pushValue(exception);
+  pushValue(exceptionStack);
   pushValue(BooleanValue(true));
   jump(a0);
 
@@ -2132,7 +2138,7 @@ void MacroAssembler::callWithABIPre(uint32_t* stackAdjust, bool callFromWasm) {
   assertStackAlignment(ABIStackAlignment);
 }
 
-void MacroAssembler::callWithABIPost(uint32_t stackAdjust, MoveOp::Type result,
+void MacroAssembler::callWithABIPost(uint32_t stackAdjust, ABIType result,
                                      bool callFromWasm) {
   // Restore ra value (as stored in callWithABIPre()).
   loadPtr(Address(StackPointer, stackAdjust - sizeof(intptr_t)), ra);
@@ -2152,7 +2158,7 @@ void MacroAssembler::callWithABIPost(uint32_t stackAdjust, MoveOp::Type result,
 #endif
 }
 
-void MacroAssembler::callWithABINoProfiler(Register fun, MoveOp::Type result) {
+void MacroAssembler::callWithABINoProfiler(Register fun, ABIType result) {
   // Load the callee in t9, no instruction between the lw and call
   // should clobber it. Note that we can't use fun.base because it may
   // be one of the IntArg registers clobbered before the call.
@@ -2163,8 +2169,7 @@ void MacroAssembler::callWithABINoProfiler(Register fun, MoveOp::Type result) {
   callWithABIPost(stackAdjust, result);
 }
 
-void MacroAssembler::callWithABINoProfiler(const Address& fun,
-                                           MoveOp::Type result) {
+void MacroAssembler::callWithABINoProfiler(const Address& fun, ABIType result) {
   // Load the callee in t9, as above.
   loadPtr(Address(fun.base, fun.offset), t9);
   uint32_t stackAdjust;

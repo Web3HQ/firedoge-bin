@@ -32,11 +32,11 @@ XPCOM_MANIFESTS += [
 ]
 
 MOCHITEST_MANIFESTS += [
-    "test/mochitest.ini",
+    "test/mochitest.toml",
 ]
 
 XPCSHELL_TESTS_MANIFESTS += [
-    "test/xpcshell/xpcshell.ini",
+    "test/xpcshell/xpcshell.toml",
 ]
 
 EXPORTS.mozilla.dom += [

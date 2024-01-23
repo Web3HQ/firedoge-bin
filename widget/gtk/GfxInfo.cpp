@@ -838,32 +838,32 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
         WindowProtocol::All, DriverVendor::MesaAll, DeviceFamily::All,
-        GfxDriverInfo::allFeatures, nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION,
-        DRIVER_LESS_THAN, V(10, 0, 0, 0), "FEATURE_FAILURE_OLD_MESA",
-        "Mesa 10.0");
+        GfxDriverInfo::optionalFeatures,
+        nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION, DRIVER_LESS_THAN,
+        V(10, 0, 0, 0), "FEATURE_FAILURE_OLD_MESA", "Mesa 10.0");
 
     // NVIDIA Mesa baseline (see bug 1714391).
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
         WindowProtocol::All, DriverVendor::MesaNouveau, DeviceFamily::All,
-        GfxDriverInfo::allFeatures, nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION,
-        DRIVER_LESS_THAN, V(11, 0, 0, 0), "FEATURE_FAILURE_OLD_NV_MESA",
-        "Mesa 11.0");
+        GfxDriverInfo::optionalFeatures,
+        nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION, DRIVER_LESS_THAN,
+        V(11, 0, 0, 0), "FEATURE_FAILURE_OLD_NV_MESA", "Mesa 11.0");
 
     // NVIDIA baseline (ported from old blocklist)
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
         WindowProtocol::All, DriverVendor::NonMesaAll, DeviceFamily::NvidiaAll,
-        GfxDriverInfo::allFeatures, nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION,
-        DRIVER_LESS_THAN, V(257, 21, 0, 0), "FEATURE_FAILURE_OLD_NVIDIA",
-        "NVIDIA 257.21");
+        GfxDriverInfo::optionalFeatures,
+        nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION, DRIVER_LESS_THAN,
+        V(257, 21, 0, 0), "FEATURE_FAILURE_OLD_NVIDIA", "NVIDIA 257.21");
 
     // fglrx baseline (chosen arbitrarily as 2013-07-22 release).
     APPEND_TO_DRIVER_BLOCKLIST(
         OperatingSystem::Linux, DeviceFamily::AtiAll,
-        GfxDriverInfo::allFeatures, nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION,
-        DRIVER_LESS_THAN, V(13, 15, 100, 1), "FEATURE_FAILURE_OLD_FGLRX",
-        "fglrx 13.15.100.1");
+        GfxDriverInfo::optionalFeatures,
+        nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION, DRIVER_LESS_THAN,
+        V(13, 15, 100, 1), "FEATURE_FAILURE_OLD_FGLRX", "fglrx 13.15.100.1");
 
     ////////////////////////////////////
     // FEATURE_WEBRENDER
@@ -973,6 +973,13 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_WEBRENDER, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0),
         "FEATURE_FAILURE_WEBRENDER_MESA_VM", "");
+    // Disable hardware mesa drivers in virtual machines due to instability.
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::MesaVM, DeviceFamily::All,
+        nsIGfxInfo::FEATURE_WEBGL_USE_HARDWARE,
+        nsIGfxInfo::FEATURE_BLOCKED_DEVICE, DRIVER_COMPARISON_IGNORED,
+        V(0, 0, 0, 0), "FEATURE_FAILURE_WEBGL_MESA_VM", "");
 
     ////////////////////////////////////
     // FEATURE_WEBRENDER_COMPOSITOR
@@ -1015,6 +1022,15 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
 
     ////////////////////////////////////
     // FEATURE_DMABUF
+#ifdef EARLY_BETA_OR_EARLIER
+    // Disabled due to high volume crash tracked in bug 1788573, fixed in the
+    // 545 driver.
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::NonMesaAll, DeviceFamily::NvidiaAll,
+        nsIGfxInfo::FEATURE_DMABUF, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
+        DRIVER_LESS_THAN, V(545, 23, 6, 0), "FEATURE_FAILURE_BUG_1788573", "");
+#else
     // Disabled due to high volume crash tracked in bug 1788573.
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
@@ -1022,6 +1038,7 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_DMABUF, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0), "FEATURE_FAILURE_BUG_1788573",
         "");
+#endif
 
     ////////////////////////////////////
     // FEATURE_DMABUF_SURFACE_EXPORT
@@ -1137,6 +1154,15 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0),
         "FEATURE_FAILURE_THREADSAFE_GL_NOUVEAU", "");
 
+#ifdef EARLY_BETA_OR_EARLIER
+    // Disabled due to high volume crash tracked in bug 1788573, fixed in the
+    // 545 driver.
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::NonMesaAll, DeviceFamily::NvidiaAll,
+        nsIGfxInfo::FEATURE_THREADSAFE_GL, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
+        DRIVER_LESS_THAN, V(545, 23, 6, 0), "FEATURE_FAILURE_BUG_1788573", "");
+#else
     // Disabled due to high volume crash tracked in bug 1788573.
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
@@ -1144,6 +1170,7 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_THREADSAFE_GL, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0), "FEATURE_FAILURE_BUG_1788573",
         "");
+#endif
 
     // AMD R600 family does not perform well with WebRender.
     APPEND_TO_DRIVER_BLOCKLIST(
@@ -1225,15 +1252,14 @@ nsresult GfxInfo::GetFeatureStatusImpl(
 
   GetData();
 
-  if (aFeature == nsIGfxInfo::FEATURE_BACKDROP_FILTER) {
-    *aStatus = nsIGfxInfo::FEATURE_STATUS_OK;
-    return NS_OK;
-  }
-
   if (mGlxTestError) {
-    // If glxtest failed, block all features by default.
-    *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
-    aFailureId = "FEATURE_FAILURE_GLXTEST_FAILED";
+    // If glxtest failed, block most features by default.
+    if (OnlyAllowFeatureOnKnownConfig(aFeature)) {
+      *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
+      aFailureId = "FEATURE_FAILURE_GLXTEST_FAILED";
+    } else {
+      *aStatus = nsIGfxInfo::FEATURE_STATUS_OK;
+    }
     return NS_OK;
   }
 
@@ -1241,8 +1267,12 @@ nsresult GfxInfo::GetFeatureStatusImpl(
     // We're on OpenGL 1. In most cases that indicates really old hardware.
     // We better block them, rather than rely on them to fail gracefully,
     // because they don't! see bug 696636
-    *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
-    aFailureId = "FEATURE_FAILURE_OPENGL_1";
+    if (OnlyAllowFeatureOnKnownConfig(aFeature)) {
+      *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
+      aFailureId = "FEATURE_FAILURE_OPENGL_1";
+    } else {
+      *aStatus = nsIGfxInfo::FEATURE_STATUS_OK;
+    }
     return NS_OK;
   }
 

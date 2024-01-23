@@ -12,16 +12,20 @@
 #include "mozilla/AppShutdown.h"
 #include "mozilla/UniquePtr.h"
 
+class nsUserIdleServiceGTK;
+
 class UserIdleServiceImpl {
  public:
-  NS_INLINE_DECL_REFCOUNTING(UserIdleServiceImpl);
+  explicit UserIdleServiceImpl(nsUserIdleServiceGTK* aUserIdleService)
+      : mUserIdleServiceGTK(aUserIdleService){};
 
   virtual bool PollIdleTime(uint32_t* aIdleTime) = 0;
-  bool IsSupported() const { return mSupported; };
+  virtual bool ProbeImplementation() = 0;
+
+  virtual ~UserIdleServiceImpl() = default;
 
  protected:
-  virtual ~UserIdleServiceImpl() = default;
-  bool mSupported = false;
+  nsUserIdleServiceGTK* mUserIdleServiceGTK;
 };
 
 #define IDLE_SERVICE_MUTTER 0
@@ -45,6 +49,7 @@ class nsUserIdleServiceGTK : public nsUserIdleService {
         return nullptr;
       }
       idleService = new nsUserIdleServiceGTK();
+      idleService->ProbeService();
     }
 
     return idleService.forget();
@@ -55,12 +60,12 @@ class nsUserIdleServiceGTK : public nsUserIdleService {
   void RejectAndTryNextServiceCallback();
 
  protected:
-  nsUserIdleServiceGTK();
+  nsUserIdleServiceGTK() = default;
 
  private:
   ~nsUserIdleServiceGTK() = default;
 
-  RefPtr<UserIdleServiceImpl> mIdleService;
+  mozilla::UniquePtr<UserIdleServiceImpl> mIdleService;
 #ifdef MOZ_ENABLE_DBUS
   int mIdleServiceType = IDLE_SERVICE_MUTTER;
 #else

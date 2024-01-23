@@ -109,9 +109,7 @@ function originQuery(where) {
       ),
       host,
       fixup_url(host),
-      IFNULL(${
-        ORIGIN_USE_ALT_FRECENCY ? "avg(alt_frecency)" : "total(frecency)"
-      } OVER (PARTITION BY fixup_url(host)), 0.0),
+      IFNULL(total(${ORIGIN_FRECENCY_FIELD}) OVER (PARTITION BY fixup_url(host)), 0.0),
       ${ORIGIN_FRECENCY_FIELD},
       MAX(EXISTS(
         SELECT 1 FROM moz_places WHERE origin_id = o.id AND foreign_count > 0
@@ -492,9 +490,7 @@ class ProviderAutofill extends UrlbarProvider {
           ),
           host,
           fixup_url(host),
-          IFNULL(${
-            ORIGIN_USE_ALT_FRECENCY ? "avg(alt_frecency)" : "total(frecency)"
-          } OVER (PARTITION BY fixup_url(host)), 0.0),
+          IFNULL(total(${ORIGIN_FRECENCY_FIELD}) OVER (PARTITION BY fixup_url(host)), 0.0),
           ${ORIGIN_FRECENCY_FIELD},
           MAX(EXISTS(
             SELECT 1 FROM moz_places WHERE origin_id = o.id AND foreign_count > 0
@@ -871,12 +867,17 @@ class ProviderAutofill extends UrlbarProvider {
     if (title) {
       payload.title = [title, UrlbarUtils.HIGHLIGHT.TYPED];
     } else {
-      let [autofilled] = UrlbarUtils.stripPrefixAndTrim(finalCompleteValue, {
-        stripHttp: true,
+      let trimHttps = lazy.UrlbarPrefs.get("trimHttps");
+      let displaySpec = UrlbarUtils.prepareUrlForDisplay(finalCompleteValue, {
+        trimURL: false,
+      });
+      let [fallbackTitle] = UrlbarUtils.stripPrefixAndTrim(displaySpec, {
+        stripHttp: !trimHttps,
+        stripHttps: trimHttps,
         trimEmptyQuery: true,
         trimSlash: !this._searchString.includes("/"),
       });
-      payload.fallbackTitle = [autofilled, UrlbarUtils.HIGHLIGHT.TYPED];
+      payload.fallbackTitle = [fallbackTitle, UrlbarUtils.HIGHLIGHT.TYPED];
     }
 
     let result = new lazy.UrlbarResult(

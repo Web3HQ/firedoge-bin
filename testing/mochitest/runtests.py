@@ -151,6 +151,8 @@ class MessageLogger(object):
         [
             "suite_start",
             "suite_end",
+            "group_start",
+            "group_end",
             "test_start",
             "test_end",
             "test_status",
@@ -775,7 +777,7 @@ class SSLTunnel:
             self.log.error(
                 "INFO | runtests.py | expected to find ssltunnel at %s" % ssltunnel
             )
-            exit(1)
+            sys.exit(1)
 
         env = test_environment(xrePath=self.xrePath, log=self.log)
         env["LD_LIBRARY_PATH"] = self.xrePath
@@ -902,29 +904,7 @@ def findTestMediaDevices(log):
     )
     info["video"] = {"name": name, "process": process}
 
-    # check if PulseAudio module-null-sink is loaded
-    pactl = spawn.find_executable("pactl")
-
-    if not pactl:
-        log.error("Could not find pactl on system")
-        return None
-
-    try:
-        o = subprocess.check_output([pactl, "list", "short", "modules"])
-    except subprocess.CalledProcessError:
-        log.error("Could not list currently loaded modules")
-        return None
-
-    null_sink = [x for x in o.splitlines() if b"module-null-sink" in x]
-
-    if not null_sink:
-        try:
-            subprocess.check_call([pactl, "load-module", "module-null-sink"])
-        except subprocess.CalledProcessError:
-            log.error("Could not load module-null-sink")
-            return None
-
-    # Hardcode the name since it's always the same.
+    # Hardcode the PulseAudio module-null-sink name since it's always the same.
     info["audio"] = {"name": "Monitor of Null Output"}
     return info
 
@@ -1149,7 +1129,7 @@ class MochitestDesktop(object):
                 self.urlOpts.append("dumpAboutMemoryAfterTest=true")
             if options.dumpDMDAfterTest:
                 self.urlOpts.append("dumpDMDAfterTest=true")
-            if options.debugger:
+            if options.debugger or options.jsdebugger:
                 self.urlOpts.append("interactiveDebugger=true")
             if options.jscov_dir_prefix:
                 self.urlOpts.append("jscovDirPrefix=%s" % options.jscov_dir_prefix)
@@ -1393,7 +1373,11 @@ class MochitestDesktop(object):
         serverOptions["isWin"] = mozinfo.isWin
         serverOptions["proxyPort"] = options.http3ServerPort
         env = test_environment(xrePath=options.xrePath, log=self.log)
-        self.http3Server = Http3Server(serverOptions, env, self.log)
+        serverEnv = env.copy()
+        serverLog = env.get("MOZHTTP3_SERVER_LOG")
+        if serverLog is not None:
+            serverEnv["RUST_LOG"] = serverLog
+        self.http3Server = Http3Server(serverOptions, serverEnv, self.log)
         self.http3Server.start()
 
         port = self.http3Server.ports().get("MOZHTTP3_PORT_PROXY")
@@ -1830,7 +1814,8 @@ toolbar#nav-bar {
             ):
                 manifest_key = "{}:{}".format(test["ancestor_manifest"], manifest_key)
 
-            self.tests_by_manifest[manifest_key.replace("\\", "/")].append(tp)
+            manifest_key = manifest_key.replace("\\", "/")
+            self.tests_by_manifest[manifest_key].append(tp)
             self.args_by_manifest[manifest_key].add(test.get("args"))
             self.prefs_by_manifest[manifest_key].add(test.get("prefs"))
             self.env_vars_by_manifest[manifest_key].add(test.get("environment"))
@@ -1984,13 +1969,13 @@ toolbar#nav-bar {
         d["runFailures"] = False
         if options.runFailures:
             d["runFailures"] = True
-        content = json.dumps(d)
 
         shutil.copy(
             os.path.join(SCRIPT_DIR, "ignorePrefs.json"),
             os.path.join(options.profilePath, "ignorePrefs.json"),
         )
         d["ignorePrefsFile"] = "ignorePrefs.json"
+        content = json.dumps(d)
 
         with open(os.path.join(options.profilePath, "testConfig.js"), "w") as config:
             config.write(content)
@@ -2008,6 +1993,9 @@ toolbar#nav-bar {
 
         if options.headless:
             browserEnv["MOZ_HEADLESS"] = "1"
+
+        if not options.e10s:
+            browserEnv["MOZ_FORCE_DISABLE_E10S"] = "1"
 
         if options.dmd:
             browserEnv["DMD"] = os.environ.get("DMD", "1")
@@ -2467,7 +2455,6 @@ toolbar#nav-bar {
 
         # Hardcoded prefs (TODO move these into a base profile)
         prefs = {
-            "browser.tabs.remote.autostart": options.e10s,
             # Enable tracing output for detailed failures in case of
             # failing connection attempts, and hangs (bug 1397201)
             "remote.log.level": "Trace",
@@ -2591,14 +2578,14 @@ toolbar#nav-bar {
                 )
         options.manifestFile = None
 
-        if hasattr(self, "virtualInputDeviceIdList"):
+        if hasattr(self, "virtualDeviceIdList"):
             pactl = spawn.find_executable("pactl")
 
             if not pactl:
                 self.log.error("Could not find pactl on system")
                 return None
 
-            for id in self.virtualInputDeviceIdList:
+            for id in self.virtualDeviceIdList:
                 try:
                     subprocess.check_call([pactl, "unload-module", str(id)])
                 except subprocess.CalledProcessError:
@@ -2607,7 +2594,7 @@ toolbar#nav-bar {
                     )
                     return None
 
-            self.virtualInputDeviceIdList = []
+            self.virtualDeviceIdList = []
 
     def dumpScreen(self, utilityPath):
         if self.haveDumpedScreen:
@@ -2729,6 +2716,7 @@ toolbar#nav-bar {
         detectShutdownLeaks=False,
         screenshotOnFail=False,
         bisectChunk=None,
+        restartAfterFailure=False,
         marionette_args=None,
         e10s=True,
         runFailures=False,
@@ -2836,6 +2824,7 @@ toolbar#nav-bar {
                 shutdownLeaks=shutdownLeaks,
                 lsanLeaks=lsanLeaks,
                 bisectChunk=bisectChunk,
+                restartAfterFailure=restartAfterFailure,
             )
 
             def timeoutHandler():
@@ -2860,6 +2849,7 @@ toolbar#nav-bar {
 
             # create mozrunner instance and start the system under test process
             self.lastTestSeen = self.test_name
+            self.lastManifest = currentManifest
             startTime = datetime.now()
 
             runner_cls = mozrunner.runners.get(
@@ -3058,10 +3048,11 @@ toolbar#nav-bar {
         options.manifestFile = None
         options.profilePath = None
 
-    def initializeVirtualInputDevices(self):
+    def initializeVirtualAudioDevices(self):
         """
-        Configure the system to have a number of virtual audio input devices, that
-        each produce a tone at a particular frequency.
+        Configure the system to have a number of virtual audio devices:
+        2 output devices, and
+        4 input devices that each produce a tone at a particular frequency.
 
         This method is only currently implemented for Linux.
         """
@@ -3074,34 +3065,62 @@ toolbar#nav-bar {
             self.log.error("Could not find pactl on system")
             return
 
-        DEVICES_COUNT = 4
-        DEVICES_BASE_FREQUENCY = 110  # Hz
-        self.virtualInputDeviceIdList = []
-        # If the device are already present, find their id and return early
-        o = subprocess.check_output([pactl, "list", "modules", "short"])
-        found_devices = 0
-        for input in o.splitlines():
-            device = input.decode().split("\t")
-            if device[1] == "module-sine-source":
-                self.virtualInputDeviceIdList.append(int(device[0]))
-                found_devices += 1
+        def getModuleIds(moduleName):
+            o = subprocess.check_output([pactl, "list", "modules", "short"])
+            list = []
+            for input in o.splitlines():
+                device = input.decode().split("\t")
+                if device[1] == moduleName:
+                    list.append(int(device[0]))
+            return list
 
-        if found_devices == DEVICES_COUNT:
+        OUTPUT_DEVICES_COUNT = 2
+        INPUT_DEVICES_COUNT = 4
+        DEVICES_BASE_FREQUENCY = 110  # Hz
+        # If the device are already present, find their id and return early
+        outputDeviceIdList = getModuleIds("module-null-sink")
+        inputDeviceIdList = getModuleIds("module-sine-source")
+
+        if (
+            len(outputDeviceIdList) == OUTPUT_DEVICES_COUNT
+            and len(inputDeviceIdList) == INPUT_DEVICES_COUNT
+        ):
+            self.virtualDeviceIdList = outputDeviceIdList + inputDeviceIdList
             return
-        elif found_devices != 0:
-            # Remove all devices and reinitialize them properly
-            for id in self.virtualInputDeviceIdList:
+        else:
+            # Remove any existing devices and reinitialize properly
+            for id in outputDeviceIdList + inputDeviceIdList:
                 try:
                     subprocess.check_call([pactl, "unload-module", str(id)])
                 except subprocess.CalledProcessError:
                     log.error("Could not remove pulse module with id {}".format(id))
                     return None
 
+        idList = []
+        command = [pactl, "load-module", "module-null-sink"]
+        try:  # device for "media.audio_loopback_dev" pref
+            o = subprocess.check_output(command + ["rate=44100"])
+            idList.append(int(o))
+        except subprocess.CalledProcessError:
+            self.log.error("Could not load module-null-sink")
+
+        try:
+            o = subprocess.check_output(
+                command
+                + [
+                    "rate=48000",
+                    "sink_properties='device.description=\"48000 Hz Null Output\"'",
+                ]
+            )
+            idList.append(int(o))
+        except subprocess.CalledProcessError:
+            self.log.error("Could not load module-null-sink at rate=48000")
+
         # We want quite a number of input devices, each with a different tone
         # frequency and device name so that we can recognize them easily during
         # testing.
         command = [pactl, "load-module", "module-sine-source", "rate=44100"]
-        for i in range(1, DEVICES_COUNT + 1):
+        for i in range(1, INPUT_DEVICES_COUNT + 1):
             freq = i * DEVICES_BASE_FREQUENCY
             complete_command = command + [
                 "source_name=sine-{}".format(freq),
@@ -3109,13 +3128,15 @@ toolbar#nav-bar {
             ]
             try:
                 o = subprocess.check_output(complete_command)
-                self.virtualInputDeviceIdList.append(o)
+                idList.append(int(o))
 
             except subprocess.CalledProcessError:
                 self.log.error(
                     "Could not create device with module-sine-source"
                     " (freq={})".format(freq)
                 )
+
+        self.virtualDeviceIdList = idList
 
     def normalize_paths(self, paths):
         # Normalize test paths so they are relative to test root
@@ -3154,6 +3175,20 @@ toolbar#nav-bar {
 
             if options.bisectChunk:
                 status = bisect.post_test(options, self.expectedError, self.result)
+            elif options.restartAfterFailure:
+                # NOTE: ideally browser will halt on first failure, then this will always be the last test
+                if not self.expectedError:
+                    status = -1
+                else:
+                    firstFail = len(testsToRun)
+                    for key in self.expectedError:
+                        full_key = [x for x in testsToRun if key in x]
+                        if full_key:
+                            if testsToRun.index(full_key[0]) < firstFail:
+                                firstFail = testsToRun.index(full_key[0])
+                    testsToRun = testsToRun[firstFail + 1 :]
+                    if testsToRun == []:
+                        status = -1
             else:
                 status = -1
 
@@ -3371,6 +3406,9 @@ toolbar#nav-bar {
                         "media.wmf.media-engine.channel-decoder.enabled", False
                     )
                 ),
+                "mda_gpu": self.extraPrefs.get(
+                    "media.hardware-video-decoding.force-enabled", False
+                ),
                 "xorigin": options.xOriginTests,
                 "condprof": options.conditionedProfile,
                 "msix": "WindowsApps" in options.app,
@@ -3416,11 +3454,12 @@ toolbar#nav-bar {
             return result
 
         # code for --run-by-manifest
-        manifests = set(t["manifest"] for t in tests)
+        manifests = set(t["manifest"].replace("\\", "/") for t in tests)
         result = 0
 
         origPrefs = self.extraPrefs.copy()
         for m in sorted(manifests):
+            self.log.group_start(name=m)
             self.log.info("Running manifest: {}".format(m))
 
             args = list(self.args_by_manifest[m])[0]
@@ -3471,6 +3510,7 @@ toolbar#nav-bar {
 
             # Dump the logging buffer
             self.message_logger.dump_buffered()
+            self.log.group_end(name=m)
 
             if res == -1:
                 break
@@ -3565,12 +3605,12 @@ toolbar#nav-bar {
             )
 
         if options.useTestMediaDevices:
+            self.initializeVirtualAudioDevices()
             devices = findTestMediaDevices(self.log)
             if not devices:
                 self.log.error("Could not find test media devices to use")
                 return 1
             self.mediaDevices = devices
-            self.initializeVirtualInputDevices()
 
         # See if we were asked to run on Valgrind
         valgrindPath = None
@@ -3640,7 +3680,7 @@ toolbar#nav-bar {
             # then again to actually run mochitest
             if options.timeout:
                 timeout = options.timeout + 30
-            elif options.debugger or not options.autorun:
+            elif options.debugger or options.jsdebugger or not options.autorun:
                 timeout = None
             else:
                 # We generally want the JS harness or marionette to handle
@@ -3744,6 +3784,7 @@ toolbar#nav-bar {
                     detectShutdownLeaks=detectShutdownLeaks,
                     screenshotOnFail=options.screenshotOnFail,
                     bisectChunk=options.bisectChunk,
+                    restartAfterFailure=options.restartAfterFailure,
                     marionette_args=marionette_args,
                     e10s=options.e10s,
                     runFailures=options.runFailures,
@@ -3795,6 +3836,7 @@ toolbar#nav-bar {
                 ignore_missing_leaks=ignoreMissingLeaks,
                 log=self.log,
                 stack_fixer=get_stack_fixer_function(utilityPath, options.symbolsPath),
+                scope=manifestToFilter,
             )
 
         self.log.info("runtests.py | Running tests: end.")
@@ -3906,6 +3948,7 @@ toolbar#nav-bar {
             shutdownLeaks=None,
             lsanLeaks=None,
             bisectChunk=None,
+            restartAfterFailure=None,
         ):
             """
             harness -- harness instance
@@ -3919,6 +3962,7 @@ toolbar#nav-bar {
             self.shutdownLeaks = shutdownLeaks
             self.lsanLeaks = lsanLeaks
             self.bisectChunk = bisectChunk
+            self.restartAfterFailure = restartAfterFailure
             self.browserProcessId = None
             self.stackFixerFunction = self.stackFixer()
 
@@ -3929,11 +3973,12 @@ toolbar#nav-bar {
 
             for message in messages:
                 # Passing the message to the handlers
+                msg = message
                 for handler in self.outputHandlers():
-                    message = handler(message)
+                    msg = handler(msg)
 
                 # Processing the message by the logger
-                self.harness.message_logger.process_message(message)
+                self.harness.message_logger.process_message(msg)
 
         __call__ = processOutputLine
 
@@ -3948,7 +3993,7 @@ toolbar#nav-bar {
                 self.trackLSANLeaks,
                 self.countline,
             ]
-            if self.bisectChunk:
+            if self.bisectChunk or self.restartAfterFailure:
                 handlers.append(self.record_result)
                 handlers.append(self.first_error)
 
@@ -3965,7 +4010,7 @@ toolbar#nav-bar {
                 numFailures, errorMessages = self.shutdownLeaks.process()
                 self.harness.countfail += numFailures
                 for message in errorMessages:
-                    message = {
+                    msg = {
                         "action": "test_end",
                         "status": "FAIL",
                         "expected": "PASS",
@@ -3976,7 +4021,7 @@ toolbar#nav-bar {
                         "test": message["test"],
                         "message": message["msg"],
                     }
-                    self.harness.message_logger.process_message(message)
+                    self.harness.message_logger.process_message(msg)
 
             if self.lsanLeaks:
                 self.harness.countfail += self.lsanLeaks.process()
@@ -4075,7 +4120,10 @@ toolbar#nav-bar {
                     if message["action"] == "log"
                     else message["data"]
                 )
-                self.lsanLeaks.log(line)
+                if "(finished)" in self.harness.lastTestSeen:
+                    self.lsanLeaks.log(line, self.harness.lastManifest)
+                else:
+                    self.lsanLeaks.log(line, self.harness.lastTestSeen)
             return message
 
         def trackShutdownLeaks(self, message):
@@ -4129,6 +4177,11 @@ def run_test_harness(parser, options):
     options.runByManifest = False
     if options.flavor in ("plain", "a11y", "browser", "chrome"):
         options.runByManifest = True
+
+    # run until failure, then loop until all tests have ran
+    # using looping similar to bisection code
+    if options.restartAfterFailure:
+        options.runUntilFailure = True
 
     if options.verify or options.verify_fission:
         result = runner.verifyTests(options)

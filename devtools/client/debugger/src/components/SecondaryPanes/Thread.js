@@ -2,16 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
-import { div } from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../../utils/connect";
+import React, { Component } from "devtools/client/shared/vendor/react";
+import { div, span } from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 
-import actions from "../../actions";
-import { getCurrentThread, getIsPaused } from "../../selectors";
+import actions from "../../actions/index";
+import { getCurrentThread, getIsPaused } from "../../selectors/index";
 import AccessibleImage from "../shared/AccessibleImage";
 
-const classnames = require("devtools/client/shared/classnames.js");
+const classnames = require("resource://devtools/client/shared/classnames.js");
 
 export class Thread extends Component {
   static get propTypes() {
@@ -39,6 +39,7 @@ export class Thread extends Component {
       {
         className: classnames("thread", {
           selected: thread.actor == currentThread,
+          paused: isPaused,
         }),
         key: thread.actor,
         onClick: this.onSelectThread,
@@ -58,13 +59,12 @@ export class Thread extends Component {
         label
       ),
       isPaused
-        ? div(
+        ? span(
             {
               className: "pause-badge",
+              role: "status",
             },
-            React.createElement(AccessibleImage, {
-              className: "pause",
-            })
+            L10N.getStr("pausedThread")
           )
         : null
     );

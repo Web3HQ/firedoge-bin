@@ -34,6 +34,7 @@
 #include "nsCocoaFeatures.h"
 #include "nsIScreenManager.h"
 #include "nsIWidgetListener.h"
+#include "nsXULPopupManager.h"
 #include "VibrancyManager.h"
 #include "nsPresContext.h"
 #include "nsDocShell.h"
@@ -113,13 +114,17 @@ NS_IMPL_ISUPPORTS_INHERITED(nsCocoaWindow, Inherited, nsPIWidgetCocoa)
 
 static void RollUpPopups(nsIRollupListener::AllowAnimations aAllowAnimations =
                              nsIRollupListener::AllowAnimations::Yes) {
-  nsIRollupListener* rollupListener = nsBaseWidget::GetActiveRollupListener();
-  NS_ENSURE_TRUE_VOID(rollupListener);
+  if (RefPtr pm = nsXULPopupManager::GetInstance()) {
+    pm->RollupTooltips();
+  }
 
+  nsIRollupListener* rollupListener = nsBaseWidget::GetActiveRollupListener();
+  if (!rollupListener) {
+    return;
+  }
   if (rollupListener->RollupNativeMenu()) {
     return;
   }
-
   nsCOMPtr<nsIWidget> rollupWidget = rollupListener->GetRollupWidget();
   if (!rollupWidget) {
     return;
@@ -137,7 +142,7 @@ nsCocoaWindow::nsCocoaWindow()
       mSheetWindowParent(nil),
       mPopupContentView(nil),
       mFullscreenTransitionAnimation(nil),
-      mShadowStyle(StyleWindowShadow::Default),
+      mShadowStyle(WindowShadow::None),
       mBackingScaleFactor(0.0),
       mAnimationType(nsIWidget::eGenericWindowAnimation),
       mWindowMadeHere(false),
@@ -170,8 +175,8 @@ void nsCocoaWindow::DestroyNativeWindow() {
 
   // Define a helper function for checking our fullscreen window status.
   bool (^inNativeFullscreen)(void) = ^{
-    return ((mWindow.styleMask & NSFullScreenWindowMask) ==
-            NSFullScreenWindowMask);
+    return ((mWindow.styleMask & NSWindowStyleMaskFullScreen) ==
+            NSWindowStyleMaskFullScreen);
   };
 
   // If we are in native fullscreen, or we are in the middle of a native
@@ -187,27 +192,35 @@ void nsCocoaWindow::DestroyNativeWindow() {
   // fullscreen. If we are, request that we leave fullscreen (only once)
   // and continue to spin the run loop until we're out of fullscreen.
   //
-  // However, it's possible that we are *already* in a run loop inside of
-  // ProcessTransitions(), waiting on a native fullscreen transition to
-  // complete. In such a case, we can't spin the run loop again, so we
-  // don't even enter this loop if mInProcessTransitions is true.
-  bool haveRequestedFullscreenExit = false;
-  NSRunLoop* localRunLoop = [NSRunLoop currentRunLoop];
-  while (!mInProcessTransitions &&
-         (inNativeFullscreen() || WeAreInNativeTransition()) &&
-         [localRunLoop runMode:NSDefaultRunLoopMode
-                    beforeDate:[NSDate distantFuture]]) {
-    // This loop continues to process events until mWindow is fully out
-    // of native fullscreen.
+  // We also spin this run loop while mWaitingOnFinishCurrentTransition
+  // is true, which indicates we are waiting for an async call to
+  // FinishCurrentTransition to complete. We don't want to allow our own
+  // destruction while we have this pending runnable.
+  //
+  // However, it's possible that we are *already* in a run loop. In such
+  // a case, we can't spin the run loop again, so we don't even enter this
+  // loop if mInLocalRunLoop is true.
+  if (!mInLocalRunLoop) {
+    mInLocalRunLoop = true;
+    bool haveRequestedFullscreenExit = false;
+    NSRunLoop* localRunLoop = [NSRunLoop currentRunLoop];
+    while ((mWaitingOnFinishCurrentTransition || inNativeFullscreen() ||
+            WeAreInNativeTransition()) &&
+           [localRunLoop runMode:NSDefaultRunLoopMode
+                      beforeDate:[NSDate distantFuture]]) {
+      // This loop continues to process events until mWindow is fully out
+      // of native fullscreen.
 
-    // Check to see if we should one-time request an exit from fullscreen.
-    // We do this if we are in native fullscreen and no window is in a
-    // native fullscreen transition.
-    if (!haveRequestedFullscreenExit && inNativeFullscreen() &&
-        CanStartNativeTransition()) {
-      [mWindow toggleFullScreen:nil];
-      haveRequestedFullscreenExit = true;
+      // Check to see if we should one-time request an exit from fullscreen.
+      // We do this if we are in native fullscreen and no window is in a
+      // native fullscreen transition.
+      if (!haveRequestedFullscreenExit && inNativeFullscreen() &&
+          CanStartNativeTransition()) {
+        [mWindow toggleFullScreen:nil];
+        haveRequestedFullscreenExit = true;
+      }
     }
+    mInLocalRunLoop = false;
   }
 
   [mWindow releaseJSObjects];
@@ -284,44 +297,6 @@ static NSScreen* FindTargetScreenForRect(const DesktopIntRect& aRect) {
   return targetScreen;
 }
 
-// fits the rect to the screen that contains the largest area of it,
-// or to aScreen if a screen is passed in
-// NB: this operates with aRect in desktop pixels
-static void FitRectToVisibleAreaForScreen(DesktopIntRect& aRect,
-                                          NSScreen* aScreen) {
-  if (!aScreen) {
-    aScreen = FindTargetScreenForRect(aRect);
-  }
-
-  DesktopIntRect screenBounds =
-      nsCocoaUtils::CocoaRectToGeckoRect([aScreen visibleFrame]);
-
-  if (aRect.width > screenBounds.width) {
-    aRect.width = screenBounds.width;
-  }
-  if (aRect.height > screenBounds.height) {
-    aRect.height = screenBounds.height;
-  }
-
-  if (aRect.x - screenBounds.x + aRect.width > screenBounds.width) {
-    aRect.x += screenBounds.width - (aRect.x - screenBounds.x + aRect.width);
-  }
-  if (aRect.y - screenBounds.y + aRect.height > screenBounds.height) {
-    aRect.y += screenBounds.height - (aRect.y - screenBounds.y + aRect.height);
-  }
-
-  // If the left/top edge of the window is off the screen in either direction,
-  // then set the window to start at the left/top edge of the screen.
-  if (aRect.x < screenBounds.x ||
-      aRect.x > (screenBounds.x + screenBounds.width)) {
-    aRect.x = screenBounds.x;
-  }
-  if (aRect.y < screenBounds.y ||
-      aRect.y > (screenBounds.y + screenBounds.height)) {
-    aRect.y = screenBounds.y;
-  }
-}
-
 DesktopToLayoutDeviceScale ParentBackingScaleFactor(nsIWidget* aParent,
                                                     NSView* aParentView) {
   if (aParent) {
@@ -379,9 +354,6 @@ nsresult nsCocoaWindow::Create(nsIWidget* aParent, nsNativeWidget aNativeParent,
   // we have to provide an autorelease pool (see bug 559075).
   nsAutoreleasePool localPool;
 
-  DesktopIntRect newBounds = aRect;
-  FitRectToVisibleAreaForScreen(newBounds, nullptr);
-
   // Set defaults which can be overriden from aInitData in BaseCreate
   mWindowType = WindowType::TopLevel;
   mBorderStyle = BorderStyle::Default;
@@ -418,7 +390,7 @@ nsresult nsCocoaWindow::Create(nsIWidget* aParent, nsNativeWidget aNativeParent,
     // now we can convert widgetRect to device pixels for the window we created,
     // as the child view expects a rect expressed in the dev pix of its parent
     LayoutDeviceIntRect devRect =
-        RoundedToInt(newBounds * GetDesktopToDeviceScale());
+        RoundedToInt(aRect * GetDesktopToDeviceScale());
     return CreatePopupContentView(devRect, aInitData);
   }
 
@@ -604,7 +576,7 @@ nsresult nsCocoaWindow::CreateNativeWindow(const NSRect& aRect,
 
   if (mWindowType == WindowType::Popup) {
     SetPopupWindowLevel();
-    [mWindow setBackgroundColor:[NSColor clearColor]];
+    [mWindow setBackgroundColor:NSColor.clearColor];
     [mWindow setOpaque:NO];
 
     // When multiple spaces are in use and the browser is assigned to a
@@ -1218,18 +1190,18 @@ TransparencyMode nsCocoaWindow::GetTransparencyMode() {
 void nsCocoaWindow::SetTransparencyMode(TransparencyMode aMode) {
   NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
-  // Only respect calls for popup windows.
-  if (!mWindow || mWindowType != WindowType::Popup) {
+  if (!mWindow) {
     return;
   }
 
   BOOL isTransparent = aMode == TransparencyMode::Transparent;
-  BOOL currentTransparency = ![mWindow isOpaque];
-  if (isTransparent != currentTransparency) {
-    [mWindow setOpaque:!isTransparent];
-    [mWindow setBackgroundColor:(isTransparent ? [NSColor clearColor]
-                                               : [NSColor whiteColor])];
+  BOOL currentTransparency = !mWindow.isOpaque;
+  if (isTransparent == currentTransparency) {
+    return;
   }
+  [mWindow setOpaque:!isTransparent];
+  [mWindow setBackgroundColor:(isTransparent ? NSColor.clearColor
+                                             : NSColor.whiteColor)];
 
   NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
@@ -1758,25 +1730,36 @@ void nsCocoaWindow::CocoaWindowDidEnterFullscreen(bool aFullscreen) {
   mHasStartedNativeFullscreen = false;
   EndOurNativeTransition();
   DispatchOcclusionEvent();
-  HandleUpdateFullscreenOnResize();
-  FinishCurrentTransitionIfMatching(aFullscreen ? TransitionType::Fullscreen
-                                                : TransitionType::Windowed);
-}
 
-void nsCocoaWindow::CocoaWindowDidFailFullscreen(bool aAttemptedFullscreen) {
-  mHasStartedNativeFullscreen = false;
-  EndOurNativeTransition();
-  DispatchOcclusionEvent();
-
-  // If we already updated our fullscreen state due to a resize, we need to
-  // update it again.
-  if (mUpdateFullscreenOnResize.isNothing()) {
-    UpdateFullscreenState(!aAttemptedFullscreen, true);
-    ReportSizeEvent();
+  // Check if aFullscreen matches our expected fullscreen state. It might not if
+  // there was a failure somewhere along the way, in which case we'll recover
+  // from that.
+  bool receivedExpectedFullscreen = false;
+  if (mUpdateFullscreenOnResize.isSome()) {
+    bool expectingFullscreen =
+        (*mUpdateFullscreenOnResize == TransitionType::Fullscreen);
+    receivedExpectedFullscreen = (expectingFullscreen == aFullscreen);
+  } else {
+    receivedExpectedFullscreen = (mInFullScreenMode == aFullscreen);
   }
 
-  TransitionType transition = aAttemptedFullscreen ? TransitionType::Fullscreen
-                                                   : TransitionType::Windowed;
+  TransitionType transition =
+      aFullscreen ? TransitionType::Fullscreen : TransitionType::Windowed;
+  if (receivedExpectedFullscreen) {
+    // Everything is as expected. Update our state if needed.
+    HandleUpdateFullscreenOnResize();
+  } else {
+    // We weren't expecting this fullscreen state. Update our fullscreen state
+    // to the new reality.
+    UpdateFullscreenState(aFullscreen, true);
+
+    // If we have a current transition, switch it to match what we just did.
+    if (mTransitionCurrent.isSome()) {
+      mTransitionCurrent = Some(transition);
+    }
+  }
+
+  // Whether we expected this transition or not, we're ready to finish it.
   FinishCurrentTransitionIfMatching(transition);
 }
 
@@ -1892,12 +1875,16 @@ void nsCocoaWindow::ProcessTransitions() {
           // fullscreen transition. While that is false, run our own event loop.
           // Eventually, the native fullscreen transition will finish, and we
           // can safely continue.
-          NSRunLoop* localRunLoop = [NSRunLoop currentRunLoop];
-          while (mWindow && !CanStartNativeTransition() &&
-                 [localRunLoop runMode:NSDefaultRunLoopMode
-                            beforeDate:[NSDate distantFuture]]) {
-            // This loop continues to process events until
-            // CanStartNativeTransition() returns true.
+          if (!mInLocalRunLoop) {
+            mInLocalRunLoop = true;
+            NSRunLoop* localRunLoop = [NSRunLoop currentRunLoop];
+            while (mWindow && !CanStartNativeTransition() &&
+                   [localRunLoop runMode:NSDefaultRunLoopMode
+                              beforeDate:[NSDate distantFuture]]) {
+              // This loop continues to process events until
+              // CanStartNativeTransition() returns true.
+            }
+            mInLocalRunLoop = false;
           }
 
           // This triggers an async animation, so continue.
@@ -1930,12 +1917,16 @@ void nsCocoaWindow::ProcessTransitions() {
             // fullscreen transition. While that is false, run our own event
             // loop. Eventually, the native fullscreen transition will finish,
             // and we can safely continue.
-            NSRunLoop* localRunLoop = [NSRunLoop currentRunLoop];
-            while (mWindow && !CanStartNativeTransition() &&
-                   [localRunLoop runMode:NSDefaultRunLoopMode
-                              beforeDate:[NSDate distantFuture]]) {
-              // This loop continues to process events until
-              // CanStartNativeTransition() returns true.
+            if (!mInLocalRunLoop) {
+              mInLocalRunLoop = true;
+              NSRunLoop* localRunLoop = [NSRunLoop currentRunLoop];
+              while (mWindow && !CanStartNativeTransition() &&
+                     [localRunLoop runMode:NSDefaultRunLoopMode
+                                beforeDate:[NSDate distantFuture]]) {
+                // This loop continues to process events until
+                // CanStartNativeTransition() returns true.
+              }
+              mInLocalRunLoop = false;
             }
 
             // This triggers an async animation, so continue.
@@ -2019,6 +2010,7 @@ void nsCocoaWindow::ProcessTransitions() {
 }
 
 void nsCocoaWindow::FinishCurrentTransition() {
+  mWaitingOnFinishCurrentTransition = false;
   mTransitionCurrent.reset();
   mIsTransitionCurrentAdded = false;
   ProcessTransitions();
@@ -2041,9 +2033,20 @@ void nsCocoaWindow::FinishCurrentTransitionIfMatching(
     // transitions. To accomplish this, we dispatch our cleanup to happen on the
     // next event loop. Doing this will ensure that any async native transition
     // methods we call (like toggleFullScreen) will succeed.
-    NS_DispatchToCurrentThread(
-        NewRunnableMethod("FinishCurrentTransition", this,
-                          &nsCocoaWindow::FinishCurrentTransition));
+    if (NS_SUCCEEDED(NS_DispatchToCurrentThread(
+            NewRunnableMethod("FinishCurrentTransition", this,
+                              &nsCocoaWindow::FinishCurrentTransition)))) {
+      mWaitingOnFinishCurrentTransition = true;
+    } else {
+      // Couldn't dispatch FinishCurrentTransition -- that's weird. Clean up
+      // what we can, without re-entering ProcessTransitions.
+      MOZ_ASSERT(mTransitionsPending.empty(),
+                 "Pending transitions won't be executed until the next call to "
+                 "QueueTransition.");
+      mTransitionCurrent.reset();
+      mIsTransitionCurrentAdded = false;
+      DispatchSizeModeEvent();
+    }
   }
 }
 
@@ -2125,10 +2128,6 @@ void nsCocoaWindow::DoResize(double aX, double aY, double aWidth,
   DesktopIntRect newBounds(NSToIntRound(aX), NSToIntRound(aY),
                            NSToIntRound(width / scale),
                            NSToIntRound(height / scale));
-
-  // constrain to the screen that contains the largest area of the new rect
-  FitRectToVisibleAreaForScreen(
-      newBounds, aConstrainToCurrentScreen ? [mWindow screen] : nullptr);
 
   // convert requested bounds into Cocoa coordinate system
   NSRect newFrame = nsCocoaUtils::GeckoRectToCocoaRect(newBounds);
@@ -2637,8 +2636,12 @@ bool nsCocoaWindow::HasPendingInputEvent() {
   return nsChildView::DoHasPendingInputEvent();
 }
 
-void nsCocoaWindow::SetWindowShadowStyle(StyleWindowShadow aStyle) {
+void nsCocoaWindow::SetWindowShadowStyle(WindowShadow aStyle) {
   NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
+
+  if (mShadowStyle == aStyle) {
+    return;
+  }
 
   mShadowStyle = aStyle;
 
@@ -2647,8 +2650,8 @@ void nsCocoaWindow::SetWindowShadowStyle(StyleWindowShadow aStyle) {
   }
 
   mWindow.shadowStyle = mShadowStyle;
-  [mWindow setUseMenuStyle:mShadowStyle == StyleWindowShadow::Menu];
-  [mWindow setHasShadow:aStyle != StyleWindowShadow::None];
+  [mWindow setEffectViewWrapperForStyle:mShadowStyle];
+  [mWindow setHasShadow:aStyle != WindowShadow::None];
 
   NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
@@ -3188,20 +3191,6 @@ void nsCocoaWindow::CocoaWindowDidResize() {
   mGeckoWindow->CocoaWindowDidEnterFullscreen(false);
 }
 
-- (void)windowDidFailToEnterFullScreen:(NSWindow*)window {
-  if (!mGeckoWindow) {
-    return;
-  }
-  mGeckoWindow->CocoaWindowDidFailFullscreen(true);
-}
-
-- (void)windowDidFailToExitFullScreen:(NSWindow*)window {
-  if (!mGeckoWindow) {
-    return;
-  }
-  mGeckoWindow->CocoaWindowDidFailFullscreen(false);
-}
-
 - (void)windowDidBecomeMain:(NSNotification*)aNotification {
   NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
@@ -3547,7 +3536,6 @@ static NSMutableSet* gSwizzledFrameViewClasses = nil;
   mDirtyRect = NSZeroRect;
   mBeingShown = NO;
   mDrawTitle = NO;
-  mUseMenuStyle = NO;
   mTouchBar = nil;
   mIsAnimationSuppressed = NO;
   [self updateTrackingArea];
@@ -3557,21 +3545,20 @@ static NSMutableSet* gSwizzledFrameViewClasses = nil;
 
 // Returns an autoreleased NSImage.
 static NSImage* GetMenuMaskImage() {
-  CGFloat radius = 4.0f;
-  NSEdgeInsets insets = {5, 5, 5, 5};
-  NSSize maskSize = {12, 12};
-  NSImage* maskImage = [NSImage
-       imageWithSize:maskSize
-             flipped:YES
-      drawingHandler:^BOOL(NSRect dstRect) {
-        NSBezierPath* path = [NSBezierPath bezierPathWithRoundedRect:dstRect
-                                                             xRadius:radius
-                                                             yRadius:radius];
-        [[NSColor colorWithDeviceWhite:1.0 alpha:1.0] set];
-        [path fill];
-        return YES;
-      }];
-  [maskImage setCapInsets:insets];
+  const CGFloat radius = 6.0f;
+  const NSSize maskSize = {radius * 3.0f, radius * 3.0f};
+  NSImage* maskImage = [NSImage imageWithSize:maskSize
+                                      flipped:FALSE
+                               drawingHandler:^BOOL(NSRect dstRect) {
+                                 NSBezierPath* path = [NSBezierPath
+                                     bezierPathWithRoundedRect:dstRect
+                                                       xRadius:radius
+                                                       yRadius:radius];
+                                 [NSColor.blackColor set];
+                                 [path fill];
+                                 return YES;
+                               }];
+  maskImage.capInsets = NSEdgeInsetsMake(radius, radius, radius, radius);
   return maskImage;
 }
 
@@ -3584,22 +3571,26 @@ static NSImage* GetMenuMaskImage() {
   [super setContentView:aNewWrapper];
 }
 
-- (void)setUseMenuStyle:(BOOL)aValue {
-  if (aValue && !mUseMenuStyle) {
-    // Turn on rounded corner masking.
-    NSView* effectView =
-        VibrancyManager::CreateEffectView(VibrancyType::MENU, YES);
-    [effectView setMaskImage:GetMenuMaskImage()];
+- (void)setEffectViewWrapperForStyle:(WindowShadow)aStyle {
+  if (aStyle == WindowShadow::Menu || aStyle == WindowShadow::Tooltip) {
+    // Add an effect view wrapper so that the OS draws the appropriate
+    // vibrancy effect and window border.
+    BOOL isMenu = aStyle == WindowShadow::Menu;
+    NSView* effectView = VibrancyManager::CreateEffectView(
+        isMenu ? VibrancyType::MENU : VibrancyType::TOOLTIP, YES);
+    if (isMenu) {
+      // Turn on rounded corner masking.
+      [effectView setMaskImage:GetMenuMaskImage()];
+    }
     [self swapOutChildViewWrapper:effectView];
     [effectView release];
-  } else if (mUseMenuStyle && !aValue) {
-    // Turn off rounded corner masking.
+  } else {
+    // Remove the existing wrapper.
     NSView* wrapper = [[NSView alloc] initWithFrame:NSZeroRect];
     [wrapper setWantsLayer:YES];
     [self swapOutChildViewWrapper:wrapper];
     [wrapper release];
   }
-  mUseMenuStyle = aValue;
 }
 
 - (NSTouchBar*)makeTouchBar {
@@ -4397,20 +4388,36 @@ static const NSUInteger kWindowShadowOptionsNoShadow = 0;
 static const NSUInteger kWindowShadowOptionsMenu = 2;
 static const NSUInteger kWindowShadowOptionsTooltip = 4;
 
+- (NSDictionary*)shadowParameters {
+  NSDictionary* parent = [super shadowParameters];
+  // NSLog(@"%@", parent);
+  if (self.shadowStyle != WindowShadow::Panel) {
+    return parent;
+  }
+  NSMutableDictionary* copy = [parent mutableCopy];
+  for (auto* key : {@"com.apple.WindowShadowRimDensityActive",
+                    @"com.apple.WindowShadowRimDensityInactive"}) {
+    if ([parent objectForKey:key] != nil) {
+      [copy setValue:@(0) forKey:key];
+    }
+  }
+  return copy;
+}
+
 - (NSUInteger)shadowOptions {
   if (!self.hasShadow) {
     return kWindowShadowOptionsNoShadow;
   }
 
   switch (self.shadowStyle) {
-    case StyleWindowShadow::None:
+    case WindowShadow::None:
       return kWindowShadowOptionsNoShadow;
 
-    case StyleWindowShadow::Default:  // we treat "default" as "default panel"
-    case StyleWindowShadow::Menu:
+    case WindowShadow::Menu:
+    case WindowShadow::Panel:
       return kWindowShadowOptionsMenu;
 
-    case StyleWindowShadow::Tooltip:
+    case WindowShadow::Tooltip:
       return kWindowShadowOptionsTooltip;
   }
 }

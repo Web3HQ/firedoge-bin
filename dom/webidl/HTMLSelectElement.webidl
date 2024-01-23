@@ -26,9 +26,6 @@ interface HTMLSelectElement : HTMLElement {
   [CEReactions, SetterThrows, Pure]
   attribute unsigned long size;
 
-  [ChromeOnly, Pure]
-  readonly attribute boolean isCombobox;
-
   [Pure]
   readonly attribute DOMString type;
 
@@ -59,6 +56,9 @@ interface HTMLSelectElement : HTMLElement {
   boolean reportValidity();
   undefined setCustomValidity(DOMString error);
 
+  [Throws, Pref="dom.select.showPicker.enabled"]
+  undefined showPicker();
+
   readonly attribute NodeList labels;
 
   // https://www.w3.org/Bugs/Public/show_bug.cgi?id=20720
@@ -69,6 +69,10 @@ interface HTMLSelectElement : HTMLElement {
 // Chrome only interface
 
 partial interface HTMLSelectElement {
+  [ChromeOnly]
+  undefined userFinishedInteracting(boolean changed);
+  [ChromeOnly, Pure]
+  readonly attribute boolean isCombobox;
   [ChromeOnly]
   attribute boolean openInParentProcess;
   [ChromeOnly]

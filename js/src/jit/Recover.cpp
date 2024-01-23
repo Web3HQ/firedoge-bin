@@ -28,6 +28,7 @@
 #include "vm/JSObject.h"
 #include "vm/PlainObject.h"  // js::PlainObject
 #include "vm/StringType.h"
+#include "vm/Watchtower.h"
 
 #include "vm/Interpreter-inl.h"
 
@@ -1015,12 +1016,18 @@ bool MCharCodeAt::writeRecoverData(CompactBufferWriter& writer) const {
 RCharCodeAt::RCharCodeAt(CompactBufferReader& reader) {}
 
 bool RCharCodeAt::recover(JSContext* cx, SnapshotIterator& iter) const {
-  RootedString lhs(cx, iter.read().toString());
-  RootedValue rhs(cx, iter.read());
-  RootedValue result(cx);
+  RootedString string(cx, iter.read().toString());
+  int32_t index = iter.read().toInt32();
 
-  if (!js::str_charCodeAt_impl(cx, lhs, rhs, &result)) {
-    return false;
+  RootedValue result(cx);
+  if (0 <= index && size_t(index) < string->length()) {
+    char16_t c;
+    if (!string->getChar(cx, index, &c)) {
+      return false;
+    }
+    result.setInt32(c);
+  } else {
+    result.setNaN();
   }
 
   iter.storeInstructionResult(result);
@@ -1036,15 +1043,43 @@ bool MFromCharCode::writeRecoverData(CompactBufferWriter& writer) const {
 RFromCharCode::RFromCharCode(CompactBufferReader& reader) {}
 
 bool RFromCharCode::recover(JSContext* cx, SnapshotIterator& iter) const {
-  RootedValue operand(cx, iter.read());
-  RootedValue result(cx);
+  int32_t charCode = iter.read().toInt32();
 
-  MOZ_ASSERT(!operand.isObject());
-  if (!js::str_fromCharCode_one_arg(cx, operand, &result)) {
+  JSString* str = StringFromCharCode(cx, charCode);
+  if (!str) {
     return false;
   }
 
-  iter.storeInstructionResult(result);
+  iter.storeInstructionResult(StringValue(str));
+  return true;
+}
+
+bool MFromCharCodeEmptyIfNegative::writeRecoverData(
+    CompactBufferWriter& writer) const {
+  MOZ_ASSERT(canRecoverOnBailout());
+  writer.writeUnsigned(
+      uint32_t(RInstruction::Recover_FromCharCodeEmptyIfNegative));
+  return true;
+}
+
+RFromCharCodeEmptyIfNegative::RFromCharCodeEmptyIfNegative(
+    CompactBufferReader& reader) {}
+
+bool RFromCharCodeEmptyIfNegative::recover(JSContext* cx,
+                                           SnapshotIterator& iter) const {
+  int32_t charCode = iter.read().toInt32();
+
+  JSString* str;
+  if (charCode < 0) {
+    str = cx->emptyString();
+  } else {
+    str = StringFromCharCode(cx, charCode);
+    if (!str) {
+      return false;
+    }
+  }
+
+  iter.storeInstructionResult(StringValue(str));
   return true;
 }
 
@@ -1781,6 +1816,32 @@ bool RNewCallObject::recover(JSContext* cx, SnapshotIterator& iter) const {
   return true;
 }
 
+bool MObjectKeys::canRecoverOnBailout() const {
+  // Only claim that this operation can be recovered on bailout if some other
+  // optimization already marked it as such.
+  return isRecoveredOnBailout();
+}
+
+bool MObjectKeys::writeRecoverData(CompactBufferWriter& writer) const {
+  MOZ_ASSERT(canRecoverOnBailout());
+  writer.writeUnsigned(uint32_t(RInstruction::Recover_ObjectKeys));
+  return true;
+}
+
+RObjectKeys::RObjectKeys(CompactBufferReader& reader) {}
+
+bool RObjectKeys::recover(JSContext* cx, SnapshotIterator& iter) const {
+  Rooted<JSObject*> obj(cx, &iter.read().toObject());
+
+  JSObject* resultKeys = ObjectKeys(cx, obj);
+  if (!resultKeys) {
+    return false;
+  }
+
+  iter.storeInstructionResult(ObjectValue(*resultKeys));
+  return true;
+}
+
 bool MObjectState::writeRecoverData(CompactBufferWriter& writer) const {
   MOZ_ASSERT(canRecoverOnBailout());
   writer.writeUnsigned(uint32_t(RInstruction::Recover_ObjectState));
@@ -1795,6 +1856,7 @@ RObjectState::RObjectState(CompactBufferReader& reader) {
 bool RObjectState::recover(JSContext* cx, SnapshotIterator& iter) const {
   RootedObject object(cx, &iter.read().toObject());
   Handle<NativeObject*> nativeObject = object.as<NativeObject>();
+  MOZ_ASSERT(!Watchtower::watchesPropertyModification(nativeObject));
   MOZ_ASSERT(nativeObject->slotSpan() == numSlots());
 
   for (size_t i = 0; i < numSlots(); i++) {

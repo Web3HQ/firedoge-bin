@@ -11,10 +11,11 @@
 #include <unordered_map>
 #include "mozilla/Assertions.h"  // for MOZ_ASSERT_HELPER2
 #include "mozilla/Maybe.h"
-#include "mozilla/Monitor.h"    // for Monitor
-#include "mozilla/RefPtr.h"     // for RefPtr
-#include "mozilla/TimeStamp.h"  // for TimeStamp
-#include "mozilla/gfx/Point.h"  // for IntSize
+#include "mozilla/Monitor.h"        // for Monitor
+#include "mozilla/RefPtr.h"         // for RefPtr
+#include "mozilla/StaticMonitor.h"  // for StaticMonitor
+#include "mozilla/TimeStamp.h"      // for TimeStamp
+#include "mozilla/gfx/Point.h"      // for IntSize
 #include "mozilla/ipc/ProtocolUtils.h"
 #include "mozilla/ipc/SharedMemory.h"
 #include "mozilla/layers/CompositorController.h"
@@ -124,6 +125,7 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
 
   // HostIPCAllocator
   base::ProcessId GetChildProcessId() override;
+  dom::ContentParentId GetContentId() override;
   void NotifyNotUsed(PTextureParent* aTexture,
                      uint64_t aTransactionId) override;
   void SendAsyncMessage(
@@ -141,11 +143,6 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
     return HostIPCAllocator::Release();
   }
   virtual bool IsRemote() const { return false; }
-
-  virtual UniquePtr<SurfaceDescriptor> LookupSurfaceDescriptorForClientTexture(
-      const int64_t aTextureId) {
-    MOZ_CRASH("Should only be called on ContentCompositorBridgeParent.");
-  }
 
   virtual void NotifyMemoryPressure() {}
   virtual void AccumulateMemoryReport(wr::MemoryReport*) {}
@@ -212,13 +209,10 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
       const uint32_t& startIndex, nsTArray<float>* intervals) = 0;
   virtual mozilla::ipc::IPCResult RecvCheckContentOnlyTDR(
       const uint32_t& sequenceNum, bool* isContentOnlyTDR) = 0;
-  virtual mozilla::ipc::IPCResult RecvInitPCanvasParent(
-      Endpoint<PCanvasParent>&& aEndpoint) = 0;
-  virtual mozilla::ipc::IPCResult RecvReleasePCanvasParent() = 0;
 
   bool mCanSend;
 
- private:
+ protected:
   RefPtr<CompositorManagerParent> mCompositorManager;
 };
 
@@ -325,11 +319,6 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
       const LayersId& aId, const uint64_t& aSerial,
       const wr::MaybeExternalImageId& aExternalImageId) override;
   bool DeallocPTextureParent(PTextureParent* actor) override;
-
-  mozilla::ipc::IPCResult RecvInitPCanvasParent(
-      Endpoint<PCanvasParent>&& aEndpoint) final;
-
-  mozilla::ipc::IPCResult RecvReleasePCanvasParent() final;
 
   bool IsSameProcess() const override;
 
@@ -462,7 +451,7 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   // Helper method so that we don't have to expose mApzcTreeManager to
   // ContentCompositorBridgeParent.
   void AllocateAPZCTreeManagerParent(
-      const MonitorAutoLock& aProofOfLayerTreeStateLock,
+      const StaticMonitorAutoLock& aProofOfLayerTreeStateLock,
       const LayersId& aLayersId, LayerTreeState& aLayerTreeStateToUpdate);
 
   PAPZParent* AllocPAPZParent(const LayersId& aLayersId) override;
@@ -562,7 +551,14 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   void PauseComposition();
   bool ResumeComposition();
   bool ResumeCompositionAndResize(int x, int y, int width, int height);
-  bool IsPaused() { return mPaused; }
+  bool IsPaused();
+
+  typedef std::map<LayersId, CompositorBridgeParent::LayerTreeState>
+      LayerTreeMap;
+
+  static StaticMonitor sIndirectLayerTreesLock;
+  static LayerTreeMap sIndirectLayerTrees
+      MOZ_GUARDED_BY(sIndirectLayerTreesLock);
 
  protected:
   /**

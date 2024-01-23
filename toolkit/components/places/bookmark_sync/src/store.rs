@@ -213,7 +213,7 @@ impl<'s> Store<'s> {
                         let title = String::from_utf16(&*raw_title)?;
                         url.map(|url| Content::Bookmark {
                             title,
-                            url_href: url.into_string(),
+                            url_href: url.into(),
                         })
                     }
                     Kind::Folder | Kind::Livemark => {
@@ -551,11 +551,6 @@ fn update_local_items_in_places<'t>(
         statement.execute()?;
     }
 
-    // Trigger frecency updates for all new origins.
-    debug!(driver, "Updating origins for new URLs");
-    controller.err_if_aborted()?;
-    db.exec("DELETE FROM moz_updateoriginsinsert_temp")?;
-
     // Build a table of new and updated items.
     debug!(driver, "Staging apply remote item ops");
     for chunk in ops.apply_remote_items.chunks(db.variable_limit()? / 3) {
@@ -746,11 +741,6 @@ fn update_local_items_in_places<'t>(
 
     debug!(driver, "Applying remote items");
     apply_remote_items(db, driver, controller)?;
-
-    // Trigger frecency updates for all affected origins.
-    debug!(driver, "Updating origins for changed URLs");
-    controller.err_if_aborted()?;
-    db.exec("DELETE FROM moz_updateoriginsupdate_temp")?;
 
     // Fires the `applyNewLocalStructure` trigger.
     debug!(driver, "Applying new local structure");

@@ -16,7 +16,7 @@
 
 #include "jsapi.h"
 #include "js/CallAndConstruct.h"  // JS::Call, JS::Construct, JS::IsCallable
-#include "js/ColumnNumber.h"      // JS::ColumnNumberZeroOrigin
+#include "js/ColumnNumber.h"      // JS::ColumnNumberOneOrigin
 #include "js/experimental/TypedData.h"  // JS_GetTypedArrayLength
 #include "js/friend/WindowProxy.h"      // js::IsWindowProxy
 #include "js/friend/XrayJitInfo.h"      // JS::XrayJitInfo
@@ -219,14 +219,14 @@ bool ReportWrapperDenial(JSContext* cx, HandleId id, WrapperDenialType type,
   }
   AutoFilename filename;
   uint32_t line = 0;
-  JS::ColumnNumberZeroOrigin column;
+  JS::ColumnNumberOneOrigin column;
   DescribeScriptedCaller(cx, &filename, &line, &column);
 
   // Warn to the terminal for the logs.
   NS_WARNING(
       nsPrintfCString("Silently denied access to property %s: %s (@%s:%u:%u)",
                       NS_LossyConvertUTF16toASCII(propertyName).get(), reason,
-                      filename.get(), line, column.zeroOriginValue())
+                      filename.get(), line, column.oneOriginValue())
           .get());
 
   // If this isn't the first warning on this topic for this global, we've
@@ -273,7 +273,7 @@ bool ReportWrapperDenial(JSContext* cx, HandleId id, WrapperDenialType type,
   nsString filenameStr(NS_ConvertASCIItoUTF16(filename.get()));
   nsresult rv = errorObject->InitWithWindowID(
       NS_ConvertASCIItoUTF16(errorMessage.ref()), filenameStr, u""_ns, line,
-      column.zeroOriginValue(), nsIScriptError::warningFlag, "XPConnect",
+      column.oneOriginValue(), nsIScriptError::warningFlag, "XPConnect",
       windowId);
   NS_ENSURE_SUCCESS(rv, true);
   rv = consoleService->LogMessage(errorObject);
@@ -580,7 +580,11 @@ bool JSXrayTraits::resolveOwnProperty(
         return true;
       }
       if (id == GetJSIDByIndex(cx, XPCJSContext::IDX_NAME)) {
-        RootedString fname(cx, JS_GetFunctionId(JS_GetObjectFunction(target)));
+        JS::Rooted<JSFunction*> fun(cx, JS_GetObjectFunction(target));
+        JS::Rooted<JSString*> fname(cx);
+        if (!JS_GetFunctionId(cx, fun, &fname)) {
+          return false;
+        }
         if (fname) {
           JS_MarkCrossZoneIdValue(cx, StringValue(fname));
         }
@@ -1788,17 +1792,25 @@ bool DOMXrayTraits::call(JSContext* cx, HandleObject wrapper,
                          const JS::CallArgs& args,
                          const js::Wrapper& baseInstance) {
   RootedObject obj(cx, getTargetObject(wrapper));
-  const JSClass* clasp = JS::GetClass(obj);
   // What we have is either a WebIDL interface object, a WebIDL prototype
-  // object, or a WebIDL instance object.  WebIDL prototype objects never have
-  // a clasp->call.  WebIDL interface objects we want to invoke on the xray
-  // compartment.  WebIDL instance objects either don't have a clasp->call or
-  // are using "legacycaller".  At this time for all the legacycaller users it
-  // makes more sense to invoke on the xray compartment, so we just go ahead
-  // and do that for everything.
-  if (JSNative call = clasp->getCall()) {
-    // call it on the Xray compartment
-    return call(cx, args.length(), args.base());
+  // object, or a WebIDL instance object. WebIDL interface objects we want to
+  // invoke on the xray compartment. WebIDL prototype objects never have a
+  // clasp->call. WebIDL instance objects either don't have a clasp->call or are
+  // using "legacycaller". At this time for all the legacycaller users it makes
+  // more sense to invoke on the xray compartment, so we just go ahead and do
+  // that for everything.
+  if (js::IsProxy(obj)) {
+    if (JS::IsCallable(obj)) {
+      // Passing obj here, but it doesn't really matter because legacycaller
+      // uses args.callee() anyway.
+      return GetProxyHandler(obj)->call(cx, obj, args);
+    }
+  } else {
+    const JSClass* clasp = JS::GetClass(obj);
+    if (JSNative call = clasp->getCall()) {
+      // call it on the Xray compartment
+      return call(cx, args.length(), args.base());
+    }
   }
 
   RootedValue v(cx, ObjectValue(*wrapper));

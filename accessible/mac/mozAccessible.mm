@@ -159,6 +159,12 @@ using namespace mozilla::a11y;
     return ![self moxIsLiveRegion];
   }
 
+  if (selector == @selector(moxARIAPosInSet) || selector == @selector
+                                                    (moxARIASetSize)) {
+    GroupPos groupPos = mGeckoAccessible->GroupPosition();
+    return groupPos.setSize == 0;
+  }
+
   if (selector == @selector(moxExpanded)) {
     return [self stateWithMask:states::EXPANDABLE] == 0;
   }
@@ -620,6 +626,16 @@ struct RoleDescrComparator {
   return utils::GetAccAttr(self, nsGkAtoms::aria_live);
 }
 
+- (NSNumber*)moxARIAPosInSet {
+  GroupPos groupPos = mGeckoAccessible->GroupPosition();
+  return @(groupPos.posInSet);
+}
+
+- (NSNumber*)moxARIASetSize {
+  GroupPos groupPos = mGeckoAccessible->GroupPosition();
+  return @(groupPos.setSize);
+}
+
 - (NSString*)moxARIARelevant {
   if (NSString* relevant =
           utils::GetAccAttr(self, nsGkAtoms::containerRelevant)) {
@@ -859,7 +875,7 @@ struct RoleDescrComparator {
     // so we verify a child exists, and then query that child below.
     NSArray* children = [self moxChildren];
     MOZ_ASSERT([children count] == 1 && children[0],
-               "A11yUtil event recieved, but no announcement found?");
+               "A11yUtil event received, but no announcement found?");
 
     mozAccessible* announcement = children[0];
     NSString* key;

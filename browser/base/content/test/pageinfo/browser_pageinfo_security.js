@@ -29,7 +29,7 @@ add_task(async function test_ShowCertificate() {
   let pageInfoDoc = pageInfo.document;
   let securityTab = pageInfoDoc.getElementById("securityTab");
   await TestUtils.waitForCondition(
-    () => BrowserTestUtils.is_visible(securityTab),
+    () => BrowserTestUtils.isVisible(securityTab),
     "Security tab should be visible."
   );
 
@@ -37,7 +37,7 @@ add_task(async function test_ShowCertificate() {
     let loaded = BrowserTestUtils.waitForNewTab(gBrowser, null, true);
     let viewCertButton = pageInfoDoc.getElementById("security-view-cert");
     await TestUtils.waitForCondition(
-      () => BrowserTestUtils.is_visible(viewCertButton),
+      () => BrowserTestUtils.isVisible(viewCertButton),
       "view cert button should be visible."
     );
     viewCertButton.click();
@@ -80,7 +80,7 @@ add_task(async function test_image() {
   let securityTab = pageInfoDoc.getElementById("securityTab");
 
   await TestUtils.waitForCondition(
-    () => BrowserTestUtils.is_visible(securityTab),
+    () => BrowserTestUtils.isVisible(securityTab),
     "Security tab should be visible."
   );
 
@@ -134,7 +134,7 @@ add_task(async function test_CertificateError() {
   let securityTab = pageInfoDoc.getElementById("securityTab");
 
   await TestUtils.waitForCondition(
-    () => BrowserTestUtils.is_visible(securityTab),
+    () => BrowserTestUtils.isVisible(securityTab),
     "Security tab should be visible."
   );
 
@@ -170,7 +170,7 @@ add_task(async function test_SecurityHTTP() {
   let pageInfoDoc = pageInfo.document;
   let securityTab = pageInfoDoc.getElementById("securityTab");
   await TestUtils.waitForCondition(
-    () => BrowserTestUtils.is_visible(securityTab),
+    () => BrowserTestUtils.isVisible(securityTab),
     "Security tab should be visible."
   );
 
@@ -206,7 +206,7 @@ add_task(async function test_ValidCert() {
   let pageInfoDoc = pageInfo.document;
   let securityTab = pageInfoDoc.getElementById("securityTab");
   await TestUtils.waitForCondition(
-    () => BrowserTestUtils.is_visible(securityTab),
+    () => BrowserTestUtils.isVisible(securityTab),
     "Security tab should be visible."
   );
 
@@ -320,7 +320,9 @@ add_task(async function test_Cookies() {
 
     let cookiesCleared = TestUtils.topicObserved(
       "cookie-changed",
-      (subj, data) => data == "deleted"
+      subj =>
+        subj.QueryInterface(Ci.nsICookieNotification).action ==
+        Ci.nsICookieNotification.COOKIE_DELETED
     );
 
     let removeDialogPromise = BrowserTestUtils.promiseAlertDialogOpen(

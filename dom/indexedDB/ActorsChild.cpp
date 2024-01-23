@@ -144,9 +144,7 @@ class MOZ_STACK_CLASS AutoSetCurrentTransaction final {
   AutoSetCurrentTransaction& operator=(AutoSetCurrentTransaction&&) = delete;
 
   explicit AutoSetCurrentTransaction(Maybe<IDBTransaction&> aTransaction)
-      : mTransaction(aTransaction),
-        mPreviousTransaction(),
-        mThreadLocal(nullptr) {
+      : mTransaction(aTransaction), mThreadLocal(nullptr) {
     if (aTransaction) {
       BackgroundChildImpl::ThreadLocal* threadLocal =
           BackgroundChildImpl::GetThreadLocalForCurrentThread();
@@ -809,7 +807,7 @@ bool BackgroundFactoryChild::DeallocPBackgroundIDBFactoryRequestChild(
   return true;
 }
 
-PBackgroundIDBDatabaseChild*
+already_AddRefed<PBackgroundIDBDatabaseChild>
 BackgroundFactoryChild::AllocPBackgroundIDBDatabaseChild(
     const DatabaseSpec& aSpec,
     PBackgroundIDBFactoryRequestChild* aRequest) const {
@@ -818,15 +816,9 @@ BackgroundFactoryChild::AllocPBackgroundIDBDatabaseChild(
   auto* const request = static_cast<BackgroundFactoryRequestChild*>(aRequest);
   MOZ_ASSERT(request);
 
-  return new BackgroundDatabaseChild(aSpec, request);
-}
-
-bool BackgroundFactoryChild::DeallocPBackgroundIDBDatabaseChild(
-    PBackgroundIDBDatabaseChild* aActor) {
-  MOZ_ASSERT(aActor);
-
-  delete static_cast<BackgroundDatabaseChild*>(aActor);
-  return true;
+  RefPtr<BackgroundDatabaseChild> actor =
+      new BackgroundDatabaseChild(aSpec, request);
+  return actor.forget();
 }
 
 mozilla::ipc::IPCResult
@@ -1700,6 +1692,12 @@ void BackgroundRequestChild::HandleResponse(
     SerializedStructuredCloneReadInfo&& aResponse) {
   AssertIsOnOwningThread();
 
+  if (!mTransaction->Database()->GetOwnerGlobal()) {
+    // Ignore the response, since we have already been disconnected from the
+    // global.
+    return;
+  }
+
   auto cloneReadInfo = DeserializeStructuredCloneReadInfo(
       std::move(aResponse), mTransaction->Database(),
       [this] { return std::move(*GetNextCloneData()); });
@@ -1711,6 +1709,12 @@ void BackgroundRequestChild::HandleResponse(
 void BackgroundRequestChild::HandleResponse(
     nsTArray<SerializedStructuredCloneReadInfo>&& aResponse) {
   AssertIsOnOwningThread();
+
+  if (!mTransaction->Database()->GetOwnerGlobal()) {
+    // Ignore the response, since we have already been disconnected from the
+    // global.
+    return;
+  }
 
   nsTArray<StructuredCloneReadInfoChild> cloneReadInfos;
 

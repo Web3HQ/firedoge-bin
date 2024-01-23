@@ -87,7 +87,7 @@
 #include "nsPIDOMWindow.h"
 #include "nsPIWindowRoot.h"
 #include "nsIWebNavigation.h"
-#include "nsIContentViewer.h"
+#include "nsIDocumentViewer.h"
 #include "nsFrameManager.h"
 #include "nsIBrowserChild.h"
 #include "nsMenuPopupFrame.h"
@@ -304,7 +304,7 @@ static uint32_t sESMInstanceCount = 0;
 bool EventStateManager::sNormalLMouseEventInProcess = false;
 int16_t EventStateManager::sCurrentMouseBtn = MouseButton::eNotPressed;
 EventStateManager* EventStateManager::sActiveESM = nullptr;
-Document* EventStateManager::sMouseOverDocument = nullptr;
+EventStateManager* EventStateManager::sCursorSettingManager = nullptr;
 AutoWeakFrame EventStateManager::sLastDragOverFrame = nullptr;
 LayoutDeviceIntPoint EventStateManager::sPreLockPoint =
     LayoutDeviceIntPoint(0, 0);
@@ -396,8 +396,8 @@ EventStateManager::~EventStateManager() {
     KillClickHoldTimer();
   }
 
-  if (mDocument == sMouseOverDocument) {
-    sMouseOverDocument = nullptr;
+  if (sCursorSettingManager == this) {
+    sCursorSettingManager = nullptr;
   }
 
   --sESMInstanceCount;
@@ -464,8 +464,9 @@ NS_IMPL_CYCLE_COLLECTION_WEAK(EventStateManager, mCurrentTargetContent,
                               mLastMiddleMouseDownInfo.mLastMouseDownContent,
                               mLastRightMouseDownInfo.mLastMouseDownContent,
                               mActiveContent, mHoverContent, mURLTargetContent,
-                              mMouseEnterLeaveHelper, mPointersEnterLeaveHelper,
-                              mDocument, mIMEContentObserver, mAccessKeys)
+                              mPopoverPointerDownTarget, mMouseEnterLeaveHelper,
+                              mPointersEnterLeaveHelper, mDocument,
+                              mIMEContentObserver, mAccessKeys)
 
 void EventStateManager::ReleaseCurrentIMEContentObserver() {
   if (mIMEContentObserver) {
@@ -822,6 +823,8 @@ nsresult EventStateManager::PreHandleEvent(nsPresContext* aPresContext,
         if (mouseEvent->mInputSource != MouseEvent_Binding::MOZ_SOURCE_TOUCH) {
           NotifyTargetUserActivation(aEvent, aTargetContent);
         }
+
+        LightDismissOpenPopovers(aEvent, aTargetContent);
       }
       [[fallthrough]];
     case ePointerMove: {
@@ -849,6 +852,9 @@ nsresult EventStateManager::PreHandleEvent(nsPresContext* aPresContext,
       FlushLayout(aPresContext);
       break;
     }
+    case ePointerUp:
+      LightDismissOpenPopovers(aEvent, aTargetContent);
+      break;
     case ePointerGotCapture:
       GenerateMouseEnterExit(mouseEvent);
       break;
@@ -1091,7 +1097,60 @@ void EventStateManager::NotifyTargetUserActivation(WidgetEvent* aEvent,
 
   MOZ_ASSERT(aEvent->mMessage == eKeyDown || aEvent->mMessage == eMouseDown ||
              aEvent->mMessage == ePointerDown || aEvent->mMessage == eTouchEnd);
-  doc->NotifyUserGestureActivation();
+  UserActivation::Modifiers modifiers;
+  if (WidgetInputEvent* inputEvent = aEvent->AsInputEvent()) {
+    if (inputEvent->IsShift()) {
+      modifiers.SetShift();
+    }
+    if (inputEvent->IsMeta()) {
+      modifiers.SetMeta();
+    }
+    if (inputEvent->IsControl()) {
+      modifiers.SetControl();
+    }
+    if (inputEvent->IsAlt()) {
+      modifiers.SetAlt();
+    }
+  }
+  doc->NotifyUserGestureActivation(modifiers);
+}
+
+// https://html.spec.whatwg.org/multipage/popover.html#popover-light-dismiss
+void EventStateManager::LightDismissOpenPopovers(WidgetEvent* aEvent,
+                                                 nsIContent* aTargetContent) {
+  MOZ_ASSERT(aEvent->mMessage == ePointerDown || aEvent->mMessage == ePointerUp,
+             "Light dismiss must be called for pointer up/down only");
+
+  if (!StaticPrefs::dom_element_popover_enabled() || !aEvent->IsTrusted() ||
+      !aTargetContent) {
+    return;
+  }
+
+  Element* topmostPopover = aTargetContent->OwnerDoc()->GetTopmostAutoPopover();
+  if (!topmostPopover) {
+    return;
+  }
+
+  // Pointerdown: set document's popover pointerdown target to the result of
+  // running topmost clicked popover given target.
+  if (aEvent->mMessage == ePointerDown) {
+    mPopoverPointerDownTarget = aTargetContent->GetTopmostClickedPopover();
+    return;
+  }
+
+  // Pointerup: hide open popovers.
+  RefPtr<nsINode> ancestor = aTargetContent->GetTopmostClickedPopover();
+  bool sameTarget = mPopoverPointerDownTarget == ancestor;
+  mPopoverPointerDownTarget = nullptr;
+  if (!sameTarget) {
+    return;
+  }
+
+  if (!ancestor) {
+    ancestor = aTargetContent->OwnerDoc();
+  }
+  RefPtr<Document> doc(ancestor->OwnerDoc());
+  doc->HideAllPopoversUntil(*ancestor, false, true);
 }
 
 already_AddRefed<EventStateManager> EventStateManager::ESMFromContentOrThis(
@@ -2346,7 +2405,7 @@ void EventStateManager::DetermineDragTargetAndDefaultData(
     bool wasAlt = (mGestureModifiers & MODIFIER_ALT) != 0;
     nsresult rv = nsContentAreaDragDrop::GetDragData(
         aWindow, mGestureDownContent, aSelectionTarget, wasAlt, aDataTransfer,
-        &canDrag, aSelection, getter_AddRefs(dragDataNode), aPrincipal, aCsp,
+        &canDrag, aSelection, getter_AddRefs(dragDataNode), aCsp,
         aCookieJarSettings);
     if (NS_FAILED(rv) || !canDrag) {
       return;
@@ -3642,8 +3701,13 @@ nsresult EventStateManager::PostHandleEvent(nsPresContext* aPresContext,
       // we should never be capturing when the mouse button is up
       PresShell::ReleaseCapturingContent();
 
-      ClearGlobalActiveContent(this);
       WidgetMouseEvent* mouseUpEvent = aEvent->AsMouseEvent();
+      // If the mouseup event is a synthesized mouse event due to a touch, do
+      // not clear the activation state. Element activation is handled by APZ.
+      if (!mouseUpEvent || mouseUpEvent->mInputSource !=
+                               dom::MouseEvent_Binding::MOZ_SOURCE_TOUCH) {
+        ClearGlobalActiveContent(this);
+      }
       if (mouseUpEvent && EventCausesClickEvents(*mouseUpEvent)) {
         // Make sure to dispatch the click even if there is no frame for
         // the current target element. This is required for Web compatibility.
@@ -4152,8 +4216,9 @@ static bool ShouldBlockCustomCursor(nsPresContext* aPresContext,
 
   nsSize size(CSSPixel::ToAppUnits(width / zoom),
               CSSPixel::ToAppUnits(height / zoom));
-  nsPoint hotspot(CSSPixel::ToAppUnits(aCursor.mHotspot.x / zoom),
-                  CSSPixel::ToAppUnits(aCursor.mHotspot.y / zoom));
+  nsPoint hotspot(
+      CSSPixel::ToAppUnits(ViewAs<CSSPixel>(aCursor.mHotspot.x / zoom)),
+      CSSPixel::ToAppUnits(ViewAs<CSSPixel>(aCursor.mHotspot.y / zoom)));
 
   const nsRect cursorRect(point - hotspot, size);
   auto output = DOMIntersectionObserver::Intersect(input, cursorRect);
@@ -4224,7 +4289,7 @@ static CursorImage ComputeCustomCursor(nsPresContext* aPresContext,
                           : Nothing();
     gfx::IntPoint hotspot = ComputeHotspot(container, specifiedHotspot);
     CursorImage result{hotspot, std::move(container),
-                       image.image.GetResolution(), loading};
+                       image.image.GetResolution(style), loading};
     if (ShouldBlockCustomCursor(aPresContext, aEvent, result)) {
       continue;
     }
@@ -4323,7 +4388,7 @@ void EventStateManager::ClearCachedWidgetCursor(nsIFrame* aTargetFrame) {
 }
 
 void EventStateManager::StartHidingCursorWhileTyping(nsIWidget* aWidget) {
-  if (mHidingCursorWhileTyping) {
+  if (mHidingCursorWhileTyping || sCursorSettingManager != this) {
     return;
   }
   mHidingCursorWhileTyping = true;
@@ -4337,7 +4402,7 @@ nsresult EventStateManager::SetCursor(StyleCursorKind aCursor,
                                       nsIWidget* aWidget, bool aLockCursor) {
   EnsureDocument(mPresContext);
   NS_ENSURE_TRUE(mDocument, NS_ERROR_FAILURE);
-  sMouseOverDocument = mDocument.get();
+  sCursorSettingManager = this;
 
   NS_ENSURE_TRUE(aWidget, NS_ERROR_FAILURE);
   if (aLockCursor) {
@@ -4489,6 +4554,20 @@ class MOZ_STACK_CLASS ESMEventCB : public EventDispatchingCallback {
 static UniquePtr<WidgetMouseEvent> CreateMouseOrPointerWidgetEvent(
     WidgetMouseEvent* aMouseEvent, EventMessage aMessage,
     EventTarget* aRelatedTarget) {
+  // This method does not support creating a mouse/pointer button change event
+  // because of no data about the changing state.
+  MOZ_ASSERT(aMessage != eMouseDown);
+  MOZ_ASSERT(aMessage != eMouseUp);
+  MOZ_ASSERT(aMessage != ePointerDown);
+  MOZ_ASSERT(aMessage != ePointerUp);
+  // This method is currently designed to create the following events.
+  MOZ_ASSERT(aMessage == eMouseOver || aMessage == eMouseEnter ||
+             aMessage == eMouseOut || aMessage == eMouseLeave ||
+             aMessage == ePointerOver || aMessage == ePointerEnter ||
+             aMessage == ePointerOut || aMessage == ePointerLeave ||
+             aMessage == eMouseEnterIntoWidget ||
+             aMessage == eMouseExitFromWidget);
+
   WidgetPointerEvent* sourcePointer = aMouseEvent->AsPointerEvent();
   UniquePtr<WidgetMouseEvent> newEvent;
   if (sourcePointer) {
@@ -4507,12 +4586,72 @@ static UniquePtr<WidgetMouseEvent> CreateMouseOrPointerWidgetEvent(
                                             aMouseEvent->mWidget,
                                             WidgetMouseEvent::eReal);
   }
+
+  // Inherit whether the event is synthesized by the test API or not.
+  // Then, when the event is synthesized by a test API and handled in a remote
+  // process, it won't be ignored.  See PresShell::HandleEvent().
+  newEvent->mFlags.mIsSynthesizedForTests =
+      aMouseEvent->mFlags.mIsSynthesizedForTests;
+
   newEvent->mRelatedTarget = aRelatedTarget;
   newEvent->mRefPoint = aMouseEvent->mRefPoint;
   newEvent->mModifiers = aMouseEvent->mModifiers;
-  newEvent->mButton = aMouseEvent->mButton;
-  newEvent->mButtons = aMouseEvent->mButtons;
-  newEvent->mPressure = aMouseEvent->mPressure;
+  if (!aMouseEvent->mFlags.mDispatchedAtLeastOnce &&
+      aMouseEvent->InputSourceSupportsHover()) {
+    // If we synthesize a pointer event or a mouse event from another event
+    // which changes a button state whose input soucre supports hover state and
+    // the source event has not been dispatched yet, we should set to the button
+    // state of the synthesizing event to previous one.
+    // Note that we don't need to do this if the input source does not support
+    // hover state because a WPT check the behavior (see below) and the other
+    // browsers pass the test even though this is inconsistent behavior.
+    newEvent->mButton =
+        sourcePointer ? MouseButton::eNotPressed : MouseButton::ePrimary;
+    if (aMouseEvent->IsPressingButton()) {
+      // If the source event has not been dispatched into the DOM yet, we
+      // need to remove the flag which is being pressed.
+      newEvent->mButtons = static_cast<decltype(WidgetMouseEvent::mButtons)>(
+          aMouseEvent->mButtons &
+          ~MouseButtonsFlagToChange(
+              static_cast<MouseButton>(aMouseEvent->mButton)));
+    } else if (aMouseEvent->IsReleasingButton()) {
+      // If the source event has not been dispatched into the DOM yet, we
+      // need to add the flag which is being released.
+      newEvent->mButtons = static_cast<decltype(WidgetMouseEvent::mButtons)>(
+          aMouseEvent->mButtons |
+          MouseButtonsFlagToChange(
+              static_cast<MouseButton>(aMouseEvent->mButton)));
+    } else {
+      // The source event does not change the buttons state so that we can
+      // set mButtons value as-is.
+      newEvent->mButtons = aMouseEvent->mButtons;
+    }
+    // Adjust pressure if it does not matches with mButtons.
+    // FIXME: We may use wrong pressure value if the source event has not been
+    // dispatched into the DOM yet.  However, fixing this requires to store the
+    // last pressure value somewhere.
+    if (newEvent->mButtons && aMouseEvent->mPressure == 0) {
+      newEvent->mPressure = 0.5f;
+    } else if (!newEvent->mButtons && aMouseEvent->mPressure != 0) {
+      newEvent->mPressure = 0;
+    } else {
+      newEvent->mPressure = aMouseEvent->mPressure;
+    }
+  } else {
+    // If the event has already been dispatched into the tree, web apps has
+    // already handled the button state change, so the button state of the
+    // source event has already synced.
+    // If the input source does not have hover state, we don't need to modify
+    // the state because the other browsers behave so and tested by
+    // pointerevent_attributes_nohover_pointers.html even though this is
+    // different expectation from
+    // pointerevent_attributes_hoverable_pointers.html, but the other browsers
+    // pass both of them.
+    newEvent->mButton = aMouseEvent->mButton;
+    newEvent->mButtons = aMouseEvent->mButtons;
+    newEvent->mPressure = aMouseEvent->mPressure;
+  }
+
   newEvent->mInputSource = aMouseEvent->mInputSource;
   newEvent->pointerId = aMouseEvent->pointerId;
 
@@ -5312,8 +5451,7 @@ nsresult EventStateManager::InitAndDispatchClickEvent(
   event.mModifiers = aMouseUpEvent->mModifiers;
   event.mButtons = aMouseUpEvent->mButtons;
   event.mTimeStamp = aMouseUpEvent->mTimeStamp;
-  event.mFlags.mOnlyChromeDispatch =
-      aNoContentDispatch && !aMouseUpEvent->mUseLegacyNonPrimaryDispatch;
+  event.mFlags.mOnlyChromeDispatch = aNoContentDispatch;
   event.mFlags.mNoContentDispatch = aNoContentDispatch;
   event.mButton = aMouseUpEvent->mButton;
   event.pointerId = aMouseUpEvent->pointerId;
@@ -6122,18 +6260,11 @@ nsresult EventStateManager::DoContentCommandEvent(
         case eContentCommandPasteTransferable: {
           BrowserParent* remote = BrowserParent::GetFocused();
           if (remote) {
-            nsCOMPtr<nsITransferable> transferable = aEvent->mTransferable;
-            IPCTransferableData ipcTransferableData;
-            nsContentUtils::TransferableToIPCTransferableData(
-                transferable, &ipcTransferableData, false, remote->Manager());
-            bool isPrivateData = transferable->GetIsPrivateData();
-            nsCOMPtr<nsIPrincipal> requestingPrincipal =
-                transferable->GetRequestingPrincipal();
-            nsContentPolicyType contentPolicyType =
-                transferable->GetContentPolicyType();
-            remote->SendPasteTransferable(std::move(ipcTransferableData),
-                                          isPrivateData, requestingPrincipal,
-                                          contentPolicyType);
+            IPCTransferable ipcTransferable;
+            nsContentUtils::TransferableToIPCTransferable(
+                aEvent->mTransferable, &ipcTransferable, false,
+                remote->Manager());
+            remote->SendPasteTransferable(std::move(ipcTransferable));
             rv = NS_OK;
           } else {
             nsCOMPtr<nsICommandController> commandController =

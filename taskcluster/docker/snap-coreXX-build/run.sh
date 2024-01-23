@@ -48,7 +48,7 @@ fi
 sudo apt-get update
 
 # shellcheck disable=SC2046
-sudo apt-get install -y $(python3 /builds/worker/parse.py snapcraft.yaml)
+sudo apt-get install -y $(/usr/bin/python3 /builds/worker/parse.py snapcraft.yaml)
 
 # CRAFT_PARTS_PACKAGE_REFRESH required to avoid snapcraft running apt-get update
 # especially for stage-packages
@@ -59,14 +59,23 @@ if [ -d "/builds/worker/patches/${BRANCH}/" ]; then
 fi
 
 if [ "${TRY}" = "1" ]; then
+  # don't remove hg source, and don't force changeset so we get correct stamp
+  # still force repo because the try clone is from mozilla-unified but the
+  # generated link does not work
+  sed -ri 's|rm -rf .hg||g' snapcraft.yaml
   # shellcheck disable=SC2016
-  sed -ri 's|hg clone \$REPO -u \$REVISION|cp -r \$SNAPCRAFT_PROJECT_DIR/gecko/. |g' snapcraft.yaml
-else
-  sed -ri "s|hg clone |hg clone --stream |g" snapcraft.yaml
+  sed -ri 's|MOZ_SOURCE_REPO=\$\{REPO\}|MOZ_SOURCE_REPO=${GECKO_HEAD_REPOSITORY}|g' snapcraft.yaml
+  # shellcheck disable=SC2016
+  sed -ri 's|MOZ_SOURCE_CHANGESET=\$\{REVISION\}|MOZ_SOURCE_CHANGESET=${GECKO_HEAD_REV}|g' snapcraft.yaml
+  # shellcheck disable=SC2016
+  sed -ri 's|hg clone --stream \$REPO -u \$REVISION|cp -r \$SNAPCRAFT_PROJECT_DIR/gecko/. |g' snapcraft.yaml
 fi
 
 if [ "${DEBUG}" = "1" ]; then
-  echo "ac_add_options --enable-debug" >> ${MOZCONFIG}
+  {
+    echo "ac_add_options --enable-debug"
+    echo "ac_add_options --disable-install-strip"
+  } >> ${MOZCONFIG}
   echo "MOZ_DEBUG=1" >> ${MOZCONFIG}
 
   # No PGO on debug builds
@@ -80,3 +89,10 @@ SNAPCRAFT_BUILD_ENVIRONMENT_CPU=$(nproc) \
 CRAFT_PARTS_PACKAGE_REFRESH=0 \
   snapcraft --destructive-mode --verbose
 cp ./*.snap ./*.debug /builds/worker/artifacts/
+
+# Those are for fetches usage by the test task
+cp ./*.snap /builds/worker/artifacts/firefox.snap
+cp ./*.debug /builds/worker/artifacts/firefox.debug
+
+# Those are for running snap-upstream-test
+cd /builds/worker/checkouts/gecko/taskcluster/docker/snap-coreXX-build/snap-tests/ && zip -r9 /builds/worker/artifacts/snap-tests.zip ./*

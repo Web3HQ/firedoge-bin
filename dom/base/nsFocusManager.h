@@ -548,10 +548,9 @@ class nsFocusManager final : public nsIFocusManager,
    * Retrieves the start and end points of the current selection for
    * aDocument and stores them in aStartContent and aEndContent.
    */
-  nsresult GetSelectionLocation(Document* aDocument,
-                                mozilla::PresShell* aPresShell,
-                                nsIContent** aStartContent,
-                                nsIContent** aEndContent);
+  void GetSelectionLocation(Document* aDocument, mozilla::PresShell* aPresShell,
+                            nsIContent** aStartContent,
+                            nsIContent** aEndContent);
 
   /**
    * Retrieve the next tabbable element in scope owned by aOwner, using
@@ -658,6 +657,9 @@ class nsFocusManager final : public nsIFocusManager,
    * from where the selection is. Similarly, if the starting element isn't
    * focusable, since it doesn't really have a defined tab index.
    *
+   * aSkipPopover should be true to avoid an invoker triggering to step into
+   * the popover that was already been visited again.
+   *
    * aNavigateByKey to move focus by keyboard as a side effect of computing the
    * next target.
    */
@@ -665,7 +667,7 @@ class nsFocusManager final : public nsIFocusManager,
       mozilla::PresShell* aPresShell, nsIContent* aRootContent,
       nsIContent* aOriginalStartContent, nsIContent* aStartContent,
       bool aForward, int32_t aCurrentTabIndex, bool aIgnoreTabIndex,
-      bool aForDocumentNavigation, bool aNavigateByKey,
+      bool aForDocumentNavigation, bool aNavigateByKey, bool aSkipPopover,
       nsIContent** aResultContent);
 
   /**

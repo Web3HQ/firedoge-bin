@@ -16,9 +16,9 @@
 #include "WebCodecsUtils.h"
 #include "js/StructuredClone.h"
 #include "mozilla/Maybe.h"
-#include "mozilla/Result.h"
 #include "mozilla/ResultVariant.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/Try.h"
 
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/CanvasUtils.h"
@@ -36,6 +36,7 @@
 #include "mozilla/dom/UnionTypes.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/Swizzle.h"
+#include "mozilla/layers/LayersSurfaces.h"
 #include "nsLayoutUtils.h"
 #include "nsIPrincipal.h"
 #include "nsIURI.h"
@@ -906,38 +907,39 @@ static Result<RefPtr<VideoFrame>, nsCString> CreateVideoFrameFromBuffer(
   MOZ_TRY_VAR(combinedLayout,
               ComputeLayoutAndAllocationSize(parsedRect, format, optLayout));
 
-  Span<uint8_t> buffer;
-  MOZ_TRY_VAR(buffer, GetArrayBufferData(aBuffer).mapErr([](nsresult aError) {
-    return nsPrintfCString("Failed to get buffer data: %x",
-                           static_cast<uint32_t>(aError));
-  }));
-
-  if (buffer.size_bytes() <
-      static_cast<size_t>(combinedLayout.mAllocationSize)) {
-    return Err(nsCString("data is too small"));
-  }
-
-  // TODO: If codedSize is (3, 3) and visibleRect is (0, 0, 1, 1) but the data
-  // is 2 x 2 RGBA buffer (2 x 2 x 4 bytes), it pass the above check. In this
-  // case, we can crop it to a 1 x 1-codedSize image (Bug 1782128).
-  if (buffer.size_bytes() < format.SampleCount(codedSize)) {  // 1 byte/sample
-    return Err(nsCString("data is too small"));
-  }
-
-  // By spec, we should set visible* here. But if we don't change the image,
-  // visible* is same as parsedRect here. The display{Width, Height} is
-  // visible{Width, Height} if it's not set.
-
   Maybe<uint64_t> duration = OptionalToMaybe(aInit.mDuration);
 
   VideoColorSpaceInit colorSpace =
       PickColorSpace(OptionalToPointer(aInit.mColorSpace), aInit.mFormat);
 
   RefPtr<layers::Image> data;
-  MOZ_TRY_VAR(data,
-              CreateImageFromBuffer(format, colorSpace, codedSize, buffer));
+  MOZ_TRY_VAR(
+      data,
+      aBuffer.ProcessFixedData([&](const Span<uint8_t>& aData)
+                                   -> Result<RefPtr<layers::Image>, nsCString> {
+        if (aData.Length() <
+            static_cast<size_t>(combinedLayout.mAllocationSize)) {
+          return Err(nsCString("data is too small"));
+        }
+
+        // TODO: If codedSize is (3, 3) and visibleRect is (0, 0, 1, 1) but the
+        // data is 2 x 2 RGBA buffer (2 x 2 x 4 bytes), it pass the above check.
+        // In this case, we can crop it to a 1 x 1-codedSize image (Bug
+        // 1782128).
+        if (aData.Length() < format.SampleCount(codedSize)) {  // 1 byte/sample
+          return Err(nsCString("data is too small"));
+        }
+
+        return CreateImageFromBuffer(format, colorSpace, codedSize,
+                                     Span(aData.Elements(), aData.Length()));
+      }));
+
   MOZ_ASSERT(data);
   MOZ_ASSERT(data->GetSize() == codedSize);
+
+  // By spec, we should set visible* here. But if we don't change the image,
+  // visible* is same as parsedRect here. The display{Width, Height} is
+  // visible{Width, Height} if it's not set.
 
   // TODO: Spec should assign aInit.mFormat to inner format value:
   // https://github.com/w3c/webcodecs/issues/509.
@@ -1021,8 +1023,12 @@ InitializeFrameWithResourceAndSize(
 
   Maybe<uint64_t> duration = OptionalToMaybe(aInit.mDuration);
 
-  // TODO: WPT will fail if we guess a VideoColorSpace here.
-  const VideoColorSpaceInit colorSpace{};
+  VideoColorSpaceInit colorSpace{};
+  if (IsYUVFormat(SurfaceFormatToVideoPixelFormat(surface->GetFormat()).ref())) {
+    colorSpace = FallbackColorSpaceForVideoContent();
+  } else {
+    colorSpace = FallbackColorSpaceForWebContent();
+  }
   return MakeAndAddRef<VideoFrame>(
       aGlobal, image, format ? Some(format->PixelFormat()) : Nothing(),
       image->GetSize(), visibleRect.value(), displaySize.value(), duration,
@@ -1660,65 +1666,60 @@ already_AddRefed<Promise> VideoFrame::CopyTo(
   }
   layout = r1.unwrap();
 
-  auto r2 = GetSharedArrayBufferData(aDestination);
-  if (r2.isErr()) {
-    p->MaybeRejectWithTypeError("Failed to get buffer");
-    return p.forget();
-  }
-  Span<uint8_t> buffer = r2.unwrap();
-
-  if (buffer.size_bytes() < layout.mAllocationSize) {
-    p->MaybeRejectWithTypeError("Destination buffer is too small");
-    return p.forget();
-  }
-
-  Sequence<PlaneLayout> planeLayouts;
-
-  nsTArray<Format::Plane> planes = mResource->mFormat->Planes();
-  MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
-
-  // TODO: These jobs can be run in a thread pool (bug 1780656) to unblock the
-  // current thread.
-  for (size_t i = 0; i < layout.mComputedLayouts.Length(); ++i) {
-    ComputedPlaneLayout& l = layout.mComputedLayouts[i];
-    uint32_t destinationOffset = l.mDestinationOffset;
-
-    PlaneLayout* pl = planeLayouts.AppendElement(fallible);
-    if (!pl) {
-      p->MaybeRejectWithTypeError("Out of memory");
+  return ProcessTypedArraysFixed(aDestination, [&](const Span<uint8_t>& aData) {
+    if (aData.size_bytes() < layout.mAllocationSize) {
+      p->MaybeRejectWithTypeError("Destination buffer is too small");
       return p.forget();
     }
-    pl->mOffset = l.mDestinationOffset;
-    pl->mStride = l.mDestinationStride;
 
-    // Copy pixels of `size` starting from `origin` on planes[i] to
-    // `aDestination`.
-    gfx::IntPoint origin(
-        l.mSourceLeftBytes / mResource->mFormat->SampleBytes(planes[i]),
-        l.mSourceTop);
-    gfx::IntSize size(
-        l.mSourceWidthBytes / mResource->mFormat->SampleBytes(planes[i]),
-        l.mSourceHeight);
-    if (!mResource->CopyTo(planes[i], {origin, size},
-                           buffer.From(destinationOffset),
-                           static_cast<size_t>(l.mDestinationStride))) {
-      p->MaybeRejectWithTypeError(
-          nsPrintfCString("Failed to copy image data in %s plane",
-                          mResource->mFormat->PlaneName(planes[i])));
-      return p.forget();
+    Sequence<PlaneLayout> planeLayouts;
+
+    nsTArray<Format::Plane> planes = mResource->mFormat->Planes();
+    MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
+
+    // TODO: These jobs can be run in a thread pool (bug 1780656) to unblock
+    // the current thread.
+    for (size_t i = 0; i < layout.mComputedLayouts.Length(); ++i) {
+      ComputedPlaneLayout& l = layout.mComputedLayouts[i];
+      uint32_t destinationOffset = l.mDestinationOffset;
+
+      PlaneLayout* pl = planeLayouts.AppendElement(fallible);
+      if (!pl) {
+        p->MaybeRejectWithTypeError("Out of memory");
+        return p.forget();
+      }
+      pl->mOffset = l.mDestinationOffset;
+      pl->mStride = l.mDestinationStride;
+
+      // Copy pixels of `size` starting from `origin` on planes[i] to
+      // `aDestination`.
+      gfx::IntPoint origin(
+          l.mSourceLeftBytes / mResource->mFormat->SampleBytes(planes[i]),
+          l.mSourceTop);
+      gfx::IntSize size(
+          l.mSourceWidthBytes / mResource->mFormat->SampleBytes(planes[i]),
+          l.mSourceHeight);
+      if (!mResource->CopyTo(planes[i], {origin, size},
+                             aData.From(destinationOffset),
+                             static_cast<size_t>(l.mDestinationStride))) {
+        p->MaybeRejectWithTypeError(
+            nsPrintfCString("Failed to copy image data in %s plane",
+                            mResource->mFormat->PlaneName(planes[i])));
+        return p.forget();
+      }
     }
-  }
 
-  MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
-  // TODO: Spec doesn't resolve with a value. See
-  // https://github.com/w3c/webcodecs/issues/510 This comment should be removed
-  // once the issue is resolved.
-  p->MaybeResolve(planeLayouts);
-  return p.forget();
+    MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
+    // TODO: Spec doesn't resolve with a value. See
+    // https://github.com/w3c/webcodecs/issues/510 This comment should be
+    // removed once the issue is resolved.
+    p->MaybeResolve(planeLayouts);
+    return p.forget();
+  });
 }
 
 // https://w3c.github.io/webcodecs/#dom-videoframe-clone
-already_AddRefed<VideoFrame> VideoFrame::Clone(ErrorResult& aRv) {
+already_AddRefed<VideoFrame> VideoFrame::Clone(ErrorResult& aRv) const {
   AssertIsOnOwningThread();
 
   if (!mResource) {
@@ -1738,6 +1739,11 @@ void VideoFrame::Close() {
   mCodedSize = gfx::IntSize();
   mVisibleRect = gfx::IntRect();
   mDisplaySize = gfx::IntSize();
+  mColorSpace = VideoColorSpaceInit();
+}
+
+bool VideoFrame::IsClosed() const {
+  return !mResource;
 }
 
 already_AddRefed<layers::Image> VideoFrame::GetImage() const {
@@ -1745,6 +1751,31 @@ already_AddRefed<layers::Image> VideoFrame::GetImage() const {
     return nullptr;
   }
   return do_AddRef(mResource->mImage);
+}
+
+nsCString VideoFrame::ToString() const {
+  nsCString rv;
+
+  if (IsClosed()) {
+    rv.AppendPrintf("VideoFrame (closed)");
+    return rv;
+  }
+
+  rv.AppendPrintf(
+      "VideoFrame ts: %" PRId64
+      ", %s, coded[%dx%d] visible[%dx%d], display[%dx%d] color: %s",
+      mTimestamp,
+      dom::VideoPixelFormatValues::GetString(mResource->mFormat->PixelFormat())
+          .data(),
+      mCodedSize.width, mCodedSize.height, mVisibleRect.width,
+      mVisibleRect.height, mDisplaySize.width, mDisplaySize.height,
+      ColorSpaceInitToString(mColorSpace).get());
+
+  if (mDuration) {
+    rv.AppendPrintf(" dur: %" PRId64, mDuration.value());
+  }
+
+  return rv;
 }
 
 // https://w3c.github.io/webcodecs/#ref-for-deserialization-steps%E2%91%A0
@@ -2209,7 +2240,7 @@ bool VideoFrame::Resource::CopyTo(const Format::Plane& aPlane,
     }
 
     RefPtr<gfx::DataSourceSurface> dataSurface = surface->GetDataSurface();
-    if (NS_WARN_IF(!surface)) {
+    if (NS_WARN_IF(!dataSurface)) {
       return false;
     }
 

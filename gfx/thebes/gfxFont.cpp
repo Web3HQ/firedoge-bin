@@ -32,6 +32,7 @@
 #include "gfxHarfBuzzShaper.h"
 #include "gfxUserFontSet.h"
 #include "nsCRT.h"
+#include "nsContentUtils.h"
 #include "nsSpecialCasingData.h"
 #include "nsTextRunTransformations.h"
 #include "nsUGenCategory.h"
@@ -728,10 +729,30 @@ void gfxShapedText::SetupClusterBoundaries(uint32_t aOffset,
   // preceding letter by any letter-spacing or justification.
   const char16_t kBengaliVirama = 0x09CD;
   const char16_t kBengaliYa = 0x09AF;
+  // Characters treated as hyphens for the purpose of "emergency" breaking
+  // when the content would otherwise overflow.
+  auto isHyphen = [](char16_t c) {
+    return c == char16_t('-') ||  // HYPHEN-MINUS
+           c == 0x2010 ||         // HYPHEN
+           c == 0x2012 ||         // FIGURE DASH
+           c == 0x2013 ||         // EN DASH
+           c == 0x058A;           // ARMENIAN HYPHEN
+  };
+  bool prevWasHyphen = false;
   while (pos < aLength) {
     const char16_t ch = aString[pos];
+    if (prevWasHyphen) {
+      if (nsContentUtils::IsAlphanumeric(ch)) {
+        glyphs[pos].SetCanBreakBefore(
+            CompressedGlyph::FLAG_BREAK_TYPE_EMERGENCY_WRAP);
+      }
+      prevWasHyphen = false;
+    }
     if (ch == char16_t(' ') || ch == kIdeographicSpace) {
       glyphs[pos].SetIsSpace();
+    } else if (isHyphen(ch) && pos &&
+               nsContentUtils::IsAlphanumeric(aString[pos - 1])) {
+      prevWasHyphen = true;
     } else if (ch == kBengaliYa) {
       // Unless we're at the start, check for a preceding virama.
       if (pos > 0 && aString[pos - 1] == kBengaliVirama) {
@@ -753,14 +774,25 @@ void gfxShapedText::SetupClusterBoundaries(uint32_t aOffset,
                                            const uint8_t* aString,
                                            uint32_t aLength) {
   CompressedGlyph* glyphs = GetCharacterGlyphs() + aOffset;
-  const uint8_t* limit = aString + aLength;
-
-  while (aString < limit) {
-    if (*aString == uint8_t(' ')) {
-      glyphs->SetIsSpace();
+  uint32_t pos = 0;
+  bool prevWasHyphen = false;
+  while (pos < aLength) {
+    uint8_t ch = aString[pos];
+    if (prevWasHyphen) {
+      if (nsContentUtils::IsAlphanumeric(ch)) {
+        glyphs->SetCanBreakBefore(
+            CompressedGlyph::FLAG_BREAK_TYPE_EMERGENCY_WRAP);
+      }
+      prevWasHyphen = false;
     }
-    aString++;
-    glyphs++;
+    if (ch == uint8_t(' ')) {
+      glyphs->SetIsSpace();
+    } else if (ch == uint8_t('-') && pos &&
+               nsContentUtils::IsAlphanumeric(aString[pos - 1])) {
+      prevWasHyphen = true;
+    }
+    ++pos;
+    ++glyphs;
   }
 }
 
@@ -840,10 +872,11 @@ bool gfxShapedText::FilterIfIgnorable(uint32_t aIndex, uint32_t aCh) {
   return false;
 }
 
-void gfxShapedText::AdjustAdvancesForSyntheticBold(float aSynBoldOffset,
-                                                   uint32_t aOffset,
-                                                   uint32_t aLength) {
-  uint32_t synAppUnitOffset = aSynBoldOffset * mAppUnitsPerDevUnit;
+void gfxShapedText::ApplyTrackingToClusters(gfxFloat aTrackingAdjustment,
+                                            uint32_t aOffset,
+                                            uint32_t aLength) {
+  int32_t appUnitAdjustment =
+      NS_round(aTrackingAdjustment * gfxFloat(mAppUnitsPerDevUnit));
   CompressedGlyph* charGlyphs = GetCharacterGlyphs();
   for (uint32_t i = aOffset; i < aOffset + aLength; ++i) {
     CompressedGlyph* glyphData = charGlyphs + i;
@@ -851,7 +884,7 @@ void gfxShapedText::AdjustAdvancesForSyntheticBold(float aSynBoldOffset,
       // simple glyphs ==> just add the advance
       int32_t advance = glyphData->GetSimpleAdvance();
       if (advance > 0) {
-        advance += synAppUnitOffset;
+        advance = std::max(0, advance + appUnitAdjustment);
         if (CompressedGlyph::IsSimpleAdvance(advance)) {
           glyphData->SetSimpleGlyph(advance, glyphData->GetSimpleGlyph());
         } else {
@@ -872,14 +905,10 @@ void gfxShapedText::AdjustAdvancesForSyntheticBold(float aSynBoldOffset,
         if (!details) {
           continue;
         }
-        if (IsRightToLeft()) {
-          if (details[0].mAdvance > 0) {
-            details[0].mAdvance += synAppUnitOffset;
-          }
-        } else {
-          if (details[detailedLength - 1].mAdvance > 0) {
-            details[detailedLength - 1].mAdvance += synAppUnitOffset;
-          }
+        auto& advance = IsRightToLeft() ? details[0].mAdvance
+                                        : details[detailedLength - 1].mAdvance;
+        if (advance > 0) {
+          advance = std::max(0, advance + appUnitAdjustment);
         }
       }
     }
@@ -1718,8 +1747,8 @@ bool gfxFont::HasFeatureSet(uint32_t aFeature, bool& aFeatureOn) {
 
 already_AddRefed<mozilla::gfx::ScaledFont> gfxFont::GetScaledFont(
     mozilla::gfx::DrawTarget* aDrawTarget) {
-  TextRunDrawParams params;
-  params.dt = aDrawTarget;
+  mozilla::gfx::PaletteCache dummy;
+  TextRunDrawParams params(dummy);
   return GetScaledFont(params);
 }
 
@@ -2237,7 +2266,7 @@ void gfxFont::DrawEmphasisMarks(const gfxTextRun* aShapedText, gfx::Point* aPt,
                                 const EmphasisMarkDrawParams& aParams) {
   float& inlineCoord = aParams.isVertical ? aPt->y.value : aPt->x.value;
   gfxTextRun::Range markRange(aParams.mark);
-  gfxTextRun::DrawParams params(aParams.context);
+  gfxTextRun::DrawParams params(aParams.context, aParams.paletteCache);
 
   float clusterStart = -std::numeric_limits<float>::infinity();
   bool shouldDrawEmphasisMark = false;
@@ -2269,23 +2298,6 @@ void gfxFont::DrawEmphasisMarks(const gfxTextRun* aShapedText, gfx::Point* aPt,
   }
 }
 
-nsTArray<mozilla::gfx::sRGBColor>* TextRunDrawParams::GetPaletteFor(
-    const gfxFont* aFont) {
-  auto entry = mPaletteCache.Lookup(aFont);
-  if (!entry) {
-    CacheData newData;
-    newData.mKey = aFont;
-
-    gfxFontEntry* fe = aFont->GetFontEntry();
-    gfxFontEntry::AutoHBFace face = fe->GetHBFace();
-    newData.mPalette = COLRFonts::SetupColorPalette(
-        face, paletteValueSet, fontPalette, fe->FamilyName());
-
-    entry.Set(std::move(newData));
-  }
-  return entry.Data().mPalette.get();
-}
-
 void gfxFont::Draw(const gfxTextRun* aTextRun, uint32_t aStart, uint32_t aEnd,
                    gfx::Point* aPt, TextRunDrawParams& aRunParams,
                    gfx::ShapedTextFlags aOrientation) {
@@ -2313,6 +2325,7 @@ void gfxFont::Draw(const gfxTextRun* aTextRun, uint32_t aStart, uint32_t aEnd,
   fontParams.obliqueSkew = SkewForSyntheticOblique();
   fontParams.haveSVGGlyphs = GetFontEntry()->TryGetSVGData(this);
   fontParams.haveColorGlyphs = GetFontEntry()->TryGetColorGlyphs();
+  fontParams.hasTextShadow = aRunParams.hasTextShadow;
   fontParams.contextPaint = aRunParams.runContextPaint;
 
   if (fontParams.haveColorGlyphs && !UseNativeColrFontSupport()) {
@@ -2320,7 +2333,8 @@ void gfxFont::Draw(const gfxTextRun* aTextRun, uint32_t aStart, uint32_t aEnd,
     fontParams.currentColor = aRunParams.context->GetDeviceColor(ctxColor)
                                   ? sRGBColor::FromABGR(ctxColor.ToABGR())
                                   : sRGBColor::OpaqueBlack();
-    fontParams.palette = aRunParams.GetPaletteFor(this);
+    fontParams.palette = aRunParams.paletteCache.GetPaletteFor(
+        GetFontEntry(), aRunParams.fontPalette);
   }
 
   if (textDrawer) {
@@ -2649,6 +2663,11 @@ bool gfxFont::RenderColorGlyph(DrawTarget* aDrawTarget, gfxContext* aContext,
                                layout::TextDrawTarget* aTextDrawer,
                                const FontDrawParams& aFontParams,
                                const Point& aPoint, uint32_t aGlyphId) {
+  if (aTextDrawer && aFontParams.hasTextShadow) {
+    aTextDrawer->FoundUnsupportedFeature();
+    return true;
+  }
+
   if (const auto* paintGraph =
           COLRFonts::GetGlyphPaintGraph(GetFontEntry()->GetCOLR(), aGlyphId)) {
     const auto* hbShaper = GetHarfBuzzShaper();
@@ -3326,16 +3345,30 @@ bool gfxFont::ShapeText(DrawTarget* aDrawTarget, const char16_t* aText,
     if (GetFontEntry()->HasTrackingTable()) {
       // Convert font size from device pixels back to CSS px
       // to use in selecting tracking value
-      float trackSize = GetAdjustedSize() *
-                        aShapedText->GetAppUnitsPerDevUnit() /
-                        AppUnitsPerCSSPixel();
-      float tracking =
-          GetFontEntry()->TrackingForCSSPx(trackSize) * mFUnitsConvFactor;
-      // Applying tracking is a lot like the adjustment we do for
-      // synthetic bold: we want to apply between clusters, not to
-      // non-spacing glyphs within a cluster. So we can reuse that
-      // helper here.
-      aShapedText->AdjustAdvancesForSyntheticBold(tracking, aOffset, aLength);
+      gfxFloat trackSize = GetAdjustedSize() *
+                           aShapedText->GetAppUnitsPerDevUnit() /
+                           AppUnitsPerCSSPixel();
+      // Usually, a given font will be used with the same appunit scale, so we
+      // can cache the tracking value rather than recompute it every time.
+      {
+        AutoReadLock lock(mLock);
+        if (trackSize == mCachedTrackingSize) {
+          // Applying tracking is a lot like the adjustment we do for
+          // synthetic bold: we want to apply between clusters, not to
+          // non-spacing glyphs within a cluster. So we can reuse that
+          // helper here.
+          aShapedText->ApplyTrackingToClusters(mTracking, aOffset, aLength);
+          return true;
+        }
+      }
+      // We didn't have the appropriate tracking value cached yet.
+      AutoWriteLock lock(mLock);
+      if (trackSize != mCachedTrackingSize) {
+        mCachedTrackingSize = trackSize;
+        mTracking =
+            GetFontEntry()->TrackingForCSSPx(trackSize) * mFUnitsConvFactor;
+      }
+      aShapedText->ApplyTrackingToClusters(mTracking, aOffset, aLength);
     }
     return true;
   }
@@ -3351,8 +3384,8 @@ void gfxFont::PostShapingFixup(DrawTarget* aDrawTarget, const char16_t* aText,
     const Metrics& metrics = GetMetrics(aVertical ? nsFontMetrics::eVertical
                                                   : nsFontMetrics::eHorizontal);
     if (metrics.maxAdvance > metrics.aveCharWidth) {
-      aShapedText->AdjustAdvancesForSyntheticBold(GetSyntheticBoldOffset(),
-                                                  aOffset, aLength);
+      aShapedText->ApplyTrackingToClusters(GetSyntheticBoldOffset(), aOffset,
+                                           aLength);
     }
   }
 }
@@ -3806,6 +3839,37 @@ bool gfxFont::InitFakeSmallCapsRun(
               origString, convertedString, Some(globalTransform), maskChar,
               /* aCaseTransformsOnly = */ false, aLanguage, charsToMergeArray,
               deletedCharsArray);
+
+          // Check whether the font supports the uppercased characters needed;
+          // if not, we're not going to be able to simulate small-caps.
+          bool failed = false;
+          char16_t highSurrogate = 0;
+          for (const char16_t* cp = convertedString.BeginReading();
+               cp != convertedString.EndReading(); ++cp) {
+            if (NS_IS_HIGH_SURROGATE(*cp)) {
+              highSurrogate = *cp;
+              continue;
+            }
+            uint32_t ch = *cp;
+            if (NS_IS_LOW_SURROGATE(*cp) && highSurrogate) {
+              ch = SURROGATE_TO_UCS4(highSurrogate, *cp);
+            }
+            highSurrogate = 0;
+            if (!f->HasCharacter(ch)) {
+              if (IsDefaultIgnorable(ch)) {
+                continue;
+              }
+              failed = true;
+              break;
+            }
+          }
+          // Required uppercase letter(s) missing from the font. Just use the
+          // original text with the original font, no fake small caps!
+          if (failed) {
+            convertedString = origString;
+            mergeNeeded = false;
+            f = this;
+          }
 
           if (mergeNeeded) {
             // This is the hard case: the transformation caused chars
@@ -4577,7 +4641,6 @@ gfxFontStyle::gfxFontStyle()
       sizeAdjust(0.0f),
       baselineOffset(0.0f),
       languageOverride(NO_FONT_LANGUAGE_OVERRIDE),
-      fontSmoothingBackgroundColor(NS_RGBA(0, 0, 0, 0)),
       weight(FontWeight::NORMAL),
       stretch(FontStretch::NORMAL),
       style(FontSlantStyle::NORMAL),
@@ -4604,7 +4667,6 @@ gfxFontStyle::gfxFontStyle(FontSlantStyle aStyle, FontWeight aWeight,
     : size(aSize),
       baselineOffset(0.0f),
       languageOverride(aLanguageOverride),
-      fontSmoothingBackgroundColor(NS_RGBA(0, 0, 0, 0)),
       weight(aWeight),
       stretch(aStretch),
       style(aStyle),
@@ -4626,18 +4688,9 @@ gfxFontStyle::gfxFontStyle(FontSlantStyle aStyle, FontWeight aWeight,
   MOZ_ASSERT(FontSizeAdjust::Tag(sizeAdjustBasis) == aSizeAdjust.tag,
              "gfxFontStyle.sizeAdjustBasis too small?");
 
-  // If we're created with aSizeAdjust holding a FromFont value, we ignore it
-  // here; this is the style system retrieving font metrics in order to resolve
-  // FromFont to an actual ratio, which it can do using the unmodified metrics.
-
-#define HANDLE_TAG(TAG)                                     \
-  case FontSizeAdjust::Tag::TAG:                            \
-    if (aSizeAdjust.As##TAG().IsFromFont()) {               \
-      sizeAdjustBasis = uint8_t(FontSizeAdjust::Tag::None); \
-      sizeAdjust = 0.0f;                                    \
-      break;                                                \
-    }                                                       \
-    sizeAdjust = aSizeAdjust.As##TAG().AsNumber();          \
+#define HANDLE_TAG(TAG)                 \
+  case FontSizeAdjust::Tag::TAG:        \
+    sizeAdjust = aSizeAdjust.As##TAG(); \
     break;
 
   switch (aSizeAdjust.tag) {

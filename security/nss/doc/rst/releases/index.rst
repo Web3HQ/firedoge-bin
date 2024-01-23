@@ -8,6 +8,10 @@ Releases
    :glob:
    :hidden:
 
+   nss_3_96_1.rst
+   nss_3_96.rst
+   nss_3_95.rst
+   nss_3_94.rst
    nss_3_93.rst
    nss_3_92.rst
    nss_3_91_0.rst
@@ -57,16 +61,18 @@ Releases
 
 .. note::
 
-   **NSS 3.93.0** is the latest version of NSS.
-   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_91_0_release_notes`
+   **NSS 3.96.1** is the latest version of NSS.
+   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_96_1_release_notes`
 
-   **NSS 3.90.0 (ESR)** is the latest version of NSS.
-   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_90_0_release_notes`
+   **NSS 3.90.1 (ESR)** is the latest version of NSS.
+   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_90_1_release_notes`
 
 .. container::
 
-   Changes in 3.93 included in this release:
+   Changes in 3.96.1 (from 3.95.0) included in this release:
 
-   - Bug 1849471 - Update zlib in NSS to 1.3.
-   - Bug 1848183 - softoken: iterate hashUpdate calls for long inputs.
-   - Bug 1813401 - regenerate NameConstraints test certificates.
+  - Bug 1869408 - Use pypi dependencies for MacOS worker in ./build_gyp.sh
+  - Bug 1830978 - p7sign: add -a hash and -u certusage (also p7verify cleanups).
+  - Bug 1867408 - add a defensive check for large ssl_DefSend return values.
+  - Bug 1869378 - Add dependency to the taskcluster script for Darwin
+  - Bug 1869378 - Upgrade version of the MacOS worker for the CI

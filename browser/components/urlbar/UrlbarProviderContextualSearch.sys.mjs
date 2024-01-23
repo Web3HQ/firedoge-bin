@@ -12,6 +12,8 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   OpenSearchEngine: "resource://gre/modules/OpenSearchEngine.sys.mjs",
+  loadAndParseOpenSearchEngine:
+    "resource://gre/modules/OpenSearchLoader.sys.mjs",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   UrlbarResult: "resource:///modules/UrlbarResult.sys.mjs",
   UrlbarSearchUtils: "resource:///modules/UrlbarSearchUtils.sys.mjs",
@@ -30,7 +32,7 @@ const VIEW_TEMPLATE = {
     {
       name: "no-wrap",
       tag: "span",
-      classList: ["urlbarView-no-wrap"],
+      classList: ["urlbarView-no-wrap", "urlbarView-overflowable"],
       children: [
         {
           name: "icon",
@@ -40,7 +42,7 @@ const VIEW_TEMPLATE = {
         {
           name: "search",
           tag: "span",
-          classList: ["urlbarView-title"],
+          classList: ["urlbarView-title", "urlbarView-overflowable"],
         },
         {
           name: "separator",
@@ -154,7 +156,7 @@ class ProviderContextualSearch extends UrlbarProvider {
       let result = this.makeResult({
         url,
         engine: engine.name,
-        icon: engine.iconURI?.spec,
+        icon: engine.getIconURL(),
         input: queryContext.searchString,
         shouldNavigate: true,
       });
@@ -255,13 +257,11 @@ class ProviderContextualSearch extends UrlbarProvider {
     // In cases where we don't have to create a new engine, navigation is
     // handled automatically by providing `shouldNavigate: true` in the result.
     if (result.payload.shouldAddEngine) {
-      let newEngine = new lazy.OpenSearchEngine({ shouldPersist: false });
+      let engineData = await lazy.loadAndParseOpenSearchEngine(
+        Services.io.newURI(result.payload.url)
+      );
+      let newEngine = new lazy.OpenSearchEngine({ engineData });
       newEngine._setIcon(result.payload.icon, false);
-      await new Promise(resolve => {
-        newEngine.install(result.payload.url, errorCode => {
-          resolve(errorCode);
-        });
-      });
       this.engines.set(result.payload.hostname, newEngine);
       const [url] = UrlbarUtils.getSearchQueryUrl(
         newEngine,

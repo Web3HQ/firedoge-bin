@@ -44,6 +44,9 @@ export var XPCOMUtils = {
    *        only ever be called once.
    */
   defineLazyGetter(aObject, aName, aLambda) {
+    console.warn(
+      "Please use ChromeUtils.defineLazyGetter instead of XPCOMUtils.defineLazyGetter. XPCOMUtils.defineLazyGetter will be removed soon."
+    );
     ChromeUtils.defineLazyGetter(aObject, aName, aLambda);
   },
 
@@ -107,7 +110,7 @@ export var XPCOMUtils = {
    */
   defineLazyGlobalGetters(aObject, aNames) {
     for (let name of aNames) {
-      this.defineLazyGetter(aObject, name, () => {
+      ChromeUtils.defineLazyGetter(aObject, name, () => {
         if (!(name in global)) {
           let importName = EXTRA_GLOBAL_NAME_TO_IMPORT_NAME[name] || name;
           // eslint-disable-next-line mozilla/reject-importGlobalProperties, no-unused-vars
@@ -132,7 +135,7 @@ export var XPCOMUtils = {
    *        The name of the interface to query the service to.
    */
   defineLazyServiceGetter(aObject, aName, aContract, aInterfaceName) {
-    this.defineLazyGetter(aObject, aName, () => {
+    ChromeUtils.defineLazyGetter(aObject, aName, () => {
       if (aInterfaceName) {
         return Cc[aContract].getService(Ci[aInterfaceName]);
       }
@@ -165,68 +168,6 @@ export var XPCOMUtils = {
         service[1] || null
       );
     }
-  },
-
-  /**
-   * Defines a getter on a specified object for a module.  The module will not
-   * be imported until first use. The getter allows to execute setup and
-   * teardown code (e.g.  to register/unregister to services) and accepts
-   * a proxy object which acts on behalf of the module until it is imported.
-   *
-   * @param aObject
-   *        The object to define the lazy getter on.
-   * @param aName
-   *        The name of the getter to define on aObject for the module.
-   * @param aResource
-   *        The URL used to obtain the module.
-   * @param aSymbol
-   *        The name of the symbol exported by the module.
-   *        This parameter is optional and defaults to aName.
-   * @param aPreLambda
-   *        A function that is executed when the proxy is set up.
-   *        This will only ever be called once.
-   * @param aPostLambda
-   *        A function that is executed when the module has been imported to
-   *        run optional teardown procedures on the proxy object.
-   *        This will only ever be called once.
-   * @param aProxy
-   *        An object which acts on behalf of the module to be imported until
-   *        the module has been imported.
-   */
-  defineLazyModuleGetter(
-    aObject,
-    aName,
-    aResource,
-    aSymbol,
-    aPreLambda,
-    aPostLambda,
-    aProxy
-  ) {
-    if (arguments.length == 3) {
-      ChromeUtils.defineModuleGetter(aObject, aName, aResource);
-      return;
-    }
-
-    let proxy = aProxy || {};
-
-    if (typeof aPreLambda === "function") {
-      aPreLambda.apply(proxy);
-    }
-
-    this.defineLazyGetter(aObject, aName, () => {
-      var temp = {};
-      try {
-        temp = ChromeUtils.import(aResource);
-
-        if (typeof aPostLambda === "function") {
-          aPostLambda.apply(proxy);
-        }
-      } catch (ex) {
-        console.error("Failed to load module " + aResource + ".");
-        throw ex;
-      }
-      return temp[aSymbol || aName];
-    });
   },
 
   /**

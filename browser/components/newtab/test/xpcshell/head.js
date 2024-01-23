@@ -12,8 +12,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   JsonSchema: "resource://gre/modules/JsonSchema.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGlobalGetters(this, ["fetch"]);
-
 function assertValidates(validator, obj, msg) {
   const result = validator.validate(obj);
   Assert.ok(
@@ -64,10 +62,6 @@ async function makeValidators() {
     ),
     pb_newtab: await schemaValidatorFor(
       "resource://testing-common/NewtabPromoMessage.schema.json",
-      { common: true }
-    ),
-    protections_panel: await schemaValidatorFor(
-      "resource://testing-common/ProtectionsPanelMessage.schema.json",
       { common: true }
     ),
     spotlight: await schemaValidatorFor(

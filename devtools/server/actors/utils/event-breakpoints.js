@@ -129,19 +129,25 @@ const AVAILABLE_BREAKPOINTS = [
   {
     name: "Control",
     items: [
-      generalEvent("control", "resize"),
-      generalEvent("control", "scroll"),
-      // The condition should be removed when "apz.scrollend-event.content.enabled" is removed
-      generalEvent("control", "scrollend", win => "onscrollend" in win),
-      generalEvent("control", "zoom"),
+      // The condition should be removed when "dom.element.popover.enabled" is removed
+      generalEvent("control", "beforetoggle", () =>
+        Services.prefs.getBoolPref("dom.element.popover.enabled")
+      ),
+      generalEvent("control", "blur"),
+      generalEvent("control", "change"),
       generalEvent("control", "focus"),
       generalEvent("control", "focusin"),
       generalEvent("control", "focusout"),
-      generalEvent("control", "blur"),
-      generalEvent("control", "select"),
-      generalEvent("control", "change"),
-      generalEvent("control", "submit"),
+      // The condition should be removed when "dom.element.invokers.enabled" is removed
+      generalEvent("control", "invoke", win => "InvokeEvent" in win),
       generalEvent("control", "reset"),
+      generalEvent("control", "resize"),
+      generalEvent("control", "scroll"),
+      generalEvent("control", "scrollend"),
+      generalEvent("control", "select"),
+      generalEvent("control", "toggle"),
+      generalEvent("control", "submit"),
+      generalEvent("control", "zoom"),
     ],
   },
   {
@@ -201,9 +207,8 @@ const AVAILABLE_BREAKPOINTS = [
     name: "Load",
     items: [
       globalEvent("load", "load"),
-      // TODO: Disabled pending fixes for bug 1569775.
-      // globalEvent("load", "beforeunload"),
-      // globalEvent("load", "unload"),
+      globalEvent("load", "beforeunload"),
+      globalEvent("load", "unload"),
       globalEvent("load", "abort"),
       globalEvent("load", "error"),
       globalEvent("load", "hashchange"),

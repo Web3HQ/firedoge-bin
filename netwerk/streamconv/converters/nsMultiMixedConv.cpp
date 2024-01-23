@@ -5,6 +5,7 @@
 
 #include "nsMultiMixedConv.h"
 #include "nsIHttpChannel.h"
+#include "nsIThreadRetargetableStreamListener.h"
 #include "nsNetCID.h"
 #include "nsMimeTypes.h"
 #include "nsIStringStream.h"
@@ -21,6 +22,7 @@
 #include "mozilla/AutoRestore.h"
 #include "mozilla/Tokenizer.h"
 #include "nsComponentManagerUtils.h"
+#include "mozilla/StaticPrefs_network.h"
 
 using namespace mozilla;
 
@@ -402,7 +404,7 @@ nsPartChannel::GetBaseChannel(nsIChannel** aReturn) {
 
 // nsISupports implementation
 NS_IMPL_ISUPPORTS(nsMultiMixedConv, nsIStreamConverter, nsIStreamListener,
-                  nsIRequestObserver)
+                  nsIThreadRetargetableStreamListener, nsIRequestObserver)
 
 // nsIStreamConverter implementation
 
@@ -552,6 +554,12 @@ nsMultiMixedConv::OnDataAvailable(nsIRequest* request, nsIInputStream* inStr,
 
   return NS_FAILED(rv_send) ? rv_send : rv_feed;
 }
+
+NS_IMETHODIMP
+nsMultiMixedConv::OnDataFinished(nsresult aStatus) { return NS_OK; }
+
+NS_IMETHODIMP
+nsMultiMixedConv::CheckListenerChain() { return NS_ERROR_NOT_IMPLEMENTED; }
 
 NS_IMETHODIMP
 nsMultiMixedConv::OnStopRequest(nsIRequest* request, nsresult aStatus) {
@@ -977,7 +985,8 @@ nsresult nsMultiMixedConv::ProcessHeader() {
       nsCOMPtr<nsIHttpChannelInternal> httpInternal =
           do_QueryInterface(mChannel);
       mResponseHeaderValue.CompressWhitespace();
-      if (httpInternal) {
+      if (!StaticPrefs::network_cookie_prevent_set_cookie_from_multipart() &&
+          httpInternal) {
         DebugOnly<nsresult> rv = httpInternal->SetCookie(mResponseHeaderValue);
         MOZ_ASSERT(NS_SUCCEEDED(rv));
       }

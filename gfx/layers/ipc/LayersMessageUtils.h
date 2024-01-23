@@ -16,8 +16,10 @@
 #include "chrome/common/ipc_message_utils.h"
 #include "ipc/EnumSerializer.h"
 #include "ipc/IPCMessageUtils.h"
+#include "mozilla/ScrollSnapInfo.h"
 #include "mozilla/ServoBindings.h"
 #include "mozilla/ipc/ByteBuf.h"
+#include "mozilla/ipc/ProtocolMessageUtils.h"
 #include "mozilla/layers/APZInputBridge.h"
 #include "mozilla/layers/AsyncDragMetrics.h"
 #include "mozilla/layers/CompositorOptions.h"
@@ -408,20 +410,32 @@ struct ParamTraits<mozilla::ScrollSnapTargetId>
     : public PlainOldDataSerializer<mozilla::ScrollSnapTargetId> {};
 
 template <>
-struct ParamTraits<mozilla::layers::ScrollSnapInfo::SnapTarget> {
-  typedef mozilla::layers::ScrollSnapInfo::SnapTarget paramType;
+struct ParamTraits<mozilla::SnapPoint> {
+  typedef mozilla::SnapPoint paramType;
 
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
-    WriteParam(aWriter, aParam.mSnapPositionX);
-    WriteParam(aWriter, aParam.mSnapPositionY);
+    WriteParam(aWriter, aParam.mX);
+    WriteParam(aWriter, aParam.mY);
+  }
+
+  static bool Read(MessageReader* aReader, paramType* aResult) {
+    return ReadParam(aReader, &aResult->mX) && ReadParam(aReader, &aResult->mY);
+  }
+};
+
+template <>
+struct ParamTraits<mozilla::ScrollSnapInfo::SnapTarget> {
+  typedef mozilla::ScrollSnapInfo::SnapTarget paramType;
+
+  static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    WriteParam(aWriter, aParam.mSnapPoint);
     WriteParam(aWriter, aParam.mSnapArea);
     WriteParam(aWriter, aParam.mScrollSnapStop);
     WriteParam(aWriter, aParam.mTargetId);
   }
 
   static bool Read(MessageReader* aReader, paramType* aResult) {
-    return ReadParam(aReader, &aResult->mSnapPositionX) &&
-           ReadParam(aReader, &aResult->mSnapPositionY) &&
+    return ReadParam(aReader, &aResult->mSnapPoint) &&
            ReadParam(aReader, &aResult->mSnapArea) &&
            ReadParam(aReader, &aResult->mScrollSnapStop) &&
            ReadParam(aReader, &aResult->mTargetId);
@@ -429,25 +443,25 @@ struct ParamTraits<mozilla::layers::ScrollSnapInfo::SnapTarget> {
 };
 
 template <>
-struct ParamTraits<mozilla::layers::ScrollSnapInfo::ScrollSnapRange> {
-  typedef mozilla::layers::ScrollSnapInfo::ScrollSnapRange paramType;
+struct ParamTraits<mozilla::ScrollSnapInfo::ScrollSnapRange> {
+  typedef mozilla::ScrollSnapInfo::ScrollSnapRange paramType;
 
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
-    WriteParam(aWriter, aParam.mStart);
-    WriteParam(aWriter, aParam.mEnd);
+    WriteParam(aWriter, aParam.mDirection);
+    WriteParam(aWriter, aParam.mSnapArea);
     WriteParam(aWriter, aParam.mTargetId);
   }
 
   static bool Read(MessageReader* aReader, paramType* aResult) {
-    return ReadParam(aReader, &aResult->mStart) &&
-           ReadParam(aReader, &aResult->mEnd) &&
+    return ReadParam(aReader, &aResult->mDirection) &&
+           ReadParam(aReader, &aResult->mSnapArea) &&
            ReadParam(aReader, &aResult->mTargetId);
   }
 };
 
 template <>
-struct ParamTraits<mozilla::layers::ScrollSnapInfo> {
-  typedef mozilla::layers::ScrollSnapInfo paramType;
+struct ParamTraits<mozilla::ScrollSnapInfo> {
+  typedef mozilla::ScrollSnapInfo paramType;
 
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
     WriteParam(aWriter, aParam.mScrollSnapStrictnessX);
@@ -494,7 +508,7 @@ template <>
 struct ParamTraits<mozilla::ScrollUpdateType>
     : public ContiguousEnumSerializerInclusive<
           mozilla::ScrollUpdateType, mozilla::ScrollUpdateType::Absolute,
-          mozilla::ScrollUpdateType::PureRelative> {};
+          mozilla::ScrollUpdateType::MergeableAbsolute> {};
 
 template <>
 struct ParamTraits<mozilla::ScrollMode>
@@ -1091,6 +1105,23 @@ struct ParamTraits<mozilla::layers::ZoomTarget> {
             ReadParam(aReader, &aResult->cantZoomOutBehavior) &&
             ReadParam(aReader, &aResult->elementBoundingRect) &&
             ReadParam(aReader, &aResult->documentRelativePointerPosition));
+  }
+};
+
+template <>
+struct ParamTraits<mozilla::layers::DoubleTapToZoomMetrics> {
+  typedef mozilla::layers::DoubleTapToZoomMetrics paramType;
+
+  static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    WriteParam(aWriter, aParam.mVisualViewport);
+    WriteParam(aWriter, aParam.mRootScrollableRect);
+    WriteParam(aWriter, aParam.mTransformMatrix);
+  }
+
+  static bool Read(MessageReader* aReader, paramType* aResult) {
+    return (ReadParam(aReader, &aResult->mVisualViewport) &&
+            ReadParam(aReader, &aResult->mRootScrollableRect) &&
+            ReadParam(aReader, &aResult->mTransformMatrix));
   }
 };
 

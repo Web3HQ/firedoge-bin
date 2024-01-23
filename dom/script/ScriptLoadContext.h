@@ -8,6 +8,7 @@
 #define mozilla_dom_ScriptLoadContext_h
 
 #include "js/AllocPolicy.h"
+#include "js/ColumnNumber.h"    // JS::ColumnNumberOneOrigin
 #include "js/CompileOptions.h"  // JS::OwningCompileOptions
 #include "js/experimental/JSStencil.h"  // JS::FrontendContext, JS::Stencil, JS::InstantiationStorage
 #include "js/RootingAPI.h"
@@ -107,8 +108,6 @@ class CompileOrDecodeTask : public mozilla::Task {
   void Cancel();
 
  protected:
-  static constexpr size_t kDefaultStackQuota = 128 * sizeof(size_t) * 1024;
-
   // This mutex is locked during running the task or cancelling task.
   mozilla::Mutex mMutex;
 
@@ -146,9 +145,7 @@ class ScriptLoadContext : public JS::loader::LoadContextBase,
   NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(ScriptLoadContext,
                                            JS::loader::LoadContextBase)
 
-  // PreloaderBase
   static void PrioritizeAsPreload(nsIChannel* aChannel);
-  virtual void PrioritizeAsPreload() override;
 
   bool IsPreload() const;
 
@@ -238,7 +235,7 @@ class ScriptLoadContext : public JS::loader::LoadContextBase,
   RefPtr<CompileOrDecodeTask> mCompileOrDecodeTask;
 
   uint32_t mLineNo;
-  uint32_t mColumnNo;
+  JS::ColumnNumberOneOrigin mColumnNo;
 
   // Set on scripts and top level modules.
   bool mIsPreload;

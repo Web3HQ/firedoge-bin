@@ -14,7 +14,7 @@
 #include "jstypes.h"  // JS_PUBLIC_API
 
 #include "js/AllocPolicy.h"     // js::SystemAllocPolicy
-#include "js/ColumnNumber.h"    // JS::ColumnNumberZeroOrigin
+#include "js/ColumnNumber.h"    // JS::ColumnNumberOneOrigin
 #include "js/CompileOptions.h"  // JS::ReadOnlyCompileOptions
 #include "js/RootingAPI.h"      // JS::{Mutable,}Handle
 #include "js/Value.h"           // JS::Value
@@ -35,20 +35,6 @@ union Utf8Unit;
 }
 
 namespace JS {
-
-enum class ImportAssertion { Type };
-
-using ImportAssertionVector =
-    js::Vector<ImportAssertion, 1, js::SystemAllocPolicy>;
-
-/**
- * Set the supported assertions for the runtime to the given vector.
- *
- * See:
- * https://tc39.es/proposal-import-assertions/#sec-hostgetsupportedimportassertions
- */
-extern JS_PUBLIC_API void SetSupportedImportAssertions(
-    JSRuntime* rt, const ImportAssertionVector& assertions);
 
 /**
  * The HostResolveImportedModule hook.
@@ -269,7 +255,7 @@ extern JS_PUBLIC_API JSString* GetRequestedModuleSpecifier(
  */
 extern JS_PUBLIC_API void GetRequestedModuleSourcePos(
     JSContext* cx, Handle<JSObject*> moduleRecord, uint32_t index,
-    uint32_t* lineNumber, JS::ColumnNumberZeroOrigin* columnNumber);
+    uint32_t* lineNumber, JS::ColumnNumberOneOrigin* columnNumber);
 
 /*
  * Get the top-level script for a module which has not yet been executed.
@@ -302,11 +288,6 @@ extern JS_PUBLIC_API JSObject* GetModuleEnvironment(
  * Clear all bindings in a module's environment. Used during shutdown.
  */
 extern JS_PUBLIC_API void ClearModuleEnvironment(JSObject* moduleObj);
-
-/*
- * Diagnostic assert that the module is has status |Unlinked|.
- */
-extern JS_PUBLIC_API void AssertModuleUnlinked(JSObject* moduleObj);
 
 }  // namespace JS
 

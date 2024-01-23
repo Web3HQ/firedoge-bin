@@ -273,6 +273,18 @@ const REMOTE_COMPLEX_VALUES = [
   },
   { value: new WeakMap([[{}, 1]]), serialized: { type: "weakmap" } },
   { value: new WeakSet([{}]), serialized: { type: "weakset" } },
+  {
+    value: (function* () {
+      yield "a";
+    })(),
+    serialized: { type: "generator" },
+  },
+  {
+    value: (async function* () {
+      yield await Promise.resolve(1);
+    })(),
+    serialized: { type: "generator" },
+  },
   { value: new Error("error message"), serialized: { type: "error" } },
   {
     value: new SyntaxError("syntax error message"),
@@ -282,6 +294,7 @@ const REMOTE_COMPLEX_VALUES = [
     value: new TypeError("type error message"),
     serialized: { type: "error" },
   },
+  { value: new Proxy({}, {}), serialized: { type: "proxy" } },
   { value: new Promise(() => true), serialized: { type: "promise" } },
   { value: new Int8Array(), serialized: { type: "typedarray" } },
   { value: new ArrayBuffer(), serialized: { type: "arraybuffer" } },
@@ -405,10 +418,13 @@ add_task(function test_deserializeDateLocalValue() {
     "2009",
     "2009-05",
     "2009-05-19",
+    "2022-02-29",
     "2009T15:00",
     "2009-05T15:00",
+    "2022-06-31T15:00",
     "2009-05-19T15:00",
     "2009-05-19T15:00:15",
+    "2009-05-19T15:00-00:00",
     "2009-05-19T15:00:15.452",
     "2009-05-19T15:00:15.452Z",
     "2009-05-19T15:00:15.452+02:00",
@@ -578,7 +594,6 @@ add_task(function test_deserializeDateLocalValueInvalidValues() {
     "2009-15",
     "2009-02-1",
     "2009-02-50",
-    "2022-02-29",
     "15:00",
     "T15:00",
     "9-05-19T15:00",
@@ -588,7 +603,6 @@ add_task(function test_deserializeDateLocalValueInvalidValues() {
     "2009-05-19T15:",
     "2009-05-19T1:00",
     "2009-05-19T10:1",
-    "2022-06-31T15:00",
     "2009-05-19T60:00",
     "2009-05-19T15:70",
     "2009-05-19T15:00.25",
@@ -602,7 +616,6 @@ add_task(function test_deserializeDateLocalValueInvalidValues() {
     "2009-05-19T10:10+01:1",
     "2009-05-19T15:00+75:00",
     "2009-05-19T15:00+02:80",
-    "2009-05-19T15:00-00:00",
     "02009-05-19T15:00",
   ];
   for (const dateString of invalidaDateStrings) {

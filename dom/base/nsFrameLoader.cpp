@@ -17,7 +17,7 @@
 
 #include "nsDocShell.h"
 #include "nsIContentInlines.h"
-#include "nsIContentViewer.h"
+#include "nsIDocumentViewer.h"
 #include "nsIPrintSettings.h"
 #include "nsIPrintSettingsService.h"
 #include "mozilla/dom/Document.h"
@@ -47,6 +47,7 @@
 #include "nsPIWindowRoot.h"
 #include "nsLayoutUtils.h"
 #include "nsView.h"
+#include "nsViewManager.h"
 #include "nsBaseWidget.h"
 #include "nsQueryObject.h"
 #include "ReferrerInfo.h"
@@ -195,6 +196,7 @@ nsFrameLoader::nsFrameLoader(Element* aOwner, BrowsingContext* aBrowsingContext,
       mIsRemoteFrame(aIsRemoteFrame),
       mWillChangeProcess(false),
       mObservingOwnerContent(false),
+      mHadDetachedFrame(false),
       mTabProcessCrashFired(false) {
   nsCOMPtr<nsFrameLoaderOwner> owner = do_QueryInterface(aOwner);
   owner->AttachFrameLoader(this);
@@ -542,15 +544,19 @@ void nsFrameLoader::LoadFrame(bool aOriginalSrc) {
     return;
   }
 
-  nsIURI* base_uri = mOwnerContent->GetBaseURI();
+  // If we are being loaded by a lazy loaded iframe, use its base URI first
+  // instead of the current base URI.
+  auto* lazyBaseURI = GetLazyLoadFrameResumptionState().mBaseURI.get();
+  nsIURI* baseURI = lazyBaseURI ? lazyBaseURI : mOwnerContent->GetBaseURI();
+
   auto encoding = doc->GetDocumentCharacterSet();
 
   nsCOMPtr<nsIURI> uri;
-  nsresult rv = NS_NewURI(getter_AddRefs(uri), src, encoding, base_uri);
+  nsresult rv = NS_NewURI(getter_AddRefs(uri), src, encoding, baseURI);
 
   // If the URI was malformed, try to recover by loading about:blank.
   if (rv == NS_ERROR_MALFORMED_URI) {
-    rv = NS_NewURI(getter_AddRefs(uri), u"about:blank"_ns, encoding, base_uri);
+    rv = NS_NewURI(getter_AddRefs(uri), u"about:blank"_ns, encoding, baseURI);
   }
 
   if (NS_SUCCEEDED(rv)) {
@@ -691,7 +697,8 @@ nsresult nsFrameLoader::ReallyStartLoadingInternal() {
       loadState->SetBaseURI(mOwnerContent->GetBaseURI());
     }
 
-    auto referrerInfo = MakeRefPtr<ReferrerInfo>(*mOwnerContent);
+    auto referrerInfo = MakeRefPtr<ReferrerInfo>(
+        *mOwnerContent, GetLazyLoadFrameResumptionState().mReferrerPolicy);
     loadState->SetReferrerInfo(referrerInfo);
 
     loadState->SetIsFromProcessingFrameAttributes();
@@ -707,6 +714,12 @@ nsresult nsFrameLoader::ReallyStartLoadingInternal() {
     loadState->SetLoadFlags(flags);
 
     loadState->SetFirstParty(false);
+
+    Document* ownerDoc = mOwnerContent->OwnerDoc();
+    if (ownerDoc) {
+      loadState->SetTriggeringStorageAccess(ownerDoc->UsingStorageAccess());
+      loadState->SetTriggeringWindowId(ownerDoc->InnerWindowID());
+    }
 
     // If we're loading the default about:blank document in a <browser> element,
     // prevent the load from causing a process switch by explicitly overriding
@@ -980,19 +993,37 @@ bool nsFrameLoader::Show(nsSubDocumentFrame* frame) {
   ds->SetScrollbarPreference(GetScrollbarPreference(mOwnerContent));
   const bool marginsChanged =
       ds->UpdateFrameMargins(GetMarginAttributes(mOwnerContent));
+
+  nsView* view = frame->EnsureInnerView();
+  if (!view) {
+    return false;
+  }
+
+  // If we already have a pres shell (which can happen with <object> / <embed>)
+  // then hook it up in the view tree.
   if (PresShell* presShell = ds->GetPresShell()) {
-    // Ensure root scroll frame is reflowed in case margins have changed
+    // Ensure root scroll frame is reflowed in case margins have changed.
     if (marginsChanged) {
       if (nsIFrame* rootScrollFrame = presShell->GetRootScrollFrame()) {
         presShell->FrameNeedsReflow(rootScrollFrame, IntrinsicDirty::None,
                                     NS_FRAME_IS_DIRTY);
       }
     }
-    return true;
-  }
+    nsView* childView = presShell->GetViewManager()->GetRootView();
+    MOZ_DIAGNOSTIC_ASSERT(childView);
+    if (childView->GetParent() == view) {
+      // We were probably doing a docshell swap and succeeded before getting
+      // here, hooray, nothing else to do.
+      return true;
+    }
 
-  nsView* view = frame->EnsureInnerView();
-  if (!view) return false;
+    // We did layout before due to <object> or <embed> and now we need to fix
+    // up our stuff and initialize our docshell below too.
+    MOZ_DIAGNOSTIC_ASSERT(!view->GetFirstChild());
+    MOZ_DIAGNOSTIC_ASSERT(!childView->GetParent(), "Stale view?");
+    nsSubDocumentFrame::InsertViewsInReverseOrder(childView, view);
+    nsSubDocumentFrame::EndSwapDocShellsForViews(view->GetFirstChild());
+  }
 
   RefPtr<nsDocShell> baseWindow = GetDocShell();
   baseWindow->InitWindow(nullptr, view->GetWidget(), 0, 0, size.width,
@@ -1000,10 +1031,13 @@ bool nsFrameLoader::Show(nsSubDocumentFrame* frame) {
   baseWindow->SetVisibility(true);
   NS_ENSURE_TRUE(GetDocShell(), false);
 
-  // Trigger editor re-initialization if midas is turned on in the
-  // sub-document. This shouldn't be necessary, but given the way our
-  // editor works, it is. See
-  // https://bugzilla.mozilla.org/show_bug.cgi?id=284245
+  // Trigger editor re-initialization if midas is turned on in the sub-document.
+  // This shouldn't be necessary, but given the way our editor works, it is.
+  //
+  // See https://bugzilla.mozilla.org/show_bug.cgi?id=284245
+  //
+  // FIXME(emilio): This is a massive hack, plus probably not the right place to
+  // do it. Should probably be done in Document::CreatePresShell?
   if (RefPtr<PresShell> presShell = GetDocShell()->GetPresShell()) {
     Document* doc = presShell->GetDocument();
     nsHTMLDocument* htmlDoc =
@@ -1149,9 +1183,9 @@ void nsFrameLoader::Hide() {
     return;
   }
 
-  nsCOMPtr<nsIContentViewer> contentViewer;
-  GetDocShell()->GetContentViewer(getter_AddRefs(contentViewer));
-  if (contentViewer) contentViewer->SetSticky(false);
+  nsCOMPtr<nsIDocumentViewer> viewer;
+  GetDocShell()->GetDocViewer(getter_AddRefs(viewer));
+  if (viewer) viewer->SetSticky(false);
 
   RefPtr<nsDocShell> baseWin = GetDocShell();
   baseWin->SetVisibility(false);
@@ -1317,7 +1351,7 @@ nsresult nsFrameLoader::SwapWithOtherRemoteLoader(
               aFrameLoader->GetMaybePendingBrowsingContext()) {
         nsCOMPtr<nsISHistory> shistory = bc->Canonical()->GetSessionHistory();
         if (shistory) {
-          shistory->EvictAllContentViewers();
+          shistory->EvictAllDocumentViewers();
         }
       }
     };
@@ -1782,10 +1816,10 @@ nsresult nsFrameLoader::SwapWithOtherLoader(nsFrameLoader* aOther,
 
   // Drop any cached content viewers in the two session histories.
   if (ourHistory) {
-    ourHistory->EvictLocalContentViewers();
+    ourHistory->EvictLocalDocumentViewers();
   }
   if (otherHistory) {
-    otherHistory->EvictLocalContentViewers();
+    otherHistory->EvictLocalDocumentViewers();
   }
 
   NS_ASSERTION(ourFrame == ourContent->GetPrimaryFrame() &&
@@ -1888,7 +1922,7 @@ void nsFrameLoader::StartDestroy(bool aForProcessSwitch) {
     MaybeUpdatePrimaryBrowserParent(eBrowserParentRemoved);
 
     nsCOMPtr<nsFrameLoaderOwner> owner = do_QueryInterface(mOwnerContent);
-    owner->FrameLoaderDestroying(this);
+    owner->FrameLoaderDestroying(this, !aForProcessSwitch);
     SetOwnerContent(nullptr);
   }
 
@@ -2788,16 +2822,18 @@ bool nsFrameLoader::TryRemoteBrowserInternal() {
 }
 
 bool nsFrameLoader::TryRemoteBrowser() {
-  // Creating remote browsers may result in creating new processes, but during
-  // parent shutdown that would add just noise, so better bail out.
-  if (AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
-    return false;
-  }
+  // NOTE: Do not add new checks to this function, it exists to ensure we always
+  // MaybeNotifyCrashed for any errors within TryRemoteBrowserInternal. If new
+  // checks are added, they should be added into that function, not here.
 
   // Try to create the internal remote browser.
   if (TryRemoteBrowserInternal()) {
     return true;
   }
+
+  // We shouldn't TryRemoteBrowser again, even if a check failed before we
+  // initialize mInitialized within TryRemoteBrowserInternal.
+  mInitialized = true;
 
   // Check if we should report a browser-crashed error because the browser
   // failed to start.
@@ -2924,8 +2960,8 @@ nsresult nsFrameLoader::FinishStaticClone(
   nsCOMPtr<Document> kungFuDeathGrip = docShell->GetDocument();
   Unused << kungFuDeathGrip;
 
-  nsCOMPtr<nsIContentViewer> viewer;
-  docShell->GetContentViewer(getter_AddRefs(viewer));
+  nsCOMPtr<nsIDocumentViewer> viewer;
+  docShell->GetDocViewer(getter_AddRefs(viewer));
   NS_ENSURE_STATE(viewer);
 
   nsCOMPtr<Document> clonedDoc = doc->CreateStaticClone(
@@ -2951,8 +2987,7 @@ class nsAsyncMessageToChild : public nsSameProcessAsyncMessageBase,
                               public Runnable {
  public:
   explicit nsAsyncMessageToChild(nsFrameLoader* aFrameLoader)
-      : nsSameProcessAsyncMessageBase(),
-        mozilla::Runnable("nsAsyncMessageToChild"),
+      : mozilla::Runnable("nsAsyncMessageToChild"),
         mFrameLoader(aFrameLoader) {}
 
   NS_IMETHOD Run() override {
@@ -3085,15 +3120,24 @@ already_AddRefed<Element> nsFrameLoader::GetOwnerElement() {
   return do_AddRef(mOwnerContent);
 }
 
-void nsFrameLoader::SetDetachedSubdocFrame(nsIFrame* aDetachedFrame,
-                                           Document* aContainerDoc) {
-  mDetachedSubdocFrame = aDetachedFrame;
-  mContainerDocWhileDetached = aContainerDoc;
+const LazyLoadFrameResumptionState&
+nsFrameLoader::GetLazyLoadFrameResumptionState() {
+  static const LazyLoadFrameResumptionState sEmpty;
+  if (auto* iframe = HTMLIFrameElement::FromNode(*mOwnerContent)) {
+    return iframe->GetLazyLoadFrameResumptionState();
+  }
+  return sEmpty;
 }
 
-nsIFrame* nsFrameLoader::GetDetachedSubdocFrame(
-    Document** aContainerDoc) const {
-  NS_IF_ADDREF(*aContainerDoc = mContainerDocWhileDetached);
+void nsFrameLoader::SetDetachedSubdocFrame(nsIFrame* aDetachedFrame) {
+  mDetachedSubdocFrame = aDetachedFrame;
+  mHadDetachedFrame = !!aDetachedFrame;
+}
+
+nsIFrame* nsFrameLoader::GetDetachedSubdocFrame(bool* aOutIsSet) const {
+  if (aOutIsSet) {
+    *aOutIsSet = mHadDetachedFrame;
+  }
   return mDetachedSubdocFrame.GetFrame();
 }
 

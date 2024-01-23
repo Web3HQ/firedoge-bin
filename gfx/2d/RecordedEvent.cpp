@@ -26,10 +26,10 @@ bool RecordedEvent::DoWithEventFromStream(
 }
 
 /* static */
-bool RecordedEvent::DoWithEventFromStream(
-    EventRingBuffer& aStream, EventType aType,
+bool RecordedEvent::DoWithEventFromReader(
+    MemReader& aReader, EventType aType,
     const std::function<bool(RecordedEvent*)>& aAction) {
-  return DoWithEvent(aStream, aType, aAction);
+  return DoWithEvent(aReader, aType, aAction);
 }
 
 std::string RecordedEvent::GetEventName(EventType aType) {
@@ -38,6 +38,8 @@ std::string RecordedEvent::GetEventName(EventType aType) {
       return "DrawTarget Creation";
     case DRAWTARGETDESTRUCTION:
       return "DrawTarget Destruction";
+    case SETCURRENTDRAWTARGET:
+      return "SetCurrentDrawTarget";
     case FILLRECT:
       return "FillRect";
     case STROKERECT:
@@ -48,6 +50,8 @@ std::string RecordedEvent::GetEventName(EventType aType) {
       return "ClearRect";
     case COPYSURFACE:
       return "CopySurface";
+    case SETPERMITSUBPIXELAA:
+      return "SetPermitSubpixelAA";
     case SETTRANSFORM:
       return "SetTransform";
     case PUSHCLIP:
@@ -60,6 +64,8 @@ std::string RecordedEvent::GetEventName(EventType aType) {
       return "Fill";
     case FILLGLYPHS:
       return "FillGlyphs";
+    case STROKEGLYPHS:
+      return "StrokeGlyphs";
     case MASK:
       return "Mask";
     case STROKE:
@@ -84,6 +90,8 @@ std::string RecordedEvent::GetEventName(EventType aType) {
       return "FilterNodeCreation";
     case FILTERNODEDESTRUCTION:
       return "FilterNodeDestruction";
+    case SETCURRENTFILTERNODE:
+      return "SetCurrentFilterNode";
     case GRADIENTSTOPSCREATION:
       return "GradientStopsCreation";
     case GRADIENTSTOPSDESTRUCTION:
@@ -171,14 +179,8 @@ already_AddRefed<DrawTarget> Translator::CreateDrawTarget(
   return newDT.forget();
 }
 
-void Translator::DrawDependentSurface(ReferencePtr aDrawTarget, uint64_t aKey,
-                                      const Rect& aRect) {
-  if (!mDependentSurfaces) {
-    return;
-  }
-
-  DrawTarget* dt = LookupDrawTarget(aDrawTarget);
-  if (!dt) {
+void Translator::DrawDependentSurface(uint64_t aKey, const Rect& aRect) {
+  if (!mDependentSurfaces || !mCurrentDT) {
     return;
   }
 
@@ -188,21 +190,31 @@ void Translator::DrawDependentSurface(ReferencePtr aDrawTarget, uint64_t aKey,
     return;
   }
 
-  dt->PushClipRect(aRect);
-
   // Construct a new translator, so we can recurse into translating this
   // sub-recording into the same DT. Set an initial transform for the
   // translator, so that all commands get moved into the rect we want to draw.
-  Matrix transform = dt->GetTransform();
-  transform.PreTranslate(aRect.TopLeft());
-  InlineTranslator translator(dt, nullptr);
-  translator.SetReferenceDrawTargetTransform(transform);
+  //
+  // Because the recording may have filtered out SetTransform calls with the
+  // same value, we need to call SetTransform here to ensure it gets called at
+  // least once with the translated matrix.
+  const Matrix oldTransform = mCurrentDT->GetTransform();
 
-  translator.SetDependentSurfaces(mDependentSurfaces);
-  translator.TranslateRecording((char*)recordedSurface->mRecording.mData,
-                                recordedSurface->mRecording.mLen);
+  Matrix dependentTransform = oldTransform;
+  dependentTransform.PreTranslate(aRect.TopLeft());
 
-  dt->PopClip();
+  mCurrentDT->PushClipRect(aRect);
+  mCurrentDT->SetTransform(dependentTransform);
+
+  {
+    InlineTranslator translator(mCurrentDT, nullptr);
+    translator.SetReferenceDrawTargetTransform(dependentTransform);
+    translator.SetDependentSurfaces(mDependentSurfaces);
+    translator.TranslateRecording((char*)recordedSurface->mRecording.mData,
+                                  recordedSurface->mRecording.mLen);
+  }
+
+  mCurrentDT->SetTransform(oldTransform);
+  mCurrentDT->PopClip();
 }
 
 }  // namespace gfx

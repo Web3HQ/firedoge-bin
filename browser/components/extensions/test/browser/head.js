@@ -20,7 +20,7 @@
  *          openToolsMenu closeToolsMenu
  *          imageBuffer imageBufferFromDataURI
  *          getInlineOptionsBrowser
- *          getListStyleImage getPanelForNode
+ *          getListStyleImage getRawListStyleImage getPanelForNode
  *          awaitExtensionPanel awaitPopupResize
  *          promiseContentDimensions alterContent
  *          promisePrefChangeObserved openContextMenuInFrame
@@ -28,8 +28,9 @@
  *          awaitEvent BrowserWindowIterator
  *          navigateTab historyPushState promiseWindowRestored
  *          getIncognitoWindow startIncognitoMonitorExtension
- *          loadTestSubscript awaitBrowserLoaded backgroundColorSetOnRoot
+ *          loadTestSubscript awaitBrowserLoaded
  *          getScreenAt roundCssPixcel getCssAvailRect isRectContained
+ *          getToolboxBackgroundColor
  */
 
 // There are shutdown issues for which multiple rejections are left uncaught.
@@ -56,9 +57,6 @@ const { AppUiTestDelegate, AppUiTestInternals } = ChromeUtils.importESModule(
 
 const { Preferences } = ChromeUtils.importESModule(
   "resource://gre/modules/Preferences.sys.mjs"
-);
-const { ClientEnvironmentBase } = ChromeUtils.importESModule(
-  "resource://gre/modules/components-utils/ClientEnvironment.sys.mjs"
 );
 
 ChromeUtils.defineESModuleGetters(this, {
@@ -146,7 +144,7 @@ function getInlineOptionsBrowser(aboutAddonsBrowser) {
   return contentDocument.getElementById("addon-inline-options");
 }
 
-function getListStyleImage(button) {
+function getRawListStyleImage(button) {
   // Ensure popups are initialized so that the elements are rendered and
   // getComputedStyle works.
   for (
@@ -157,10 +155,11 @@ function getListStyleImage(button) {
     popup.ensureInitialized();
   }
 
-  let style = button.ownerGlobal.getComputedStyle(button);
+  return button.ownerGlobal.getComputedStyle(button).listStyleImage;
+}
 
-  let match = /^url\("(.*)"\)$/.exec(style.listStyleImage);
-
+function getListStyleImage(button) {
+  let match = /url\("([^"]*)"\)/.exec(getRawListStyleImage(button));
   return match && match[1];
 }
 
@@ -978,27 +977,11 @@ async function getIncognitoWindow(url = "about:privatebrowsing") {
   let data = windowWatcher.awaitMessage("data");
 
   let win = await BrowserTestUtils.openNewBrowserWindow({ private: true });
-  BrowserTestUtils.loadURIString(win.gBrowser.selectedBrowser, url);
+  BrowserTestUtils.startLoadingURIString(win.gBrowser.selectedBrowser, url);
 
   let details = await data;
   await windowWatcher.unload();
   return { win, details };
-}
-
-/**
- * Windows 7 and 8 set the window's background-color on :root instead of
- * #navigator-toolbox to avoid bug 1695280. When that bug is fixed, this
- * function and the assertions it gates can be removed.
- *
- * @returns {boolean} True if the window's background-color is set on :root
- *   rather than #navigator-toolbox.
- */
-function backgroundColorSetOnRoot() {
-  const os = ClientEnvironmentBase.os;
-  if (!os.isWindows) {
-    return false;
-  }
-  return os.windowsVersion < 10;
 }
 
 function getScreenAt(left, top, width, height) {
@@ -1051,4 +1034,13 @@ function isRectContained(actualRect, maxRect) {
     "top=true,bottom=true,left=true,right=true",
     `Dimension must be inside, top:${actualRect.top}>=${maxRect.top}, bottom:${actualRect.bottom}<=${maxRect.bottom}, left:${actualRect.left}>=${maxRect.left}, right:${actualRect.right}<=${maxRect.right}`
   );
+}
+
+function getToolboxBackgroundColor() {
+  let toolbox = document.getElementById("navigator-toolbox");
+  // Ignore any potentially ongoing transition.
+  toolbox.style.transitionProperty = "none";
+  let color = window.getComputedStyle(toolbox).backgroundColor;
+  toolbox.style.transitionProperty = "";
+  return color;
 }

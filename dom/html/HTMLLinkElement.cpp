@@ -92,23 +92,20 @@ nsresult HTMLLinkElement::BindToTree(BindContext& aContext, nsINode& aParent) {
 
   LinkStyle::BindToTree();
 
-  if (IsInUncomposedDoc() &&
-      AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
-                  eIgnoreCase)) {
-    aContext.OwnerDoc().LocalizationLinkAdded(this);
-  }
+  if (IsInUncomposedDoc()) {
+    if (AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
+                    eIgnoreCase)) {
+      aContext.OwnerDoc().LocalizationLinkAdded(this);
+    }
 
-  LinkAdded();
+    LinkAdded();
+  }
 
   return rv;
 }
 
 void HTMLLinkElement::LinkAdded() {
-  CreateAndDispatchEvent(OwnerDoc(), u"DOMLinkAdded"_ns);
-}
-
-void HTMLLinkElement::LinkRemoved() {
-  CreateAndDispatchEvent(OwnerDoc(), u"DOMLinkRemoved"_ns);
+  CreateAndDispatchEvent(u"DOMLinkAdded"_ns);
 }
 
 void HTMLLinkElement::UnbindFromTree(bool aNullParent) {
@@ -123,13 +120,14 @@ void HTMLLinkElement::UnbindFromTree(bool aNullParent) {
   // We want to update the localization but only if the link is removed from a
   // DOM change, and not because the document is going away.
   bool ignore;
-  if (oldDoc && oldDoc->GetScriptHandlingObject(ignore) &&
-      AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
-                  eIgnoreCase)) {
-    oldDoc->LocalizationLinkRemoved(this);
+  if (oldDoc) {
+    if (oldDoc->GetScriptHandlingObject(ignore) &&
+        AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
+                    eIgnoreCase)) {
+      oldDoc->LocalizationLinkRemoved(this);
+    }
   }
 
-  CreateAndDispatchEvent(oldDoc, u"DOMLinkRemoved"_ns);
   nsGenericHTMLElement::UnbindFromTree(aNullParent);
 
   Unused << UpdateStyleSheetInternal(oldDoc, oldShadowRoot);
@@ -159,15 +157,19 @@ bool HTMLLinkElement::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
       aResult.ParseStringOrAtom(aValue);
       return true;
     }
+
+    if (aAttribute == nsGkAtoms::fetchpriority) {
+      ParseFetchPriority(aValue, aResult);
+      return true;
+    }
   }
 
   return nsGenericHTMLElement::ParseAttribute(aNamespaceID, aAttribute, aValue,
                                               aMaybeScriptedPrincipal, aResult);
 }
 
-void HTMLLinkElement::CreateAndDispatchEvent(Document* aDoc,
-                                             const nsAString& aEventName) {
-  if (!aDoc) return;
+void HTMLLinkElement::CreateAndDispatchEvent(const nsAString& aEventName) {
+  MOZ_ASSERT(IsInUncomposedDoc());
 
   // In the unlikely case that both rev is specified *and* rel=stylesheet,
   // this code will cause the event to fire, on the principle that maybe the
@@ -212,7 +214,7 @@ void HTMLLinkElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
   if (aNameSpaceID == kNameSpaceID_None && aName == nsGkAtoms::href) {
     mCachedURI = nullptr;
     if (IsInUncomposedDoc()) {
-      CreateAndDispatchEvent(OwnerDoc(), u"DOMLinkChanged"_ns);
+      CreateAndDispatchEvent(u"DOMLinkChanged"_ns);
     }
     mTriggeringPrincipal = nsContentUtils::GetAttrTriggeringPrincipal(
         this, aValue ? aValue->GetStringValue() : EmptyString(),
@@ -387,6 +389,7 @@ Maybe<LinkStyle::SheetInfo> HTMLLinkElement::GetStyleSheetInfo() {
       alternate ? HasAlternateRel::Yes : HasAlternateRel::No,
       IsInline::No,
       mExplicitlyEnabled ? IsExplicitlyEnabled::Yes : IsExplicitlyEnabled::No,
+      GetFetchPriority(),
   });
 }
 
@@ -482,7 +485,7 @@ void HTMLLinkElement::
     if (!moduleLoader) {
       // For the print preview documents, at this moment it doesn't have module
       // loader yet, as the (print preview) document is not attached to the
-      // nsIContentViewer yet, so it doesn't have the GlobalObject.
+      // nsIDocumentViewer yet, so it doesn't have the GlobalObject.
       // Also, the script elements won't be processed as they are also cloned
       // from the original document.
       // So we simply bail out if the module loader is null.

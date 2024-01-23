@@ -72,15 +72,16 @@ class MozContainerSurfaceLock {
   struct wl_surface* GetSurface();
 };
 
-void moz_container_wayland_class_init(MozContainerClass* klass);
-void moz_container_wayland_init(MozContainerWayland* container);
-void moz_container_wayland_unmap(GtkWidget* widget);
+void moz_container_wayland_map(GtkWidget*);
+gboolean moz_container_wayland_map_event(GtkWidget*, GdkEventAny*);
+void moz_container_wayland_size_allocate(GtkWidget*, GtkAllocation*);
+void moz_container_wayland_unmap(GtkWidget*);
 
 struct wl_egl_window* moz_container_wayland_get_egl_window(
     MozContainer* container, double scale);
 
 gboolean moz_container_wayland_has_egl_window(MozContainer* container);
-void moz_container_wayland_egl_window_set_size(MozContainer* container,
+bool moz_container_wayland_egl_window_set_size(MozContainer* container,
                                                nsIntSize aSize, int aScale);
 void moz_container_wayland_set_scale_factor_locked(
     const mozilla::MutexAutoLock& aProofOfLock, MozContainer* container,

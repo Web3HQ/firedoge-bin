@@ -555,7 +555,7 @@ add_task(async function suggestHistoryFalse_bookmark_multiple() {
     matches: [
       makeVisitResult(context, {
         uri: baseURL,
-        fallbackTitle: "example.com",
+        fallbackTitle: UrlbarTestUtils.trimURL(baseURL),
         heuristic: true,
       }),
       makeBookmarkResult(context, {
@@ -658,7 +658,7 @@ add_task(async function suggestHistoryFalse_bookmark_prefix_multiple() {
     matches: [
       makeVisitResult(context, {
         uri: baseURL,
-        fallbackTitle: "example.com",
+        fallbackTitle: UrlbarTestUtils.trimURL(baseURL),
         heuristic: true,
       }),
       makeBookmarkResult(context, {
@@ -1025,7 +1025,7 @@ async function doTitleTest({ visits, input, expected }) {
           url: uri,
         }
       );
-      await db.executeCached("DELETE FROM moz_updateoriginsupdate_temp");
+      await PlacesFrecencyRecalculator.recalculateAnyOutdatedFrecencies();
     });
   }
 

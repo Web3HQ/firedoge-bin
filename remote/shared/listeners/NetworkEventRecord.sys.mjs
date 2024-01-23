@@ -178,10 +178,8 @@ export class NetworkEventRecord {
    *     The har-like timings.
    * @param {object} offsets
    *     The har-like timings, but as offset from the request start.
-   * @param {Array} serverTimings
-   *     The server timings.
    */
-  addEventTimings(total, timings, offsets, serverTimings) {}
+  addEventTimings(total, timings, offsets) {}
 
   /**
    * Add response cache entry.
@@ -216,7 +214,11 @@ export class NetworkEventRecord {
       },
     };
 
-    this.#emitResponseCompleted();
+    if (responseInfo.blockedReason) {
+      this.#emitFetchError();
+    } else {
+      this.#emitResponseCompleted();
+    }
   }
 
   /**
@@ -231,14 +233,84 @@ export class NetworkEventRecord {
    */
   addServerTimings(serverTimings) {}
 
+  /**
+   * Add service worker timings.
+   *
+   * Required API for a NetworkObserver event owner.
+   *
+   * Not used for RemoteAgent.
+   *
+   * @param {object} serviceWorkerTimings
+   *     The server timings.
+   */
+  addServiceWorkerTimings(serviceWorkerTimings) {}
+
+  onAuthPrompt(authDetails, authCallbacks) {
+    this.#emitAuthRequired(authCallbacks);
+  }
+
+  /**
+   * Convert the provided request timing to a timing relative to the beginning
+   * of the request. All timings are numbers representing high definition
+   * timestamps.
+   *
+   * @param {number} timing
+   *     High definition timestamp for a request timing relative from the time
+   *     origin.
+   * @param {number} requestTime
+   *     High definition timestamp for the request start time relative from the
+   *     time origin.
+   * @returns {number}
+   *     High definition timestamp for the request timing relative to the start
+   *     time of the request, or 0 if the provided timing was 0.
+   */
+  #convertTimestamp(timing, requestTime) {
+    if (timing == 0) {
+      return 0;
+    }
+
+    return timing - requestTime;
+  }
+
+  #emitAuthRequired(authCallbacks) {
+    this.#updateDataFromTimedChannel();
+
+    this.#networkListener.emit("auth-required", {
+      authCallbacks,
+      contextId: this.#contextId,
+      isNavigationRequest: this.#isMainDocumentChannel,
+      redirectCount: this.#redirectCount,
+      requestChannel: this.#requestChannel,
+      requestData: this.#requestData,
+      responseChannel: this.#responseChannel,
+      responseData: this.#responseData,
+      timestamp: Date.now(),
+    });
+  }
+
   #emitBeforeRequestSent() {
     this.#updateDataFromTimedChannel();
 
     this.#networkListener.emit("before-request-sent", {
       contextId: this.#contextId,
       isNavigationRequest: this.#isMainDocumentChannel,
-      requestChannel: this.#requestChannel,
       redirectCount: this.#redirectCount,
+      requestChannel: this.#requestChannel,
+      requestData: this.#requestData,
+      timestamp: Date.now(),
+    });
+  }
+
+  #emitFetchError() {
+    this.#updateDataFromTimedChannel();
+
+    this.#networkListener.emit("fetch-error", {
+      contextId: this.#contextId,
+      // TODO: Update with a proper error text. Bug 1873037.
+      errorText: ChromeUtils.getXPCOMErrorName(this.#requestChannel.status),
+      isNavigationRequest: this.#isMainDocumentChannel,
+      redirectCount: this.#redirectCount,
+      requestChannel: this.#requestChannel,
       requestData: this.#requestData,
       timestamp: Date.now(),
     });
@@ -272,29 +344,6 @@ export class NetworkEventRecord {
       responseData: this.#responseData,
       timestamp: Date.now(),
     });
-  }
-
-  /**
-   * Convert the provided request timing to a timing relative to the beginning
-   * of the request. All timings are numbers representing high definition
-   * timestamps.
-   *
-   * @param {number} timing
-   *     High definition timestamp for a request timing relative from the time
-   *     origin.
-   * @param {number} requestTime
-   *     High definition timestamp for the request start time relative from the
-   *     time origin.
-   * @returns {number}
-   *     High definition timestamp for the request timing relative to the start
-   *     time of the request, or 0 if the provided timing was 0.
-   */
-  #convertTimestamp(timing, requestTime) {
-    if (timing == 0) {
-      return 0;
-    }
-
-    return timing - requestTime;
   }
 
   #getBrowsingContext() {

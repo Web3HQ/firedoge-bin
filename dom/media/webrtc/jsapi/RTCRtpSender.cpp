@@ -81,7 +81,7 @@ LazyLogModule gSenderLog("RTCRtpSender");
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(RTCRtpSender)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(RTCRtpSender)
-  // We do not do anything here, we wait for BreakCycles to be called
+  tmp->Unlink();
   NS_IMPL_CYCLE_COLLECTION_UNLINK_PRESERVED_WRAPPER
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(RTCRtpSender)
@@ -434,7 +434,8 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
                   }
                 });
 
-            if (streamStats->rtp_stats.first_packet_time_ms == -1) {
+            if (streamStats->rtp_stats.first_packet_time ==
+                webrtc::Timestamp::PlusInfinity()) {
               return;
             }
 
@@ -451,7 +452,8 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
               remote.mPacketsLost.Construct(rtcpReportData.cumulative_lost());
               if (rtcpReportData.has_rtt()) {
                 remote.mRoundTripTime.Construct(
-                    static_cast<double>(rtcpReportData.last_rtt().ms()) / 1000.0);
+                    static_cast<double>(rtcpReportData.last_rtt().ms()) /
+                    1000.0);
               }
               constructCommonRemoteInboundRtpStats(remote, rtcpReportData);
               remote.mTotalRoundTripTime.Construct(
@@ -729,26 +731,13 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
     nsCString error(
         "Cannot change transaction id: call getParameters, modify the result, "
         "and then call setParameters");
-    if (!mAllowOldSetParameters) {
-      if (!mHaveFailedBecauseStaleTransactionId) {
-        mHaveFailedBecauseStaleTransactionId = true;
-        mozilla::glean::rtcrtpsender_setparameters::fail_stale_transactionid
-            .AddToNumerator(1);
-      }
-      p->MaybeRejectWithInvalidModificationError(error);
-      return p.forget();
-    }
-    if (!mHaveWarnedBecauseStaleTransactionId) {
-      mHaveWarnedBecauseStaleTransactionId = true;
-      mozilla::glean::rtcrtpsender_setparameters::warn_stale_transactionid
+    if (!mHaveFailedBecauseStaleTransactionId) {
+      mHaveFailedBecauseStaleTransactionId = true;
+      mozilla::glean::rtcrtpsender_setparameters::fail_stale_transactionid
           .AddToNumerator(1);
-#ifdef EARLY_BETA_OR_EARLIER
-      mozilla::glean::rtcrtpsender_setparameters::blame_stale_transactionid
-          .Get(GetEffectiveTLDPlus1())
-          .Add(1);
-#endif
     }
-    WarnAboutBadSetParameters(error);
+    p->MaybeRejectWithInvalidModificationError(error);
+    return p.forget();
   }
 
   // This could conceivably happen if we are allowing the old setParameters
@@ -1331,6 +1320,12 @@ void RTCRtpSender::BreakCycles() {
   mDtmf = nullptr;
 }
 
+void RTCRtpSender::Unlink() {
+  if (mTransceiver) {
+    mTransceiver->Unlink();
+  }
+}
+
 void RTCRtpSender::UpdateTransport() {
   MOZ_ASSERT(NS_IsMainThread());
   if (!mHaveSetupTransport) {
@@ -1548,6 +1543,37 @@ Maybe<RTCRtpSender::VideoConfig> RTCRtpSender::GetNewVideoConfig() {
     }
   }
 
+  if (!mHaveLoggedUlpfecInfo) {
+    bool ulpfecNegotiated = false;
+    for (const auto& codec : configs) {
+      if (nsCRT::strcasestr(codec.mName.c_str(), "ulpfec")) {
+        ulpfecNegotiated = true;
+      }
+    }
+    mozilla::glean::codec_stats::ulpfec_negotiated
+        .Get(ulpfecNegotiated ? "negotiated"_ns : "not_negotiated"_ns)
+        .Add(1);
+    mHaveLoggedUlpfecInfo = true;
+  }
+
+  // Log codec information we are tracking
+  if (!mHaveLoggedOtherFec &&
+      !GetJsepTransceiver().mSendTrack.GetFecCodecName().empty()) {
+    mozilla::glean::codec_stats::other_fec_signaled
+        .Get(nsDependentCString(
+            GetJsepTransceiver().mSendTrack.GetFecCodecName().c_str()))
+        .Add(1);
+    mHaveLoggedOtherFec = true;
+  }
+  if (!mHaveLoggedVideoPreferredCodec &&
+      !GetJsepTransceiver().mSendTrack.GetVideoPreferredCodec().empty()) {
+    mozilla::glean::codec_stats::video_preferred_codec
+        .Get(nsDependentCString(
+            GetJsepTransceiver().mSendTrack.GetVideoPreferredCodec().c_str()))
+        .Add(1);
+    mHaveLoggedVideoPreferredCodec = true;
+  }
+
   newConfig.mVideoRtpRtcpConfig = Some(details.GetRtpRtcpConfig());
 
   if (newConfig == oldConfig) {
@@ -1621,6 +1647,15 @@ Maybe<RTCRtpSender::AudioConfig> RTCRtpSender::GetNewAudioConfig() {
     }
 
     newConfig.mAudioCodec = Some(sendCodec);
+  }
+
+  if (!mHaveLoggedAudioPreferredCodec &&
+      !GetJsepTransceiver().mSendTrack.GetAudioPreferredCodec().empty()) {
+    mozilla::glean::codec_stats::audio_preferred_codec
+        .Get(nsDependentCString(
+            GetJsepTransceiver().mSendTrack.GetAudioPreferredCodec().c_str()))
+        .Add(1);
+    mHaveLoggedAudioPreferredCodec = true;
   }
 
   if (newConfig == oldConfig) {

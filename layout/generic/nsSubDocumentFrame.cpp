@@ -26,7 +26,7 @@
 #include "nsGenericHTMLFrameElement.h"
 #include "nsAttrValueInlines.h"
 #include "nsIDocShell.h"
-#include "nsIContentViewer.h"
+#include "nsIDocumentViewer.h"
 #include "nsIContentInlines.h"
 #include "nsPresContext.h"
 #include "nsView.h"
@@ -66,6 +66,19 @@ static Document* GetDocumentFromView(nsView* aView) {
   return presShell ? presShell->GetDocument() : nullptr;
 }
 
+static void PropagateIsUnderHiddenEmbedderElement(nsFrameLoader* aFrameLoader,
+                                                  bool aValue) {
+  if (!aFrameLoader) {
+    return;
+  }
+
+  if (BrowsingContext* bc = aFrameLoader->GetExtantBrowsingContext()) {
+    if (bc->IsUnderHiddenEmbedderElement() != aValue) {
+      Unused << bc->SetIsUnderHiddenEmbedderElement(aValue);
+    }
+  }
+}
+
 nsSubDocumentFrame::nsSubDocumentFrame(ComputedStyle* aStyle,
                                        nsPresContext* aPresContext)
     : nsAtomicContainerFrame(aStyle, aPresContext, kClassID),
@@ -103,10 +116,6 @@ class AsyncFrameInit : public Runnable {
   WeakFrame mFrame;
 };
 
-static void InsertViewsInReverseOrder(nsView* aSibling, nsView* aParent);
-
-static void EndSwapDocShellsForViews(nsView* aView);
-
 void nsSubDocumentFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
                               nsIFrame* aPrevInFlow) {
   MOZ_ASSERT(aContent);
@@ -125,55 +134,48 @@ void nsSubDocumentFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
   // called from within EndSwapDocShellsForViews below can find it if needed.
   aContent->SetPrimaryFrame(this);
 
-  // If we have a detached subdoc's root view on our frame loader, re-insert
-  // it into the view tree. This happens when we've been reframed, and
-  // ensures the presentation persists across reframes. If the frame element
-  // has changed documents however, we blow away the presentation.
-  RefPtr<nsFrameLoader> frameloader = FrameLoader();
-  if (frameloader) {
-    nsCOMPtr<Document> oldContainerDoc;
-    nsIFrame* detachedFrame =
-        frameloader->GetDetachedSubdocFrame(getter_AddRefs(oldContainerDoc));
-    frameloader->SetDetachedSubdocFrame(nullptr, nullptr);
-    MOZ_ASSERT(oldContainerDoc || !detachedFrame);
-    if (oldContainerDoc) {
-      nsView* detachedView = detachedFrame ? detachedFrame->GetView() : nullptr;
-      if (detachedView && oldContainerDoc == aContent->OwnerDoc()) {
-        // Restore stashed presentation.
-        ::InsertViewsInReverseOrder(detachedView, mInnerView);
-        ::EndSwapDocShellsForViews(mInnerView->GetFirstChild());
-      } else {
-        // Presentation is for a different document, don't restore it.
-        frameloader->Hide();
-      }
-    }
-
-    if (RefPtr<BrowsingContext> bc = frameloader->GetExtantBrowsingContext()) {
-      mIsInObjectOrEmbed = bc->IsEmbedderTypeObjectOrEmbed();
+  // If we have a detached subdoc's root view on our frame loader, re-insert it
+  // into the view tree. This happens when we've been reframed, and ensures the
+  // presentation persists across reframes.
+  if (RefPtr<nsFrameLoader> frameloader = FrameLoader()) {
+    bool hadFrame = false;
+    nsIFrame* detachedFrame = frameloader->GetDetachedSubdocFrame(&hadFrame);
+    frameloader->SetDetachedSubdocFrame(nullptr);
+    nsView* detachedView = detachedFrame ? detachedFrame->GetView() : nullptr;
+    if (detachedView) {
+      // Restore stashed presentation.
+      InsertViewsInReverseOrder(detachedView, mInnerView);
+      EndSwapDocShellsForViews(mInnerView->GetFirstChild());
+    } else if (hadFrame) {
+      // Presentation is for a different document, don't restore it.
+      frameloader->Hide();
     }
   }
 
-  MaybeUpdateRemoteStyle();
-
-  PropagateIsUnderHiddenEmbedderElementToSubView(
-      PresShell()->IsUnderHiddenEmbedderElement() ||
-      !StyleVisibility()->IsVisible());
-
+  // NOTE: The frame loader might not yet be initialized yet. If it's not, the
+  // call in ShowViewer() should pick things up.
+  UpdateEmbeddedBrowsingContextDependentData();
   nsContentUtils::AddScriptRunner(new AsyncFrameInit(this));
 }
 
-void nsSubDocumentFrame::PropagateIsUnderHiddenEmbedderElementToSubView(
-    bool aIsUnderHiddenEmbedderElement) {
+void nsSubDocumentFrame::UpdateEmbeddedBrowsingContextDependentData() {
   if (!mFrameLoader) {
     return;
   }
-
-  if (BrowsingContext* bc = mFrameLoader->GetExtantBrowsingContext()) {
-    if (bc->IsUnderHiddenEmbedderElement() != aIsUnderHiddenEmbedderElement) {
-      Unused << bc->SetIsUnderHiddenEmbedderElement(
-          aIsUnderHiddenEmbedderElement);
-    }
+  BrowsingContext* bc = mFrameLoader->GetExtantBrowsingContext();
+  if (!bc) {
+    return;
   }
+  mIsInObjectOrEmbed = bc->IsEmbedderTypeObjectOrEmbed();
+  MaybeUpdateRemoteStyle();
+  MaybeUpdateEmbedderColorScheme();
+  PropagateIsUnderHiddenEmbedderElement(
+      PresShell()->IsUnderHiddenEmbedderElement() ||
+      !StyleVisibility()->IsVisible());
+}
+
+void nsSubDocumentFrame::PropagateIsUnderHiddenEmbedderElement(bool aValue) {
+  ::PropagateIsUnderHiddenEmbedderElement(mFrameLoader, aValue);
 }
 
 void nsSubDocumentFrame::ShowViewer() {
@@ -199,16 +201,13 @@ void nsSubDocumentFrame::ShowViewer() {
     }
     mCallingShow = false;
     mDidCreateDoc = didCreateDoc;
-
     if (!HasAnyStateBits(NS_FRAME_FIRST_REFLOW)) {
       frameloader->UpdatePositionAndSize(this);
     }
-
-    MaybeUpdateEmbedderColorScheme();
-
     if (!weakThis.IsAlive()) {
       return;
     }
+    UpdateEmbeddedBrowsingContextDependentData();
     InvalidateFrame();
   }
 }
@@ -282,9 +281,7 @@ nsRect nsSubDocumentFrame::GetDestRect() {
 ScreenIntSize nsSubDocumentFrame::GetSubdocumentSize() {
   if (HasAnyStateBits(NS_FRAME_FIRST_REFLOW)) {
     if (RefPtr<nsFrameLoader> frameloader = FrameLoader()) {
-      nsCOMPtr<Document> oldContainerDoc;
-      nsIFrame* detachedFrame =
-          frameloader->GetDetachedSubdocFrame(getter_AddRefs(oldContainerDoc));
+      nsIFrame* detachedFrame = frameloader->GetDetachedSubdocFrame();
       if (nsView* view = detachedFrame ? detachedFrame->GetView() : nullptr) {
         nsSize size = view->GetBounds().Size();
         nsPresContext* presContext = detachedFrame->PresContext();
@@ -873,7 +870,7 @@ void nsSubDocumentFrame::DidSetComputedStyle(ComputedStyle* aOldComputedStyle) {
   const bool isVisible = StyleVisibility()->IsVisible();
   if (!aOldComputedStyle ||
       isVisible != aOldComputedStyle->StyleVisibility()->IsVisible()) {
-    PropagateIsUnderHiddenEmbedderElementToSubView(!isVisible);
+    PropagateIsUnderHiddenEmbedderElement(!isVisible);
   }
 }
 
@@ -884,7 +881,7 @@ nsIFrame* NS_NewSubDocumentFrame(PresShell* aPresShell, ComputedStyle* aStyle) {
 
 NS_IMPL_FRAMEARENA_HELPERS(nsSubDocumentFrame)
 
-class nsHideViewer : public Runnable {
+class nsHideViewer final : public Runnable {
  public:
   nsHideViewer(nsIContent* aFrameElement, nsFrameLoader* aFrameLoader,
                PresShell* aPresShell, bool aHideViewerIfFrameless)
@@ -912,33 +909,35 @@ class nsHideViewer : public Runnable {
     //
     // We should find some way to avoid that!
     if (!mPresShell->IsDestroying() && mFrameElement->IsInComposedDoc()) {
-      MOZ_KnownLive(mPresShell)->FlushPendingNotifications(FlushType::Frames);
+      mPresShell->FlushPendingNotifications(FlushType::Frames);
     }
 
     // Either the frame has been constructed by now, or it never will be,
     // either way we want to clear the stashed views.
-    mFrameLoader->SetDetachedSubdocFrame(nullptr, nullptr);
+    mFrameLoader->SetDetachedSubdocFrame(nullptr);
 
     nsSubDocumentFrame* frame = do_QueryFrame(mFrameElement->GetPrimaryFrame());
-    if ((!frame && mHideViewerIfFrameless) || mPresShell->IsDestroying()) {
-      // Either the frame element has no nsIFrame or the presshell is being
-      // destroyed. Hide the nsFrameLoader, which destroys the presentation.
-      mFrameLoader->Hide();
+    if (!frame || frame->FrameLoader() != mFrameLoader) {
+      PropagateIsUnderHiddenEmbedderElement(mFrameLoader, true);
+      if (mHideViewerIfFrameless) {
+        // The frame element has no nsIFrame for the same frame loader.
+        // Hide the nsFrameLoader, which destroys the presentation.
+        mFrameLoader->Hide();
+      }
     }
     return NS_OK;
   }
 
  private:
-  nsCOMPtr<nsIContent> mFrameElement;
-  RefPtr<nsFrameLoader> mFrameLoader;
-  RefPtr<PresShell> mPresShell;
-  bool mHideViewerIfFrameless;
+  const nsCOMPtr<nsIContent> mFrameElement;
+  const RefPtr<nsFrameLoader> mFrameLoader;
+  const RefPtr<PresShell> mPresShell;
+  const bool mHideViewerIfFrameless;
 };
 
 static nsView* BeginSwapDocShellsForViews(nsView* aSibling);
 
 void nsSubDocumentFrame::Destroy(DestroyContext& aContext) {
-  PropagateIsUnderHiddenEmbedderElementToSubView(true);
   if (mPostedReflowCallback) {
     PresShell()->CancelReflowCallback(this);
     mPostedReflowCallback = false;
@@ -947,27 +946,19 @@ void nsSubDocumentFrame::Destroy(DestroyContext& aContext) {
   // Detach the subdocument's views and stash them in the frame loader.
   // We can then reattach them if we're being reframed (for example if
   // the frame has been made position:fixed).
-  RefPtr<nsFrameLoader> frameloader = FrameLoader();
-  if (frameloader) {
+  if (RefPtr<nsFrameLoader> frameloader = FrameLoader()) {
     ClearDisplayItems();
 
     nsView* detachedViews =
         ::BeginSwapDocShellsForViews(mInnerView->GetFirstChild());
 
-    if (detachedViews && detachedViews->GetFrame()) {
-      frameloader->SetDetachedSubdocFrame(detachedViews->GetFrame(),
-                                          mContent->OwnerDoc());
+    frameloader->SetDetachedSubdocFrame(
+        detachedViews ? detachedViews->GetFrame() : nullptr);
 
-      // We call nsFrameLoader::HideViewer() in a script runner so that we can
-      // safely determine whether the frame is being reframed or destroyed.
-      nsContentUtils::AddScriptRunner(new nsHideViewer(
-          mContent, frameloader, PresShell(), (mDidCreateDoc || mCallingShow)));
-    } else {
-      frameloader->SetDetachedSubdocFrame(nullptr, nullptr);
-      if (mDidCreateDoc || mCallingShow) {
-        frameloader->Hide();
-      }
-    }
+    // We call nsFrameLoader::HideViewer() in a script runner so that we can
+    // safely determine whether the frame is being reframed or destroyed.
+    nsContentUtils::AddScriptRunner(new nsHideViewer(
+        mContent, frameloader, PresShell(), (mDidCreateDoc || mCallingShow)));
   }
 
   nsAtomicContainerFrame::Destroy(aContext);
@@ -1085,7 +1076,9 @@ static nsView* BeginSwapDocShellsForViews(nsView* aSibling) {
   return removedViews;
 }
 
-static void InsertViewsInReverseOrder(nsView* aSibling, nsView* aParent) {
+/* static */
+void nsSubDocumentFrame::InsertViewsInReverseOrder(nsView* aSibling,
+                                                   nsView* aParent) {
   MOZ_ASSERT(aParent, "null view");
   MOZ_ASSERT(!aParent->GetFirstChild(), "inserting into non-empty list");
 
@@ -1120,8 +1113,8 @@ nsresult nsSubDocumentFrame::BeginSwapDocShells(nsIFrame* aOther) {
     nsView* otherSubdocViews = other->mInnerView->GetFirstChild();
     nsView* otherRemovedViews = ::BeginSwapDocShellsForViews(otherSubdocViews);
 
-    ::InsertViewsInReverseOrder(ourRemovedViews, other->mInnerView);
-    ::InsertViewsInReverseOrder(otherRemovedViews, mInnerView);
+    InsertViewsInReverseOrder(ourRemovedViews, other->mInnerView);
+    InsertViewsInReverseOrder(otherRemovedViews, mInnerView);
   }
   mFrameLoader.swap(other->mFrameLoader);
   return NS_OK;
@@ -1132,19 +1125,19 @@ static CallState EndSwapDocShellsForDocument(Document& aDocument) {
   // Now also update all nsDeviceContext::mWidget to that of the
   // container view in the new hierarchy.
   if (nsCOMPtr<nsIDocShell> ds = aDocument.GetDocShell()) {
-    nsCOMPtr<nsIContentViewer> cv;
-    ds->GetContentViewer(getter_AddRefs(cv));
-    while (cv) {
-      RefPtr<nsPresContext> pc = cv->GetPresContext();
+    nsCOMPtr<nsIDocumentViewer> viewer;
+    ds->GetDocViewer(getter_AddRefs(viewer));
+    while (viewer) {
+      RefPtr<nsPresContext> pc = viewer->GetPresContext();
       if (pc && pc->GetPresShell()) {
         pc->GetPresShell()->SetNeverPainting(ds->IsInvisible());
       }
       nsDeviceContext* dc = pc ? pc->DeviceContext() : nullptr;
       if (dc) {
-        nsView* v = cv->FindContainerView();
+        nsView* v = viewer->FindContainerView();
         dc->Init(v ? v->GetNearestWidget(nullptr) : nullptr);
       }
-      cv = cv->GetPreviousViewer();
+      viewer = viewer->GetPreviousViewer();
     }
   }
 
@@ -1152,7 +1145,8 @@ static CallState EndSwapDocShellsForDocument(Document& aDocument) {
   return CallState::Continue;
 }
 
-static void EndSwapDocShellsForViews(nsView* aSibling) {
+/* static */
+void nsSubDocumentFrame::EndSwapDocShellsForViews(nsView* aSibling) {
   for (; aSibling; aSibling = aSibling->GetNextSibling()) {
     if (Document* doc = ::GetDocumentFromView(aSibling)) {
       ::EndSwapDocShellsForDocument(*doc);
@@ -1183,10 +1177,10 @@ void nsSubDocumentFrame::EndSwapDocShells(nsIFrame* aOther) {
   AutoWeakFrame weakOther(aOther);
 
   if (mInnerView) {
-    ::EndSwapDocShellsForViews(mInnerView->GetFirstChild());
+    EndSwapDocShellsForViews(mInnerView->GetFirstChild());
   }
   if (other->mInnerView) {
-    ::EndSwapDocShellsForViews(other->mInnerView->GetFirstChild());
+    EndSwapDocShellsForViews(other->mInnerView->GetFirstChild());
   }
 
   // Now make sure we reflow both frames, in case their contents
@@ -1197,7 +1191,7 @@ void nsSubDocumentFrame::EndSwapDocShells(nsIFrame* aOther) {
     PresShell()->FrameNeedsReflow(this, IntrinsicDirty::FrameAndAncestors,
                                   NS_FRAME_IS_DIRTY);
     InvalidateFrameSubtree();
-    PropagateIsUnderHiddenEmbedderElementToSubView(
+    PropagateIsUnderHiddenEmbedderElement(
         PresShell()->IsUnderHiddenEmbedderElement() ||
         !StyleVisibility()->IsVisible());
   }
@@ -1205,7 +1199,7 @@ void nsSubDocumentFrame::EndSwapDocShells(nsIFrame* aOther) {
     other->PresShell()->FrameNeedsReflow(
         other, IntrinsicDirty::FrameAndAncestors, NS_FRAME_IS_DIRTY);
     other->InvalidateFrameSubtree();
-    other->PropagateIsUnderHiddenEmbedderElementToSubView(
+    other->PropagateIsUnderHiddenEmbedderElement(
         other->PresShell()->IsUnderHiddenEmbedderElement() ||
         !other->StyleVisibility()->IsVisible());
   }

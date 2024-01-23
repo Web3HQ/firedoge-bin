@@ -53,6 +53,12 @@ skip-if(!this.hasOwnProperty("Intl")) include test262/intl402/jstests.list
 skip-if(!this.hasOwnProperty("Atomics")) include test262/built-ins/Atomics/jstests.list
 skip-if(!this.hasOwnProperty("SharedArrayBuffer")) include test262/built-ins/SharedArrayBuffer/jstests.list
 
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1863140
+skip script test262/built-ins/FinalizationRegistry/prototype/register/return-undefined-register-symbol.js
+skip script test262/built-ins/FinalizationRegistry/prototype/unregister/unregister-symbol-token.js
+skip script test262/built-ins/WeakRef/returns-new-object-from-constructor-with-symbol-target.js
+skip script test262/built-ins/WeakRef/prototype/deref/return-symbol-target.js
+
 #####################################
 # Test262 tests disabled on browser #
 #####################################
@@ -134,7 +140,11 @@ skip-if(!xulRuntime.shell) include test262/built-ins/Atomics/wait/jstests.list
 # property -- and right now, it's only defined for cross-site-isolated pages
 # that request it using COOP/COEP.
 fails-if(!xulRuntime.shell) script test262/built-ins/ArrayBuffer/prototype/byteLength/this-is-sharedarraybuffer.js
+fails-if(!xulRuntime.shell) script test262/built-ins/ArrayBuffer/prototype/detached/this-is-sharedarraybuffer-resizable.js
+fails-if(!xulRuntime.shell) script test262/built-ins/ArrayBuffer/prototype/detached/this-is-sharedarraybuffer.js
 fails-if(!xulRuntime.shell) script test262/built-ins/ArrayBuffer/prototype/slice/this-is-sharedarraybuffer.js
+fails-if(!xulRuntime.shell) script test262/built-ins/ArrayBuffer/prototype/transfer/this-is-sharedarraybuffer.js
+fails-if(!xulRuntime.shell) script test262/built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-sharedarraybuffer.js
 fails-if(!xulRuntime.shell) script test262/built-ins/Atomics/add/bigint/bad-range.js
 fails-if(!xulRuntime.shell) script test262/built-ins/Atomics/add/bigint/good-views.js
 fails-if(!xulRuntime.shell) script test262/built-ins/Atomics/add/validate-arraytype-before-index-coercion.js
@@ -609,8 +619,31 @@ skip script test262/built-ins/AsyncGeneratorPrototype/return/return-state-comple
 skip script test262/built-ins/AsyncGeneratorPrototype/return/return-suspendedStart-broken-promise.js
 skip script test262/built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-broken-promise-try-catch.js
 
-# https://github.com/tc39/proposal-intl-numberformat-v3/pull/107
-skip script test262/intl402/NumberFormat/test-option-useGrouping.js
+# Requires Unicode 15.1
+skip script test262/built-ins/RegExp/unicodeSets/generated/rgi-emoji-15.1.js
+
+# Time zone canonicalization proposal.
+skip script test262/intl402/DateTimeFormat/timezone-not-canonicalized.js
+skip script test262/intl402/DateTimeFormat/timezone-case-insensitive.js
+
+# Resolved options reordered.
+# https://github.com/tc39/ecma402/pull/811
+skip script test262/intl402/NumberFormat/constructor-option-read-order.js
+skip script test262/intl402/NumberFormat/prototype/resolvedOptions/return-keys-order-default.js
+skip script test262/intl402/PluralRules/constructor-option-read-order.js
+skip script test262/intl402/PluralRules/prototype/resolvedOptions/return-keys-order-default.js
+
+# Requires Unicode 15.1
+# https://github.com/tc39/test262/pull/3947
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1859752
+skip script test262/built-ins/RegExp/unicode_full_case_folding.js
+
+# Requires CLDR 44
+# https://github.com/tc39/test262/pull/3946
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1859752
+skip script test262/intl402/Locale/likely-subtags.js
+skip script test262/intl402/Locale/prototype/minimize/removing-likely-subtags-first-adds-likely-subtags.js
+
 
 ###########################################################
 # Tests disabled due to issues in test262 importer script #
@@ -636,14 +669,7 @@ skip-if(!xulRuntime.shell) script test262/language/module-code/top-level-await/a
 # Tests disabled due to invalid test expectations  #
 ####################################################
 
-# The test exposes a potential spec issue in InitializeDateTimeFormat:
-# Let's assume the locale is "en", adding likely subtags results in "en-Latn-US".
-# Consulting CLDR's supplementalData.xml shows for the "US" region:
-#   <hours preferred="h" allowed="h hb H hB" regions="[...] US [...]"/>
-# So preferred is "h" (= hour-cycle "h12") and additionally allowed is "H" (=hc "h23").
-# But InitializeDateTimeFormat defaults for hour12=false and hcDefault="h12" the
-# hour-cycle to "h24", which isn't allowed per the above CLDR data.
-# https://github.com/tc39/ecma402/issues/402
+# https://github.com/tc39/test262/pull/3958
 skip script test262/intl402/DateTimeFormat/prototype/resolvedOptions/hourCycle-default.js
 
 # Array.prototype.concat currently doesn't support spreading tuples. The spec
@@ -651,10 +677,13 @@ skip script test262/intl402/DateTimeFormat/prototype/resolvedOptions/hourCycle-d
 # test for now.
 skip script non262/Tuple/prototype/concat/concat-with-array.js
 
-# Test262 still requires double construction, which will be fixed in
-# https://github.com/tc39/proposal-array-from-async/pull/41
-skip script test262/built-ins/Array/fromAsync/this-constructor.js
-skip script test262/built-ins/Array/fromAsync/this-constructor-operations.js
+# Time zone offsets with sub-minute precision no longer allowed.
+skip script test262/staging/Temporal/Regex/old/instant.js
+skip script test262/staging/Temporal/Regex/old/timezone.js
+
+# These tests seem incorrect, see https://github.com/tc39/test262/pull/3907
+skip script test262/language/statements/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
+skip script test262/language/expressions/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
 
 
 ##############################################
@@ -1021,212 +1050,6 @@ shell-option(--enable-iterator-helpers) script non262/Iterator/prototype/take/ta
 
 
 ##############################################
-# Temporal tests                             #
-##############################################
-
-# Negative instant values are now rounded towards negative infinity. These
-# tests aren't yet updated for the new behaviour.
-skip script test262/built-ins/Temporal/Instant/prototype/epochMicroseconds/basic.js
-skip script test262/built-ins/Temporal/Instant/prototype/epochSeconds/basic.js
-skip script test262/built-ins/Temporal/Instant/prototype/epochMilliseconds/basic.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/epochMilliseconds/basic.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/epochMicroseconds/basic.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/epochSeconds/basic.js
-
-# https://github.com/tc39/proposal-temporal/issues/2532
-# https://github.com/tc39/test262/pull/3858
-skip script test262/built-ins/Temporal/PlainMonthDay/from/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/from/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/from/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/toPlainDate/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/toPlainDate/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/toPlainDate/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/equals/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/equals/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/equals/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/with/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/with/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainMonthDay/prototype/with/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/from/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/from/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/from/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/compare/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/compare/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/compare/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/equals/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/equals/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/equals/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toPlainYearMonth/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toPlainYearMonth/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toPlainYearMonth/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/withPlainDate/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/withPlainDate/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/withPlainDate/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/since/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/since/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/since/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/with/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/with/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/with/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toPlainMonthDay/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toPlainMonthDay/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toPlainMonthDay/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/until/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/until/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/until/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/from/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/from/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/from/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/compare/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/compare/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/compare/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/equals/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/equals/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/equals/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/since/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/since/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/since/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/with/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/with/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/with/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/until/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/until/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/until/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/TimeZone/prototype/getPossibleInstantsFor/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/TimeZone/prototype/getPossibleInstantsFor/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/TimeZone/prototype/getPossibleInstantsFor/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/TimeZone/prototype/getInstantFor/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/TimeZone/prototype/getInstantFor/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/TimeZone/prototype/getInstantFor/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/compare/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/compare/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/compare/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/round/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/round/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/round/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/add/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/add/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/add/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/subtract/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/subtract/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/subtract/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/total/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/total/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Duration/prototype/total/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/toPlainDateTime/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/toPlainDateTime/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/toPlainDateTime/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/toZonedDateTime/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/toZonedDateTime/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/toZonedDateTime/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/from/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/from/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/from/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/compare/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/compare/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/compare/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/equals/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/equals/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/equals/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/toPlainYearMonth/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/toPlainYearMonth/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/toPlainYearMonth/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/withPlainDate/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/withPlainDate/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/withPlainDate/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/since/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/since/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/since/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/with/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/with/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/with/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/toPlainMonthDay/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/toPlainMonthDay/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/toPlainMonthDay/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/until/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/until/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/until/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/from/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/from/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/from/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/compare/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/compare/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/compare/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/toPlainDate/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/toPlainDate/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/toPlainDate/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/equals/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/equals/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/equals/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/add/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/add/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/add/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/since/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/since/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/since/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/with/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/with/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/with/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/subtract/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/subtract/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/subtract/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/until/constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/until/duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/until/proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInMonth/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInMonth/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInMonth/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInWeek/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInWeek/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInWeek/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/day/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/day/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/day/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/year/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/year/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/year/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/monthsInYear/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/monthsInYear/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/monthsInYear/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInYear/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInYear/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/daysInYear/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/monthCode/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/monthCode/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/monthCode/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/month/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/month/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/month/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dateAdd/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dateAdd/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dateAdd/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/weekOfYear/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/weekOfYear/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/weekOfYear/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dayOfWeek/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dayOfWeek/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dayOfWeek/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/inLeapYear/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/inLeapYear/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/inLeapYear/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dateUntil/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dateUntil/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dateUntil/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/yearOfWeek/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/yearOfWeek/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/yearOfWeek/argument-proto-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dayOfYear/argument-duplicate-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dayOfYear/argument-constructor-in-calendar-fields.js
-skip script test262/built-ins/Temporal/Calendar/prototype/dayOfYear/argument-proto-in-calendar-fields.js
-
-
-##############################################
 # Temporal Intl tests                        #
 ##############################################
 
@@ -1244,7 +1067,10 @@ skip script test262/intl402/Temporal/PlainMonthDay/prototype/toLocaleString/time
 skip script test262/intl402/Temporal/PlainMonthDay/prototype/toLocaleString/resolved-time-zone.js
 skip script test262/intl402/Temporal/PlainMonthDay/prototype/toLocaleString/options-undefined.js
 skip script test262/intl402/Temporal/PlainMonthDay/prototype/toLocaleString/calendar-mismatch.js
+skip script test262/intl402/Temporal/PlainMonthDay/prototype/with/fields-missing-properties.js
 skip script test262/intl402/Temporal/PlainMonthDay/from/reference-date-noniso-calendar.js
+skip script test262/intl402/Temporal/PlainMonthDay/from/fields-missing-properties.js
+skip script test262/intl402/Temporal/PlainMonthDay/from/fields-object.js
 
 skip script test262/intl402/Temporal/Now/plainDateTime/calendar-string.js
 skip script test262/intl402/Temporal/Now/plainDate/calendar-string.js
@@ -1425,6 +1251,8 @@ skip script test262/intl402/Temporal/Calendar/prototype/eraYear/argument-propert
 skip script test262/intl402/Temporal/Calendar/prototype/eraYear/argument-string-unknown-annotation.js
 skip script test262/intl402/Temporal/Calendar/prototype/eraYear/argument-string-multiple-time-zone.js
 skip script test262/intl402/Temporal/Calendar/prototype/eraYear/argument-string-critical-unknown-annotation.js
+skip script test262/intl402/Temporal/Calendar/prototype/eraYear/argument-builtin-calendar-no-array-iteration.js
+skip script test262/intl402/Temporal/Calendar/prototype/era/argument-builtin-calendar-no-array-iteration.js
 skip script test262/intl402/Temporal/Calendar/prototype/era/argument-zoneddatetime-convert.js
 skip script test262/intl402/Temporal/Calendar/prototype/era/argument-string-with-utc-designator.js
 skip script test262/intl402/Temporal/Calendar/prototype/era/argument-wrong-type.js
@@ -1480,6 +1308,7 @@ skip script test262/intl402/Temporal/Calendar/prototype/eraYear/argument-proto-i
 skip script test262/intl402/Temporal/Calendar/prototype/era/argument-duplicate-calendar-fields.js
 skip script test262/intl402/Temporal/Calendar/prototype/era/argument-constructor-in-calendar-fields.js
 skip script test262/intl402/Temporal/Calendar/prototype/era/argument-proto-in-calendar-fields.js
+skip script test262/intl402/Temporal/Calendar/prototype/monthDayFromFields/fields-underspecified.js
 
 skip script test262/staging/Temporal/ZonedDateTime/old/construction-and-properties.js
 skip script test262/staging/Intl402/Temporal/old/date-time-format.js
@@ -1496,6 +1325,20 @@ skip script test262/staging/Intl402/Temporal/old/non-iso-calendars.js
 skip script test262/staging/Intl402/Temporal/old/indian-calendar.js
 skip script test262/staging/Intl402/Temporal/old/instant-toLocaleString.js
 
-# See Bug 1799525, we don't currently support private identifiers in decorators
-skip script test262/language/statements/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
-skip script test262/language/expressions/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
+# Time zone identifier canonicalization.
+skip script test262/intl402/Temporal/ZonedDateTime/from/do-not-canonicalize-iana-identifiers.js
+skip script test262/intl402/Temporal/ZonedDateTime/from/timezone-case-insensitive.js
+skip script test262/intl402/Temporal/TimeZone/links-europe.js
+skip script test262/intl402/Temporal/TimeZone/links-etcetera.js
+skip script test262/intl402/Temporal/TimeZone/links-backzone.js
+skip script test262/intl402/Temporal/TimeZone/links-northamerica.js
+skip script test262/intl402/Temporal/TimeZone/links-backward.js
+skip script test262/intl402/Temporal/TimeZone/etc-timezone.js
+skip script test262/intl402/Temporal/TimeZone/iana-legacy-names.js
+skip script test262/intl402/Temporal/TimeZone/basic.js
+skip script test262/intl402/Temporal/TimeZone/links-asia.js
+skip script test262/intl402/Temporal/TimeZone/non-canonical-utc.js
+skip script test262/intl402/Temporal/TimeZone/from/iana-legacy-names.js
+skip script test262/intl402/Temporal/TimeZone/from/etc-timezone.js
+skip script test262/intl402/Temporal/TimeZone/from/argument-valid.js
+skip script test262/intl402/Temporal/TimeZone/from/timezone-case-insensitive.js

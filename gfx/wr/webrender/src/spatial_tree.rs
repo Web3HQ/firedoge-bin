@@ -24,7 +24,7 @@ use peek_poke::PeekPoke;
 /// coordinate system has an id and those ids will be shared when the coordinates
 /// system are the same or are in the same axis-aligned space. This allows
 /// for optimizing mask generation.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct CoordinateSystemId(pub u32);
@@ -1077,7 +1077,10 @@ impl SpatialTree {
             if index == self.root_reference_frame_index {
                 CoordinateSpaceMapping::Local
             } else {
-                CoordinateSpaceMapping::ScaleOffset(child.content_transform)
+              match scroll {
+                TransformScroll::Scrolled => CoordinateSpaceMapping::ScaleOffset(child.content_transform),
+                TransformScroll::Unscrolled => CoordinateSpaceMapping::ScaleOffset(child.viewport_transform),
+              }
             }
         } else {
             let system = &self.coord_systems[child.coordinate_system_id.0 as usize];
@@ -2003,4 +2006,39 @@ fn test_find_scroll_root_2d_scale() {
     );
 
     assert_eq!(st.find_scroll_root(sub_scroll), sub_scroll);
+}
+
+#[test]
+fn test_world_transforms() {
+  // Create a spatial tree with a scroll frame node with scroll offset (0, 200).
+  let mut cst = SceneSpatialTree::new();
+  let pid = PipelineInstanceId::new(0);
+  let scroll = cst.add_scroll_frame(
+      cst.root_reference_frame_index(),
+      ExternalScrollId(1, PipelineId::dummy()),
+      PipelineId::dummy(),
+      &LayoutRect::from_size(LayoutSize::new(400.0, 400.0)),
+      &LayoutSize::new(400.0, 800.0),
+      ScrollFrameKind::Explicit, 
+      LayoutVector2D::new(0.0, 200.0),
+      APZScrollGeneration::default(),
+      HasScrollLinkedEffect::No,
+      SpatialNodeUid::external(SpatialTreeItemKey::new(0, 1), PipelineId::dummy(), pid));
+
+  let mut st = SpatialTree::new();
+  st.apply_updates(cst.end_frame_and_get_pending_updates());
+  st.update_tree(&SceneProperties::new());
+
+  // The node's world transform should reflect the scroll offset,
+  // e.g. here it should be (0, -200) to reflect that the content has been
+  // scrolled up by 200px.
+  assert_eq!(
+      st.get_world_transform(scroll).into_transform(),
+      LayoutToWorldTransform::translation(0.0, -200.0, 0.0));
+
+  // The node's world viewport transform only reflects enclosing scrolling
+  // or transforms. Here we don't have any, so it should be the identity.
+  assert_eq!(
+      st.get_world_viewport_transform(scroll).into_transform(),
+      LayoutToWorldTransform::identity());
 }

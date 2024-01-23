@@ -17,6 +17,7 @@ const CM_PREF = "privacy.trackingprotection.cryptomining.enabled";
 const FP_PREF = "privacy.trackingprotection.fingerprinting.enabled";
 const TP_PREF = "privacy.trackingprotection.enabled";
 const CB_PREF = "network.cookie.cookieBehavior";
+const GPC_PREF = "privacy.globalprivacycontrol.enabled";
 
 const PREF_REPORT_BREAKAGE_URL = "browser.contentblocking.reportBreakage.url";
 
@@ -33,12 +34,18 @@ let { Preferences } = ChromeUtils.importESModule(
 add_setup(async function () {
   await UrlClassifierTestUtils.addTestTrackers();
 
+  // Disable Report Broken Site, as it hides "Site not working?" when enabled.
+  await SpecialPowers.pushPrefEnv({
+    set: [["ui.new-webcompat-reporter.enabled", false]],
+  });
+
   registerCleanupFunction(() => {
     // Clear prefs that are touched in this test again for sanity.
     Services.prefs.clearUserPref(TP_PREF);
     Services.prefs.clearUserPref(CB_PREF);
     Services.prefs.clearUserPref(FP_PREF);
     Services.prefs.clearUserPref(CM_PREF);
+    Services.prefs.clearUserPref(GPC_PREF);
     Services.prefs.clearUserPref(PREF_REPORT_BREAKAGE_URL);
 
     UrlClassifierTestUtils.cleanupTestTrackers();
@@ -63,6 +70,7 @@ add_setup(async function () {
         "urlclassifier.features.cryptomining.annotate.blacklistHosts",
         "cryptomining.example.com",
       ],
+      ["privacy.globalprivacycontrol.enabled", true],
     ],
   });
 });
@@ -80,7 +88,7 @@ add_task(async function testReportBreakageCancel() {
       "protections-popup-tp-switch-breakage-link"
     );
     ok(
-      BrowserTestUtils.is_visible(siteNotWorkingButton),
+      BrowserTestUtils.isVisible(siteNotWorkingButton),
       "site not working button is visible"
     );
     let siteNotWorkingView = document.getElementById(
@@ -134,7 +142,7 @@ add_task(async function testReportBreakageSiteException() {
       "protections-popup-tp-switch-breakage-fixed-link"
     );
     ok(
-      BrowserTestUtils.is_visible(siteFixedButton),
+      BrowserTestUtils.isVisible(siteFixedButton),
       "site fixed button is visible"
     );
     let sendReportView = document.getElementById(
@@ -168,7 +176,7 @@ add_task(async function testNoTracking() {
       "protections-popup-tp-switch-breakage-link"
     );
     ok(
-      BrowserTestUtils.is_hidden(siteNotWorkingButton),
+      BrowserTestUtils.isHidden(siteNotWorkingButton),
       "site not working button is not visible"
     );
   });
@@ -255,7 +263,7 @@ async function openAndTestReportBreakage(url, tags, error = false) {
     "protections-popup-tp-switch-breakage-link"
   );
   ok(
-    BrowserTestUtils.is_visible(siteNotWorkingButton),
+    BrowserTestUtils.isVisible(siteNotWorkingButton),
     "site not working button is visible"
   );
   let siteNotWorkingView = document.getElementById(
@@ -338,6 +346,7 @@ async function testReportBreakageSubmit(url, tags, error, hasException) {
         "privacy.restrict3rdpartystorage.expiration",
         "privacy.trackingprotection.fingerprinting.enabled",
         "privacy.trackingprotection.cryptomining.enabled",
+        "privacy.globalprivacycontrol.enabled",
       ];
       let prefsBody = "";
 
@@ -385,7 +394,7 @@ async function testReportBreakageSubmit(url, tags, error, hasException) {
   );
   if (error) {
     await TestUtils.waitForCondition(() =>
-      BrowserTestUtils.is_visible(errorMessage)
+      BrowserTestUtils.isVisible(errorMessage)
     );
     is(
       comments.value,
@@ -394,7 +403,7 @@ async function testReportBreakageSubmit(url, tags, error, hasException) {
     );
     gProtectionsHandler._protectionsPopup.hidePopup();
   } else {
-    ok(BrowserTestUtils.is_hidden(errorMessage), "Error message not shown");
+    ok(BrowserTestUtils.isHidden(errorMessage), "Error message not shown");
   }
 
   await popuphidden;

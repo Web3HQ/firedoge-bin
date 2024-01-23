@@ -44,6 +44,35 @@ async function checkClipboardSuggestionAbsent(startIdx) {
   }
 }
 
+add_task(async function testFormattingOfClipboardSuggestion() {
+  let unicodeURL = "https://пример.com/";
+  let punycodeURL = "https://xn--e1afmkfd.com/";
+
+  SpecialPowers.clipboardCopyString(unicodeURL);
+
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: "about:home" },
+    async browser => {
+      let { result } = await searchEmptyStringAndGetFirstRow();
+
+      Assert.equal(
+        result.providerName,
+        UrlbarProviderClipboard.name,
+        "The first result is a clipboard valid url suggestion."
+      );
+      Assert.equal(
+        result.payload.url,
+        punycodeURL,
+        "The Clipboard suggestion URL should not be decoded."
+      );
+      Assert.equal(
+        result.payload.fallbackTitle,
+        unicodeURL,
+        "The Clipboard suggestion fallback title should be decoded."
+      );
+    }
+  );
+});
 // Verifies that a valid URL copied to the clipboard results in the
 // display of a corresponding suggestion in the URL bar as the first
 // suggestion with accurate URL and icon. Also ensures that engaging
@@ -70,7 +99,7 @@ add_task(async function testUserEngagementWithClipboardSuggestion() {
       );
       Assert.equal(
         result.icon,
-        "chrome://global/skin/icons/edit-copy.svg",
+        "chrome://global/skin/icons/clipboard.svg",
         "Clipboard suggestion icon"
       );
       await checkClipboardSuggestionAbsent(1);
@@ -180,6 +209,8 @@ add_task(async function testNonUrlClipboardSuggestion() {
         // Testing http because it is considered as a valid URL.
         // eslint-disable-next-line @microsoft/sdl/no-insecure-url
         "http://",
+        "https://example.com some text",
+        "https://example.com/ some text",
       ];
       for (let i = 0; i < malformedURLs.length; i++) {
         SpecialPowers.clipboardCopyString(malformedURLs[i]);
@@ -263,6 +294,40 @@ add_task(async function testClipboardSuggestToggle() {
         "Clipboard suggestion should be present as the first suggestion."
       );
       await checkClipboardSuggestionAbsent(1);
+    }
+  );
+});
+
+add_task(async function testScalarTelemetry() {
+  SpecialPowers.clipboardCopyString("https://example.com/6");
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: "about:home" },
+    async () => {
+      Services.telemetry.clearScalars();
+      await UrlbarTestUtils.promiseAutocompleteResultPopup({
+        window,
+        value: "",
+        waitForFocus,
+        fireInputEvent: true,
+      });
+
+      await UrlbarTestUtils.promisePopupClose(window, () => {
+        EventUtils.synthesizeKey("KEY_ArrowDown");
+        EventUtils.synthesizeKey("KEY_Enter");
+      });
+
+      const scalars = TelemetryTestUtils.getProcessScalars(
+        "parent",
+        true,
+        true
+      );
+
+      TelemetryTestUtils.assertKeyedScalar(
+        scalars,
+        `urlbar.picked.clipboard`,
+        0,
+        1
+      );
     }
   );
 });

@@ -3,8 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { html } from "chrome://global/content/vendor/lit.all.mjs";
+import { html, styleMap } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
+
+// eslint-disable-next-line import/no-unassigned-import
+import "chrome://global/content/elements/moz-message-bar.mjs";
 
 class ShoppingMessageBar extends MozLitElement {
   #MESSAGE_TYPES_RENDER_TEMPLATE_MAPPING = new Map([
@@ -17,37 +20,33 @@ class ShoppingMessageBar extends MozLitElement {
       "product-not-available-reported",
       () => this.getProductNotAvailableReportedTemplate(),
     ],
-    ["offline", () => this.getOfflineWarningTemplate()],
-    ["analysis-in-progress", () => this.getAnalysisInProgressTemplate()],
+    ["analysis-in-progress", () => this.analysisInProgressTemplate()],
+    ["reanalysis-in-progress", () => this.reanalysisInProgressTemplate()],
     ["page-not-supported", () => this.pageNotSupportedTemplate()],
+    ["thank-you-for-feedback", () => this.thankYouForFeedbackTemplate()],
   ]);
 
   static properties = {
     type: { type: String },
     productUrl: { type: String, reflect: true },
+    progress: { type: Number, reflect: true },
   };
 
   static get queries() {
     return {
-      reAnalysisLinkEl: "#message-bar-reanalysis-link",
+      reAnalysisButtonEl: "#message-bar-reanalysis-button",
       productAvailableBtnEl: "#message-bar-report-product-available-btn",
     };
   }
 
-  onClickAnalysisLink() {
+  onClickAnalysisButton() {
     this.dispatchEvent(
-      new CustomEvent("ReAnalysisRequested", {
+      new CustomEvent("ReanalysisRequested", {
         bubbles: true,
         composed: true,
       })
     );
-    this.dispatchEvent(
-      new CustomEvent("ShoppingTelemetryEvent", {
-        bubbles: true,
-        composed: true,
-        detail: "reanalyzeClicked",
-      })
-    );
+    Glean.shopping.surfaceReanalyzeClicked.record();
   }
 
   onClickProductAvailable() {
@@ -60,142 +59,137 @@ class ShoppingMessageBar extends MozLitElement {
   }
 
   getStaleWarningTemplate() {
-    return html` <message-bar type="warning">
+    return html`<message-bar>
       <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-warning-stale-analysis-title"
-        ></strong>
         <span
-          data-l10n-id="shopping-message-bar-warning-stale-analysis-message"
-        ></span>
-        <a
-          id="message-bar-reanalysis-link"
-          target="_blank"
-          data-l10n-id="shopping-message-bar-warning-stale-analysis-link"
-          href="https://fakespot.com/analyze?url=${encodeURIComponent(
-            this.productUrl
-          )}"
-          @click=${this.onClickAnalysisLink}
-        ></a>
-      </article>
-    </message-bar>`;
-  }
-
-  getGenericErrorTemplate() {
-    return html` <message-bar type="error">
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-generic-error-title"
-        ></strong>
-        <span data-l10n-id="shopping-message-bar-generic-error-message"></span>
-      </article>
-    </message-bar>`;
-  }
-
-  getNotEnoughReviewsTemplate() {
-    return html` <message-bar type="warning">
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-warning-not-enough-reviews-title"
-        ></strong>
-        <span
-          data-l10n-id="shopping-message-bar-warning-not-enough-reviews-message"
-        ></span>
-      </article>
-    </message-bar>`;
-  }
-
-  getProductNotAvailableTemplate() {
-    return html`<message-bar type="warning">
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-warning-product-not-available-title"
-        ></strong>
-        <span
-          data-l10n-id="shopping-message-bar-warning-product-not-available-message"
+          data-l10n-id="shopping-message-bar-warning-stale-analysis-message-2"
         ></span>
         <button
-          id="message-bar-report-product-available-btn"
-          class="small-button"
-          data-l10n-id="shopping-message-bar-warning-product-not-available-button"
-          @click=${this.onClickProductAvailable}
+          id="message-bar-reanalysis-button"
+          class="small-button shopping-button"
+          data-l10n-id="shopping-message-bar-warning-stale-analysis-button"
+          @click=${this.onClickAnalysisButton}
         ></button>
       </article>
     </message-bar>`;
   }
 
+  getGenericErrorTemplate() {
+    return html`<moz-message-bar
+      data-l10n-attrs="heading, message"
+      type="warning"
+      data-l10n-id="shopping-message-bar-generic-error"
+    >
+    </moz-message-bar>`;
+  }
+
+  getNotEnoughReviewsTemplate() {
+    return html`<moz-message-bar
+      data-l10n-attrs="heading, message"
+      type="warning"
+      data-l10n-id="shopping-message-bar-warning-not-enough-reviews"
+    >
+    </moz-message-bar>`;
+  }
+
+  getProductNotAvailableTemplate() {
+    return html`<moz-message-bar
+      data-l10n-attrs="heading, message"
+      type="warning"
+      data-l10n-id="shopping-message-bar-warning-product-not-available"
+    >
+      <button
+        slot="actions"
+        id="message-bar-report-product-available-btn"
+        class="small-button shopping-button"
+        data-l10n-id="shopping-message-bar-warning-product-not-available-button2"
+        @click=${this.onClickProductAvailable}
+      ></button>
+    </moz-message-bar>`;
+  }
+
   getThanksForReportingTemplate() {
-    return html` <message-bar>
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-thanks-for-reporting-title"
-        ></strong>
-        <span
-          data-l10n-id="shopping-message-bar-thanks-for-reporting-message"
-        ></span>
-      </article>
-    </message-bar>`;
+    return html`<moz-message-bar
+      data-l10n-attrs="heading, message"
+      type="info"
+      data-l10n-id="shopping-message-bar-thanks-for-reporting"
+    >
+    </moz-message-bar>`;
   }
 
   getProductNotAvailableReportedTemplate() {
-    return html`<message-bar type="warning">
-      <article id="message-bar-container" aria-labelledby="header">
+    return html`<moz-message-bar
+      data-l10n-attrs="heading, message"
+      type="warning"
+      data-l10n-id="shopping-message-bar-warning-product-not-available-reported"
+    >
+    </moz-message-bar>`;
+  }
+
+  analysisInProgressTemplate() {
+    return html`<message-bar
+      style=${styleMap({
+        "--analysis-progress-pcent": `${this.progress}%`,
+      })}
+    >
+      <article
+        id="message-bar-container"
+        aria-labelledby="header"
+        type="analysis"
+      >
         <strong
           id="header"
-          data-l10n-id="shopping-message-bar-warning-product-not-available-reported-title"
+          data-l10n-id="shopping-message-bar-analysis-in-progress-with-amount"
+          data-l10n-args="${JSON.stringify({
+            percentage: Math.round(this.progress),
+          })}"
         ></strong>
         <span
-          data-l10n-id="shopping-message-bar-warning-product-not-available-reported-message"
+          data-l10n-id="shopping-message-bar-analysis-in-progress-message2"
         ></span>
       </article>
     </message-bar>`;
   }
 
-  getAnalysisInProgressTemplate() {
-    return html` <message-bar>
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-analysis-in-progress-title"
-        ></strong>
+  reanalysisInProgressTemplate() {
+    return html`<message-bar
+      style=${styleMap({
+        "--analysis-progress-pcent": `${this.progress}%`,
+      })}
+    >
+      <article
+        id="message-bar-container"
+        aria-labelledby="header"
+        type="re-analysis"
+      >
         <span
-          data-l10n-id="shopping-message-bar-analysis-in-progress-message"
-        ></span>
-      </article>
-    </message-bar>`;
-  }
-
-  getOfflineWarningTemplate() {
-    return html` <message-bar type="warning">
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
           id="header"
-          data-l10n-id="shopping-message-bar-warning-offline-title"
-        ></strong>
-        <span
-          data-l10n-id="shopping-message-bar-warning-offline-message"
+          data-l10n-id="shopping-message-bar-analysis-in-progress-with-amount"
+          data-l10n-args="${JSON.stringify({
+            percentage: Math.round(this.progress),
+          })}"
         ></span>
       </article>
     </message-bar>`;
   }
 
   pageNotSupportedTemplate() {
-    return html` <message-bar>
-      <article id="message-bar-container" aria-labelledby="header">
-        <strong
-          id="header"
-          data-l10n-id="shopping-message-bar-page-not-supported-title"
-        ></strong>
-        <span
-          data-l10n-id="shopping-message-bar-page-not-supported-message"
-        ></span>
-      </article>
-    </message-bar>`;
+    return html`<moz-message-bar
+      data-l10n-attrs="heading, message"
+      type="warning"
+      data-l10n-id="shopping-message-bar-page-not-supported"
+    >
+    </moz-message-bar>`;
+  }
+
+  thankYouForFeedbackTemplate() {
+    return html`<moz-message-bar
+      data-l10n-attrs="heading"
+      type="success"
+      dismissable
+      data-l10n-id="shopping-survey-thanks"
+    >
+    </moz-message-bar>`;
   }
 
   render() {
@@ -203,44 +197,22 @@ class ShoppingMessageBar extends MozLitElement {
       this.type
     )();
     if (messageBarTemplate) {
+      if (this.type == "stale") {
+        Glean.shopping.surfaceStaleAnalysisShown.record();
+      }
       return html`
         <link
           rel="stylesheet"
           href="chrome://browser/content/shopping/shopping-message-bar.css"
         />
+        <link
+          rel="stylesheet"
+          href="chrome://browser/content/shopping/shopping-page.css"
+        />
         ${messageBarTemplate}
       `;
     }
     return null;
-  }
-
-  updated() {
-    // message-bar does not support adding a header and does not align it with the icon.
-    // Override styling to make them align.
-    let messageBar = this.renderRoot.querySelector("message-bar");
-    let messageBarContainer = messageBar.shadowRoot.querySelector(".container");
-    let icon = messageBarContainer.querySelector(".icon");
-
-    messageBarContainer.style.alignItems = "start";
-    messageBarContainer.style.padding = "0.5rem 0.75rem";
-    messageBarContainer.style.gap = "0.75rem";
-    icon.style.padding = "0";
-
-    if (this.type === "analysis-in-progress") {
-      messageBarContainer.style.setProperty(
-        "--message-bar-icon-url",
-        `url("chrome://browser/skin/fxa/fxa-spinner.svg")`
-      );
-      icon.animate(
-        [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
-        {
-          duration: 1000 /* in ms */,
-          iterations: Infinity,
-          name: "spin",
-          easing: "linear",
-        }
-      );
-    }
   }
 }
 

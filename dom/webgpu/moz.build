@@ -8,8 +8,8 @@ with Files("**"):
     BUG_COMPONENT = ("Core", "Graphics: WebGPU")
 
 MOCHITEST_MANIFESTS += [
-    "mochitest/mochitest-no-pref.ini",
-    "mochitest/mochitest.ini",
+    "mochitest/mochitest-no-pref.toml",
+    "mochitest/mochitest.toml",
 ]
 
 DIRS += []
@@ -29,6 +29,7 @@ h_and_cpp = [
     "Device",
     "DeviceLostInfo",
     "Error",
+    "ExternalTexture",
     "Instance",
     "InternalError",
     "ObjectModel",
@@ -68,6 +69,15 @@ UNIFIED_SOURCES += [
     "ipc/WebGPUChild.cpp",
     "ipc/WebGPUParent.cpp",
 ]
+
+if CONFIG["MOZ_ENABLE_D3D10_LAYER"]:
+    DEFINES["MOZ_ENABLE_D3D10_LAYER"] = True
+    EXPORTS.mozilla.webgpu += [
+        "ExternalTextureD3D11.h",
+    ]
+    UNIFIED_SOURCES += [
+        "ExternalTextureD3D11.cpp",
+    ]
 
 if CONFIG["CC_TYPE"] in ("clang", "clang-cl"):
     CXXFLAGS += ["-Werror=implicit-int-conversion"]

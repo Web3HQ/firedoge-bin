@@ -18,6 +18,7 @@
 
 #include "builtin/Eval.h"
 #include "builtin/SelfHostingDefines.h"
+#include "gc/GC.h"
 #include "jit/InlinableNatives.h"
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/friend/StackLimits.h"    // js::AutoCheckRecursionLimit
@@ -393,12 +394,14 @@ JSString* js::ObjectToSource(JSContext* cx, HandleObject obj) {
       if (val.toObject().is<JSFunction>()) {
         fun = &val.toObject().as<JSFunction>();
         // Method's case should be checked on caller.
-        if (((fun->isGetter() && kind == PropertyKind::Getter) ||
-             (fun->isSetter() && kind == PropertyKind::Setter) ||
+        if (((fun->isGetter() && kind == PropertyKind::Getter &&
+              !fun->isAccessorWithLazyName()) ||
+             (fun->isSetter() && kind == PropertyKind::Setter &&
+              !fun->isAccessorWithLazyName()) ||
              kind == PropertyKind::Method) &&
-            fun->explicitName()) {
+            fun->fullExplicitName()) {
           bool result;
-          if (!EqualStrings(cx, fun->explicitName(), idstr, &result)) {
+          if (!EqualStrings(cx, fun->fullExplicitName(), idstr, &result)) {
             return false;
           }
 
@@ -839,6 +842,11 @@ static bool CanAddNewPropertyExcludingProtoFast(PlainObject* obj) {
     return false;
   }
 
+  // Don't fastpath assign if we're watching for property modification.
+  if (Watchtower::watchesPropertyModification(obj)) {
+    return false;
+  }
+
   // Ensure the object has no non-writable properties or getters/setters.
   // For now only support PlainObjects so that we don't have to worry about
   // resolve hooks and other JSClass hooks.
@@ -857,6 +865,23 @@ static bool CanAddNewPropertyExcludingProtoFast(PlainObject* obj) {
     obj = &proto->as<PlainObject>();
   }
 }
+
+#ifdef DEBUG
+void PlainObjectAssignCache::assertValid() const {
+  MOZ_ASSERT(emptyToShape_);
+  MOZ_ASSERT(fromShape_);
+  MOZ_ASSERT(newToShape_);
+
+  MOZ_ASSERT(emptyToShape_->propMapLength() == 0);
+  MOZ_ASSERT(emptyToShape_->base() == newToShape_->base());
+  MOZ_ASSERT(emptyToShape_->numFixedSlots() == newToShape_->numFixedSlots());
+
+  MOZ_ASSERT(emptyToShape_->getObjectClass() == &PlainObject::class_);
+  MOZ_ASSERT(fromShape_->getObjectClass() == &PlainObject::class_);
+
+  MOZ_ASSERT(fromShape_->slotSpan() == newToShape_->slotSpan());
+}
+#endif
 
 [[nodiscard]] static bool TryAssignPlain(JSContext* cx, HandleObject to,
                                          HandleObject from, bool* optimized) {
@@ -889,6 +914,25 @@ static bool CanAddNewPropertyExcludingProtoFast(PlainObject* obj) {
     return true;
   }
 
+  const bool toWasEmpty = toPlain->empty();
+  if (toWasEmpty) {
+    const PlainObjectAssignCache& cache = cx->realm()->plainObjectAssignCache;
+    SharedShape* newShape = cache.lookup(toPlain->shape(), fromPlain->shape());
+    if (newShape) {
+      *optimized = true;
+      uint32_t oldSpan = 0;
+      uint32_t newSpan = newShape->slotSpan();
+      if (!toPlain->setShapeAndAddNewSlots(cx, newShape, oldSpan, newSpan)) {
+        return false;
+      }
+      MOZ_ASSERT(fromPlain->slotSpan() == newSpan);
+      for (size_t i = 0; i < newSpan; i++) {
+        toPlain->initSlot(i, fromPlain->getSlot(i));
+      }
+      return true;
+    }
+  }
+
   // Get a list of all enumerable |from| properties.
 
   Rooted<PropertyInfoWithKeyVector> props(cx, PropertyInfoWithKeyVector(cx));
@@ -898,6 +942,7 @@ static bool CanAddNewPropertyExcludingProtoFast(PlainObject* obj) {
 #endif
 
   bool hasPropsWithNonDefaultAttrs = false;
+  bool hasOnlyEnumerableProps = true;
   for (ShapePropertyIter<NoGC> iter(fromPlain->shape()); !iter.done(); iter++) {
     // Symbol properties need to be assigned last. For now fall back to the
     // slow path if we see a symbol property.
@@ -914,36 +959,63 @@ static bool CanAddNewPropertyExcludingProtoFast(PlainObject* obj) {
     }
     if (iter->flags() != PropertyFlags::defaultDataPropFlags) {
       hasPropsWithNonDefaultAttrs = true;
-    }
-    if (!iter->enumerable()) {
-      continue;
+      if (!iter->enumerable()) {
+        hasOnlyEnumerableProps = false;
+        continue;
+      }
     }
     if (MOZ_UNLIKELY(!props.append(*iter))) {
       return false;
     }
   }
 
+  MOZ_ASSERT_IF(hasOnlyEnumerableProps && !fromPlain->inDictionaryMode(),
+                fromPlain->slotSpan() == props.length());
+
   *optimized = true;
 
-  bool toWasEmpty = toPlain->empty();
+  Rooted<Shape*> origToShape(cx, toPlain->shape());
 
   // If the |to| object has no properties and the |from| object only has plain
-  // enumerable/writable/configurable data properties, try to use its shape.
-  if (toWasEmpty && !hasPropsWithNonDefaultAttrs &&
-      toPlain->canReuseShapeForNewProperties(fromPlain->shape())) {
-    MOZ_ASSERT(!Watchtower::watchesPropertyAdd(toPlain),
-               "watched objects require Watchtower calls");
-    SharedShape* newShape = fromPlain->sharedShape();
-    uint32_t oldSpan = 0;
-    uint32_t newSpan = props.length();
-    if (!toPlain->setShapeAndAddNewSlots(cx, newShape, oldSpan, newSpan)) {
-      return false;
+  // enumerable/writable/configurable data properties, try to use its shape or
+  // property map.
+  if (toWasEmpty && !hasPropsWithNonDefaultAttrs) {
+    CanReuseShape canReuse =
+        toPlain->canReuseShapeForNewProperties(fromPlain->shape());
+    if (canReuse != CanReuseShape::NoReuse) {
+      SharedShape* newShape;
+      if (canReuse == CanReuseShape::CanReuseShape) {
+        newShape = fromPlain->sharedShape();
+      } else {
+        // Get a shape with fromPlain's PropMap and ObjectFlags (because we need
+        // the HasEnumerable flag checked in canReuseShapeForNewProperties) and
+        // the other fields (BaseShape, numFixedSlots) unchanged.
+        MOZ_ASSERT(canReuse == CanReuseShape::CanReusePropMap);
+        ObjectFlags objectFlags = fromPlain->sharedShape()->objectFlags();
+        Rooted<SharedPropMap*> map(cx, fromPlain->sharedShape()->propMap());
+        uint32_t mapLength = fromPlain->sharedShape()->propMapLength();
+        BaseShape* base = toPlain->sharedShape()->base();
+        uint32_t nfixed = toPlain->sharedShape()->numFixedSlots();
+        newShape = SharedShape::getPropMapShape(cx, base, nfixed, map,
+                                                mapLength, objectFlags);
+        if (!newShape) {
+          return false;
+        }
+      }
+      uint32_t oldSpan = 0;
+      uint32_t newSpan = props.length();
+      if (!toPlain->setShapeAndAddNewSlots(cx, newShape, oldSpan, newSpan)) {
+        return false;
+      }
+      MOZ_ASSERT(fromPlain->slotSpan() == newSpan);
+      MOZ_ASSERT(toPlain->slotSpan() == newSpan);
+      for (size_t i = 0; i < newSpan; i++) {
+        toPlain->initSlot(i, fromPlain->getSlot(i));
+      }
+      PlainObjectAssignCache& cache = cx->realm()->plainObjectAssignCache;
+      cache.fill(&origToShape->asShared(), fromPlain->sharedShape(), newShape);
+      return true;
     }
-    for (size_t i = props.length(); i > 0; i--) {
-      size_t slot = props[i - 1].slot();
-      toPlain->initSlot(slot, fromPlain->getSlot(slot));
-    }
-    return true;
   }
 
   RootedValue propValue(cx);
@@ -960,23 +1032,30 @@ static bool CanAddNewPropertyExcludingProtoFast(PlainObject* obj) {
     nextKey = fromProp.key();
     propValue = fromPlain->getSlot(fromProp.slot());
 
-    Maybe<PropertyInfo> toProp;
-    if (toWasEmpty) {
-      MOZ_ASSERT(!toPlain->containsPure(nextKey));
-      MOZ_ASSERT(toProp.isNothing());
-    } else {
-      toProp = toPlain->lookup(cx, nextKey);
-    }
-
-    if (toProp.isSome()) {
-      MOZ_ASSERT(toProp->isDataProperty());
-      MOZ_ASSERT(toProp->writable());
-      toPlain->setSlot(toProp->slot(), propValue);
-    } else {
-      if (!AddDataPropertyToPlainObject(cx, toPlain, nextKey, propValue)) {
-        return false;
+    if (!toWasEmpty) {
+      if (Maybe<PropertyInfo> toProp = toPlain->lookup(cx, nextKey)) {
+        MOZ_ASSERT(toProp->isDataProperty());
+        MOZ_ASSERT(toProp->writable());
+        toPlain->setSlot(toProp->slot(), propValue);
+        continue;
       }
     }
+
+    MOZ_ASSERT(!toPlain->containsPure(nextKey));
+
+    if (!AddDataPropertyToPlainObject(cx, toPlain, nextKey, propValue)) {
+      return false;
+    }
+  }
+
+  // Note: dictionary shapes are not supported by the cache because they have a
+  // more complicated slot layout (the slot numbers may not match the property
+  // definition order and the slots may contain holes).
+  if (toWasEmpty && hasOnlyEnumerableProps && !fromPlain->inDictionaryMode() &&
+      !toPlain->inDictionaryMode()) {
+    PlainObjectAssignCache& cache = cx->realm()->plainObjectAssignCache;
+    cache.fill(&origToShape->asShared(), fromPlain->sharedShape(),
+               toPlain->sharedShape());
   }
 
   return true;
@@ -1411,8 +1490,11 @@ bool js::GetOwnPropertyDescriptorToArray(JSContext* cx, unsigned argc,
 }
 
 static bool NewValuePair(JSContext* cx, HandleValue val1, HandleValue val2,
-                         MutableHandleValue rval) {
-  ArrayObject* array = NewDenseFullyAllocatedArray(cx, 2);
+                         MutableHandleValue rval,
+                         gc::Heap heap = gc::Heap::Default) {
+  NewObjectKind kind =
+      heap == gc::Heap::Tenured ? TenuredObject : GenericObject;
+  ArrayObject* array = NewDenseFullyAllocatedArray(cx, 2, kind);
   if (!array) {
     return false;
   }
@@ -1517,6 +1599,10 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
     }
   }
 
+  // Switch to allocating in the tenured heap if necessary to avoid possible
+  // quadratic behaviour marking stack rooted |properties| vector.
+  AutoSelectGCHeap gcHeap(cx, 1);
+
   // We have ensured |nobj| contains no extra indexed properties, so the
   // only indexed properties we need to handle here are dense and typed
   // array elements.
@@ -1537,7 +1623,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
       static_assert(
           NativeObject::MAX_DENSE_ELEMENTS_COUNT <= PropertyKey::IntMax,
           "dense elements don't exceed PropertyKey::IntMax");
-      str = Int32ToString<CanGC>(cx, i);
+      str = Int32ToStringWithHeap<CanGC>(cx, i, gcHeap);
       if (!str) {
         return false;
       }
@@ -1548,7 +1634,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
       value.setString(str);
     } else if (kind == EnumerableOwnPropertiesKind::KeysAndValues) {
       key.setString(str);
-      if (!NewValuePair(cx, key, value, &value)) {
+      if (!NewValuePair(cx, key, value, &value, gcHeap)) {
         return false;
       }
     }
@@ -1567,7 +1653,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
     // more than 2GB for the properties vector. This also means we don't
     // need to handle indices greater than MAX_INT32 in the loop below.
     if (len > NativeObject::MAX_DENSE_ELEMENTS_COUNT) {
-      ReportOutOfMemory(cx);
+      ReportOversizedAllocation(cx, JSMSG_ALLOC_OVERFLOW);
       return false;
     }
 
@@ -1582,7 +1668,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
         static_assert(
             NativeObject::MAX_DENSE_ELEMENTS_COUNT <= PropertyKey::IntMax,
             "dense elements don't exceed PropertyKey::IntMax");
-        str = Int32ToString<CanGC>(cx, i);
+        str = Int32ToStringWithHeap<CanGC>(cx, i, gcHeap);
         if (!str) {
           return false;
         }
@@ -1600,7 +1686,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
         if (!tobj->getElement<CanGC>(cx, i, &value)) {
           return false;
         }
-        if (!NewValuePair(cx, key, value, &value)) {
+        if (!NewValuePair(cx, key, value, &value, gcHeap)) {
           return false;
         }
       }
@@ -1643,7 +1729,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
         }
         MOZ_ALWAYS_TRUE(rec->getOwnProperty(cx, keyId, &value));
 
-        if (!NewValuePair(cx, key, value, &value)) {
+        if (!NewValuePair(cx, key, value, &value, gcHeap)) {
           return false;
         }
       }
@@ -1717,7 +1803,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
         } else {
           key.setString(id.toString());
           value.set(nobj->getSlot(iter->slot()));
-          if (!NewValuePair(cx, key, value, &value)) {
+          if (!NewValuePair(cx, key, value, &value, gcHeap)) {
             return false;
           }
         }
@@ -1783,7 +1869,7 @@ static bool TryEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
 
       if (kind == EnumerableOwnPropertiesKind::KeysAndValues) {
         key.setString(id.toString());
-        if (!NewValuePair(cx, key, value, &value)) {
+        if (!NewValuePair(cx, key, value, &value, gcHeap)) {
           return false;
         }
       }
@@ -1805,6 +1891,112 @@ end:
   }
 
   rval.setObject(*array);
+  return true;
+}
+
+// Optimization dedicated for `Object.keys(..).length` JS pattern. This function
+// replicates TryEnumerableOwnPropertiesNative code, except that instead of
+// generating an array we only return the length of the array that would have
+// been generated.
+//
+// As opposed to TryEnumerableOwnPropertiesNative, this function only support
+// EnumerableOwnPropertiesKind::Keys variant.
+static bool CountEnumerableOwnPropertiesNative(JSContext* cx, HandleObject obj,
+                                               int32_t& rval, bool* optimized) {
+  *optimized = false;
+
+  // Use the fast path if |obj| has neither extra indexed properties nor a
+  // newEnumerate hook. String objects need to be special-cased, because
+  // they're only marked as indexed after their enumerate hook ran. And
+  // because their enumerate hook is slowish, it's more performant to
+  // exclude them directly instead of executing the hook first.
+  if (!obj->is<NativeObject>() || obj->as<NativeObject>().isIndexed() ||
+      obj->getClass()->getNewEnumerate() || obj->is<StringObject>()) {
+    return true;
+  }
+
+#ifdef ENABLE_RECORD_TUPLE
+  // Skip the optimized path in case of record and tuples.
+  if (obj->is<TupleObject>() || obj->is<RecordObject>()) {
+    return true;
+  }
+#endif
+
+  Handle<NativeObject*> nobj = obj.as<NativeObject>();
+
+  // Resolve lazy properties on |nobj|.
+  if (JSEnumerateOp enumerate = nobj->getClass()->getEnumerate()) {
+    if (!enumerate(cx, nobj)) {
+      return false;
+    }
+
+    // Ensure no extra indexed properties were added through enumerate().
+    if (nobj->isIndexed()) {
+      return true;
+    }
+  }
+
+  *optimized = true;
+
+  int32_t num_properties = 0;
+
+  // If possible, attempt to use the shape's iterator cache.
+  Rooted<PropertyIteratorObject*> piter(cx,
+                                        LookupInShapeIteratorCache(cx, nobj));
+  if (piter) {
+    NativeIterator* ni = piter->getNativeIterator();
+    MOZ_ASSERT(ni->isReusable());
+
+    // Guard against indexes.
+    if (!ni->mayHavePrototypeProperties()) {
+      rval = ni->numKeys();
+      return true;
+    }
+  }
+
+  for (uint32_t i = 0, len = nobj->getDenseInitializedLength(); i < len; i++) {
+    if (nobj->getDenseElement(i).isMagic(JS_ELEMENTS_HOLE)) {
+      continue;
+    }
+
+    num_properties += 1;
+  }
+
+  if (obj->is<TypedArrayObject>()) {
+    Handle<TypedArrayObject*> tobj = obj.as<TypedArrayObject>();
+    size_t len = tobj->length();
+
+    // Fail early if the typed array contains too many elements for a
+    // dense array, because we likely OOM anyway when trying to allocate
+    // more than 2GB for the properties vector. This also means we don't
+    // need to handle indices greater than MAX_INT32 in the loop below.
+    if (len > NativeObject::MAX_DENSE_ELEMENTS_COUNT) {
+      ReportOversizedAllocation(cx, JSMSG_ALLOC_OVERFLOW);
+      return false;
+    }
+
+    MOZ_ASSERT(num_properties == 0, "typed arrays cannot have dense elements");
+    num_properties = len;
+  }
+
+  // All enumerable properties with string property keys are data
+  // properties. This allows us to collect the property values while
+  // iterating over the shape hierarchy without worrying over accessors
+  // modifying any state.
+
+  if (nobj->hasEnumerableProperty()) {
+    for (ShapePropertyIter<AllowGC::NoGC> iter(obj.as<NativeObject>()->shape());
+         !iter.done(); iter++) {
+      jsid id = iter->key();
+      if (!iter->enumerable() || id.isSymbol()) {
+        continue;
+      }
+      MOZ_ASSERT(!id.isInt(), "Unexpected indexed property");
+      num_properties += 1;
+    }
+  }
+
+  rval = num_properties;
   return true;
 }
 
@@ -1925,7 +2117,7 @@ static bool EnumerableOwnProperties(JSContext* cx, const JS::CallArgs& args) {
 
 // ES2018 draft rev c164be80f7ea91de5526b33d54e5c9321ed03d3f
 // 19.1.2.16 Object.keys ( O )
-static bool obj_keys(JSContext* cx, unsigned argc, Value* vp) {
+bool js::obj_keys(JSContext* cx, unsigned argc, Value* vp) {
   AutoJSMethodProfilerEntry pseudoFrame(cx, "Object", "keys");
   CallArgs args = CallArgsFromVp(argc, vp);
 
@@ -1949,6 +2141,26 @@ static bool obj_keys(JSContext* cx, unsigned argc, Value* vp) {
 
   // Steps 2-3.
   return GetOwnPropertyKeys(cx, obj, JSITER_OWNONLY, args.rval());
+}
+
+bool js::obj_keys_length(JSContext* cx, HandleObject obj, int32_t& length) {
+  bool optimized;
+  if (!CountEnumerableOwnPropertiesNative(cx, obj, length, &optimized)) {
+    return false;
+  }
+  if (optimized) {
+    return true;
+  }
+
+  // Object.keys: Steps 2-3.
+  // (GetOwnPropertyKeys / CountOwnPropertyKeys)
+  RootedIdVector keys(cx);
+  if (!GetPropertyKeys(cx, obj, JSITER_OWNONLY, &keys)) {
+    return false;
+  }
+
+  length = keys.length();
+  return true;
 }
 
 // ES2018 draft rev c164be80f7ea91de5526b33d54e5c9321ed03d3f
@@ -2250,7 +2462,7 @@ static const JSFunctionSpec object_static_methods[] = {
                       "ObjectGetOwnPropertyDescriptor", 2, 0),
     JS_SELF_HOSTED_FN("getOwnPropertyDescriptors",
                       "ObjectGetOwnPropertyDescriptors", 1, 0),
-    JS_FN("keys", obj_keys, 1, 0),
+    JS_INLINABLE_FN("keys", obj_keys, 1, 0, ObjectKeys),
     JS_FN("values", obj_values, 1, 0),
     JS_FN("entries", obj_entries, 1, 0),
     JS_INLINABLE_FN("is", obj_is, 2, 0, ObjectIs),
@@ -2267,9 +2479,7 @@ static const JSFunctionSpec object_static_methods[] = {
     JS_FN("isSealed", obj_isSealed, 1, 0),
     JS_SELF_HOSTED_FN("fromEntries", "ObjectFromEntries", 1, 0),
     JS_SELF_HOSTED_FN("hasOwn", "ObjectHasOwn", 2, 0),
-#ifdef NIGHTLY_BUILD
     JS_SELF_HOSTED_FN("groupBy", "ObjectGroupBy", 2, 0),
-#endif
     JS_FS_END};
 
 static JSObject* CreateObjectConstructor(JSContext* cx, JSProtoKey key) {

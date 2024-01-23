@@ -81,6 +81,10 @@ add_task(function makeResultGroups_true() {
                       group: UrlbarUtils.RESULT_GROUP.FORM_HISTORY,
                     },
                     {
+                      flex: 2,
+                      group: UrlbarUtils.RESULT_GROUP.RECENT_SEARCH,
+                    },
+                    {
                       flex: 4,
                       group: UrlbarUtils.RESULT_GROUP.REMOTE_SUGGESTION,
                     },
@@ -201,6 +205,10 @@ add_task(function makeResultGroups_false() {
                     {
                       flex: 2,
                       group: UrlbarUtils.RESULT_GROUP.FORM_HISTORY,
+                    },
+                    {
+                      flex: 2,
+                      group: UrlbarUtils.RESULT_GROUP.RECENT_SEARCH,
                     },
                     {
                       flex: 4,
@@ -408,7 +416,7 @@ add_task(async function onPrefChanged() {
   });
   UrlbarPrefs.addObserver({});
 
-  const deferred = PromiseUtils.defer();
+  const deferred = Promise.withResolvers();
   const observer = {
     onPrefChanged(pref) {
       this.prefChangedList.push(pref);

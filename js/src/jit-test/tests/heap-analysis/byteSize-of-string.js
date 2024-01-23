@@ -1,4 +1,4 @@
-// |jit-test| skip-if: !getBuildConfiguration()['moz-memory']
+// |jit-test| skip-if: !getBuildConfiguration("moz-memory")
 // Run this test only if we're using jemalloc. Other malloc implementations
 // exhibit surprising behaviors. For example, 32-bit Fedora builds have
 // non-deterministic allocation sizes.
@@ -10,8 +10,6 @@
 // variants to consider (32-bit and 64-bit), and if these sizes change, that's
 // something SpiderMonkey hackers really want to know; they're supposed to be
 // stable.
-
-var config = getBuildConfiguration();
 
 gczeal(0); // Need to control when tenuring happens
 
@@ -35,13 +33,16 @@ gczeal(0); // Need to control when tenuring happens
 if (getJitCompilerOptions()["ion.warmup.trigger"] <= 100)
     setJitCompilerOption("ion.warmup.trigger", 100);
 
-if (config['pointer-byte-size'] == 4)
+if (getBuildConfiguration("pointer-byte-size") == 4)
   var s = (s32, s64) => s32
 else
   var s = (s32, s64) => s64
 
 // Convert an input string, which is probably an atom because it's a literal in
-// the source text, to a nursery-allocated string with the same contents.
+// the source text, to a nursery-allocated string with the same contents. Note
+// that by going through the flatting process here, this also ensures that the
+// char data is always malloced and expanded by doubling, which would not be
+// the case for nursery-allocated chars (as would be produced by newString()).
 function copyString(str) {
   if (str.length == 0)
     return str; // Nothing we can do here
@@ -82,7 +83,7 @@ function tByteSize(str) {
 //  - Nursery-allocated strings require a header that stores the zone.
 
 // Expected sizes based on type of string
-const m32 = (config['pointer-byte-size'] == 4);
+const m32 = (getBuildConfiguration("pointer-byte-size") == 4);
 const TA = m32 ? 24 : 32; // ThinInlineString atom, includes a hash value
 const TN = m32 ? 16 : 24; // ThinInlineString
 const FN = m32 ? 32 : 32; // FatInlineString
@@ -234,7 +235,7 @@ assertEq(byteSize(rope16),                                              s(Nurser
 // allocated in the nursery. If this ever changes, please add tests for the new
 // cases. Also note that on Windows mozmalloc's smallest allocation size is
 // two words compared to one word on other platforms.
-if (config['windows']) {
+if (getBuildConfiguration("windows")) {
   assertEq(byteSize(newString("", {external: true})),                        s(EN+8, EN+16));
   assertEq(byteSize(newString("1", {external: true})),                       s(EN+8, EN+16));
   assertEq(byteSize(newString("12", {external: true})),                      s(EN+8, EN+16));
@@ -250,3 +251,9 @@ if (config['windows']) {
 assertEq(byteSize(newString("12345", {external: true})),                     s(EN+16, EN+16));
 assertEq(byteSize(newString("123456789.123456789.1234", {external: true})),  s(EN+48, EN+48));
 assertEq(byteSize(newString("123456789.123456789.12345", {external: true})), s(EN+64, EN+64));
+
+// Nursery-allocated chars.
+//
+// byteSize will not include the space used by the nursery for the chars.
+assertEq(byteSize(newString("123456789.123456789.12345")), s(Nursery(XN)+0,Nursery(XN)+0));
+assertEq(byteSize(newString("123456789.123456789.123456789.123")), s(Nursery(XN)+0,Nursery(XN)+0));

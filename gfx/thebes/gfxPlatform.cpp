@@ -22,7 +22,6 @@
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/gfx/GraphicsMessages.h"
 #include "mozilla/gfx/CanvasManagerChild.h"
-#include "mozilla/gfx/CanvasManagerParent.h"
 #include "mozilla/gfx/CanvasRenderThread.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/DebugOnly.h"
@@ -30,7 +29,6 @@
 #include "mozilla/StaticPrefs_accessibility.h"
 #include "mozilla/StaticPrefs_apz.h"
 #include "mozilla/StaticPrefs_bidi.h"
-#include "mozilla/StaticPrefs_canvas.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/StaticPrefs_layers.h"
@@ -176,6 +174,7 @@ gfxPlatform* gPlatform = nullptr;
 static bool gEverInitialized = false;
 
 const ContentDeviceData* gContentDeviceInitData = nullptr;
+Maybe<nsTArray<uint8_t>> gCMSOutputProfileData;
 
 Atomic<bool, MemoryOrdering::ReleaseAcquire> gfxPlatform::gCMSInitialized;
 CMSMode gfxPlatform::gCMSMode = CMSMode::Off;
@@ -220,8 +219,7 @@ class CrashStatsLogForwarder : public mozilla::gfx::LogForwarder {
 };
 
 CrashStatsLogForwarder::CrashStatsLogForwarder(CrashReporter::Annotation aKey)
-    : mBuffer(),
-      mCrashCriticalKey(aKey),
+    : mCrashCriticalKey(aKey),
       mMaxCapacity(0),
       mIndex(-1),
       mMutex("CrashStatsLogForwarder") {}
@@ -470,10 +468,10 @@ bool gfxPlatform::Initialized() { return !!gPlatform; }
 /* static */
 void gfxPlatform::InitChild(const ContentDeviceData& aData) {
   MOZ_ASSERT(XRE_IsContentProcess());
-  MOZ_RELEASE_ASSERT(!gPlatform,
-                     "InitChild() should be called before first GetPlatform()");
+  MOZ_ASSERT(!gPlatform,
+             "InitChild() should be called before first GetPlatform()");
   // Make the provided initial ContentDeviceData available to the init
-  // routines, so they don't have to do a sync request from the parent.
+  // routines.
   gContentDeviceInitData = &aData;
   Init();
   gContentDeviceInitData = nullptr;
@@ -576,7 +574,7 @@ static void WebRenderDebugPrefChangeCallback(const char* aPrefName, void*) {
                       wr::DebugFlags::WINDOW_VISIBILITY_DBG)
   GFX_WEBRENDER_DEBUG(".restrict-blob-size", wr::DebugFlags::RESTRICT_BLOB_SIZE)
 #undef GFX_WEBRENDER_DEBUG
-  gfx::gfxVars::SetWebRenderDebugFlags(flags.bits);
+  gfx::gfxVars::SetWebRenderDebugFlags(flags._0);
 }
 
 static void WebRenderQualityPrefChangeCallback(const char* aPref, void*) {
@@ -937,6 +935,12 @@ void gfxPlatform::Init() {
   }
 #endif
 
+  if (XRE_IsParentProcess()) {
+    mozilla::glean::gpu_process::feature_status.Set(
+        gfxConfig::GetFeature(Feature::GPU_PROCESS)
+            .GetStatusAndFailureIdString());
+  }
+
   if (gfxConfig::IsEnabled(Feature::GPU_PROCESS)) {
     GPUProcessManager* gpu = GPUProcessManager::Get();
     Unused << gpu->LaunchGPUProcess();
@@ -1191,7 +1195,8 @@ bool gfxPlatform::IsHeadless() {
 
 /* static */
 bool gfxPlatform::UseRemoteCanvas() {
-  return XRE_IsContentProcess() && gfx::gfxVars::RemoteCanvasEnabled();
+  return XRE_IsContentProcess() && (gfx::gfxVars::RemoteCanvasEnabled() ||
+                                    gfx::gfxVars::UseAcceleratedCanvas2D());
 }
 
 /* static */
@@ -1310,14 +1315,15 @@ void gfxPlatform::InitLayersIPC() {
 #endif
     if (!gfxConfig::IsEnabled(Feature::GPU_PROCESS)) {
       RemoteTextureMap::Init();
-      if (gfxVars::UseCanvasRenderThread()) {
-        gfx::CanvasRenderThread::Start();
-      }
       wr::RenderThread::Start(GPUProcessManager::Get()->AllocateNamespace());
       image::ImageMemoryReporter::InitForWebRender();
     }
 
     layers::CompositorThreadHolder::Start();
+
+    if (!gfxConfig::IsEnabled(Feature::GPU_PROCESS)) {
+      gfx::CanvasRenderThread::Start();
+    }
   }
 }
 
@@ -1344,8 +1350,10 @@ void gfxPlatform::ShutdownLayersIPC() {
     gfx::CanvasManagerChild::Shutdown();
     layers::CompositorManagerChild::Shutdown();
     layers::ImageBridgeChild::ShutDown();
-    // This could be running on either the Compositor or the Renderer thread.
-    gfx::CanvasManagerParent::Shutdown();
+    // This could be running on either the Compositor thread, the Renderer
+    // thread, or the dedicated CanvasRender thread, so we need to shutdown
+    // before the former two.
+    gfx::CanvasRenderThread::Shutdown();
     // This has to happen after shutting down the child protocols.
     layers::CompositorThreadHolder::Shutdown();
     RemoteTextureMap::Shutdown();
@@ -1363,9 +1371,6 @@ void gfxPlatform::ShutdownLayersIPC() {
           WebRenderBlobTileSizePrefChangeCallback,
           nsDependentCString(
               StaticPrefs::GetPrefName_gfx_webrender_blob_tile_size()));
-    }
-    if (gfx::CanvasRenderThread::Get()) {
-      gfx::CanvasRenderThread::ShutDown();
     }
 #if defined(XP_WIN)
     widget::WinWindowOcclusionTracker::ShutDown();
@@ -2061,6 +2066,10 @@ const mozilla::gfx::ContentDeviceData* gfxPlatform::GetInitContentDeviceData() {
   return gContentDeviceInitData;
 }
 
+Maybe<nsTArray<uint8_t>>& gfxPlatform::GetCMSOutputProfileData() {
+  return gCMSOutputProfileData;
+}
+
 CMSMode GfxColorManagementMode() {
   const auto mode = StaticPrefs::gfx_color_management_mode();
   if (mode >= 0 && mode < UnderlyingValue(CMSMode::AllCount)) {
@@ -2476,8 +2485,24 @@ void gfxPlatform::InitAcceleration() {
         "media.hardware-video-decoding.failed");
     InitGPUProcessPrefs();
 
-    gfxVars::SetRemoteCanvasEnabled(StaticPrefs::gfx_canvas_remote() &&
-                                    gfxConfig::IsEnabled(Feature::GPU_PROCESS));
+    FeatureState& feature = gfxConfig::GetFeature(Feature::REMOTE_CANVAS);
+    feature.SetDefault(StaticPrefs::gfx_canvas_remote_AtStartup(),
+                       FeatureStatus::Disabled, "Disabled via pref");
+
+    if (!gfxConfig::IsEnabled(Feature::GPU_PROCESS) &&
+        !StaticPrefs::gfx_canvas_remote_allow_in_parent_AtStartup()) {
+      feature.Disable(FeatureStatus::UnavailableNoGpuProcess,
+                      "Disabled without GPU process",
+                      "FEATURE_REMOTE_CANVAS_NO_GPU_PROCESS"_ns);
+    }
+
+#ifndef XP_WIN
+    gfxConfig::ForceDisable(Feature::REMOTE_CANVAS, FeatureStatus::Blocked,
+                            "Platform not supported",
+                            "FEATURE_REMOTE_CANVAS_NOT_WINDOWS"_ns);
+#endif
+
+    gfxVars::SetRemoteCanvasEnabled(feature.IsEnabled());
   }
 }
 
@@ -2519,11 +2544,6 @@ void gfxPlatform::InitGPUProcessPrefs() {
   if (IsHeadless()) {
     gpuProc.ForceDisable(FeatureStatus::Blocked, "Headless mode is enabled",
                          "FEATURE_FAILURE_HEADLESS_MODE"_ns);
-    return;
-  }
-  if (InSafeMode()) {
-    gpuProc.ForceDisable(FeatureStatus::Blocked, "Safe-mode is enabled",
-                         "FEATURE_FAILURE_SAFE_MODE"_ns);
     return;
   }
 
@@ -2975,6 +2995,8 @@ void gfxPlatform::InitWebGLConfig() {
       IsFeatureOk(nsIGfxInfo::FEATURE_WEBGL_OPENGL));
   gfxVars::SetAllowWebglAccelAngle(
       IsFeatureOk(nsIGfxInfo::FEATURE_WEBGL_ANGLE));
+  gfxVars::SetWebglUseHardware(
+      IsFeatureOk(nsIGfxInfo::FEATURE_WEBGL_USE_HARDWARE));
 
   if (kIsMacOS) {
     // Avoid crash for Intel HD Graphics 3000 on OSX. (Bug 1413269)
@@ -3025,7 +3047,7 @@ void gfxPlatform::InitWebGLConfig() {
   gfxVars::SetUseCanvasRenderThread(feature.IsEnabled());
 
   bool webglOopAsyncPresentForceSync =
-      !gfxVars::UseCanvasRenderThread() ||
+      (threadsafeGL && !gfxVars::UseCanvasRenderThread()) ||
       StaticPrefs::webgl_out_of_process_async_present_force_sync();
   gfxVars::SetWebglOopAsyncPresentForceSync(webglOopAsyncPresentForceSync);
 
@@ -3072,7 +3094,8 @@ void gfxPlatform::InitWebGPUConfig() {
   if (!IsGfxInfoStatusOkay(nsIGfxInfo::FEATURE_WEBGPU, &message, failureId)) {
     if (StaticPrefs::gfx_webgpu_ignore_blocklist_AtStartup()) {
       feature.UserForceEnable(
-          "Ignoring blocklist entry because of gfx.webgpu.force-enabled:true.");
+          "Ignoring blocklist entry because gfx.webgpu.ignore-blocklist is "
+          "true.");
     }
 
     feature.Disable(FeatureStatus::Blocklisted, message.get(), failureId);
@@ -3225,6 +3248,12 @@ static void AcceleratedCanvas2DPrefChangeCallback(const char*, void*) {
   if (!gfxPlatform::IsGfxInfoStatusOkay(
           nsIGfxInfo::FEATURE_ACCELERATED_CANVAS2D, &message, failureId)) {
     feature.Disable(FeatureStatus::Blocklisted, message.get(), failureId);
+  }
+
+  if (StaticPrefs::gfx_canvas_remote_worker_threads_AtStartup() != 0) {
+    feature.ForceDisable(FeatureStatus::Failed,
+                         "Disabled with non-zero canvas worker threads",
+                         "FEATURE_FAILURE_DISABLE_BY_CANVAS_WORKER_THREADS"_ns);
   }
 
   gfxVars::SetUseAcceleratedCanvas2D(feature.IsEnabled());
@@ -3816,7 +3845,15 @@ bool gfxPlatform::FallbackFromAcceleration(FeatureStatus aStatus,
 
 /* static */
 void gfxPlatform::DisableGPUProcess() {
-  gfxVars::SetRemoteCanvasEnabled(false);
+  if (gfxVars::RemoteCanvasEnabled() &&
+      !StaticPrefs::gfx_canvas_remote_allow_in_parent_AtStartup()) {
+    gfxConfig::Disable(
+        Feature::REMOTE_CANVAS, FeatureStatus::UnavailableNoGpuProcess,
+        "Disabled by GPU process disabled",
+        "FEATURE_REMOTE_CANVAS_DISABLED_BY_GPU_PROCESS_DISABLED"_ns);
+    gfxVars::SetRemoteCanvasEnabled(false);
+  }
+
   if (kIsAndroid) {
     // On android, enable out-of-process WebGL only when GPU process exists.
     gfxVars::SetAllowWebglOop(false);
@@ -3828,29 +3865,38 @@ void gfxPlatform::DisableGPUProcess() {
   }
 
   RemoteTextureMap::Init();
-  if (gfxVars::UseCanvasRenderThread()) {
-    gfx::CanvasRenderThread::Start();
-  }
   // We need to initialize the parent process to prepare for WebRender if we
   // did not end up disabling it, despite losing the GPU process.
   wr::RenderThread::Start(GPUProcessManager::Get()->AllocateNamespace());
+  gfx::CanvasRenderThread::Start();
   image::ImageMemoryReporter::InitForWebRender();
 }
 
-void gfxPlatform::FetchAndImportContentDeviceData() {
+/* static */ void gfxPlatform::DisableRemoteCanvas() {
+  if (gfxVars::RemoteCanvasEnabled()) {
+    gfxConfig::ForceDisable(Feature::REMOTE_CANVAS, FeatureStatus::Failed,
+                            "Disabled by runtime error",
+                            "FEATURE_REMOTE_CANVAS_RUNTIME_ERROR"_ns);
+    gfxVars::SetRemoteCanvasEnabled(false);
+  }
+  if (gfxVars::UseAcceleratedCanvas2D()) {
+    gfxConfig::ForceDisable(Feature::ACCELERATED_CANVAS2D,
+                            FeatureStatus::Failed, "Disabled by runtime error",
+                            "FEATURE_ACCELERATED_CANVAS2D_RUNTIME_ERROR"_ns);
+    gfxVars::SetUseAcceleratedCanvas2D(false);
+  }
+}
+
+void gfxPlatform::ImportCachedContentDeviceData() {
   MOZ_ASSERT(XRE_IsContentProcess());
 
-  if (gContentDeviceInitData) {
-    ImportContentDeviceData(*gContentDeviceInitData);
+  // Import the content device data if we've got some waiting.
+  if (!gContentDeviceInitData) {
     return;
   }
 
-  mozilla::dom::ContentChild* cc = mozilla::dom::ContentChild::GetSingleton();
-
-  mozilla::gfx::ContentDeviceData data;
-  cc->SendGetGraphicsDeviceInitData(&data);
-
-  ImportContentDeviceData(data);
+  ImportContentDeviceData(*gContentDeviceInitData);
+  gContentDeviceInitData = nullptr;
 }
 
 void gfxPlatform::ImportContentDeviceData(
@@ -3859,7 +3905,12 @@ void gfxPlatform::ImportContentDeviceData(
 
   const DevicePrefs& prefs = aData.prefs();
   gfxConfig::Inherit(Feature::HW_COMPOSITING, prefs.hwCompositing());
-  gfxConfig::Inherit(Feature::OPENGL_COMPOSITING, prefs.oglCompositing());
+
+  // We don't inherit Feature::OPENGL_COMPOSITING here, because platforms
+  // will handle that (without imported data from the parent) in
+  // InitOpenGLConfig.
+
+  gCMSOutputProfileData = Some(aData.cmsOutputProfileData().Clone());
 }
 
 void gfxPlatform::BuildContentDeviceData(

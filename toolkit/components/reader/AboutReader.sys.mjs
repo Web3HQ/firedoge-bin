@@ -403,7 +403,7 @@ AboutReader.prototype = {
 
         // Determine the direction of the delta (we don't care about its size);
         // This code is adapted from normalizeWheelEventDelta in
-        // toolkt/components/pdfjs/content/web/viewer.js
+        // toolkit/components/pdfjs/content/web/viewer.mjs
         let delta = Math.abs(aEvent.deltaX) + Math.abs(aEvent.deltaY);
         let angle = Math.atan2(aEvent.deltaY, aEvent.deltaX);
         if (-0.25 * Math.PI < angle && angle < 0.75 * Math.PI) {
@@ -966,18 +966,19 @@ AboutReader.prototype = {
 
     this._titleElement.textContent = article.title;
 
-    // TODO: Once formatRange() and selectRange() are available outside Nightly,
-    // use them here. https://bugzilla.mozilla.org/show_bug.cgi?id=1795317
     const slow = article.readingTimeMinsSlow;
     const fast = article.readingTimeMinsFast;
     const fastStr = lazy.numberFormat.format(fast);
-    const slowStr = lazy.numberFormat.format(slow);
+    const readTimeRange = lazy.numberFormat.formatRange(fast, slow);
     this._doc.l10n.setAttributes(
       this._readTimeElement,
       "about-reader-estimated-read-time",
       {
-        range: fastStr === slowStr ? `~${fastStr}` : `${fastStr}–${slowStr}`,
-        rangePlural: lazy.pluralRules.select(slow),
+        range: fast === slow ? `~${fastStr}` : `${readTimeRange}`,
+        rangePlural:
+          fast === slow
+            ? lazy.pluralRules.select(fast)
+            : lazy.pluralRules.selectRange(fast, slow),
       }
     );
 

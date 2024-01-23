@@ -783,10 +783,7 @@ nsBaseChannel::OnStartRequest(nsIRequest* request) {
   MOZ_ASSERT_IF(mRequest, request == mRequest);
   MOZ_ASSERT_IF(mCancelableAsyncRequest, !mRequest);
 
-  nsAutoCString scheme;
-  mURI->GetScheme(scheme);
-
-  if (mPump && !scheme.EqualsLiteral("ftp")) {
+  if (mPump) {
     // If our content type is unknown, use the content type
     // sniffer. If the sniffer is not available for some reason, then we just
     // keep going as-is.
@@ -898,7 +895,9 @@ NS_IMETHODIMP
 nsBaseChannel::RetargetDeliveryTo(nsISerialEventTarget* aEventTarget) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  NS_ENSURE_TRUE(mRequest, NS_ERROR_NOT_INITIALIZED);
+  if (!mRequest) {
+    return NS_ERROR_NOT_INITIALIZED;
+  }
 
   nsCOMPtr<nsIThreadRetargetableRequest> req;
   if (mAllowThreadRetargeting) {
@@ -940,14 +939,32 @@ nsBaseChannel::CheckListenerChain() {
   return listener->CheckListenerChain();
 }
 
+NS_IMETHODIMP
+nsBaseChannel::OnDataFinished(nsresult aStatus) {
+  if (!mListener) {
+    return NS_ERROR_FAILURE;
+  }
+
+  if (!mAllowThreadRetargeting) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+
+  nsCOMPtr<nsIThreadRetargetableStreamListener> listener =
+      do_QueryInterface(mListener);
+  if (listener) {
+    return listener->OnDataFinished(aStatus);
+  }
+
+  return NS_OK;
+}
+
 NS_IMETHODIMP nsBaseChannel::GetCanceled(bool* aCanceled) {
   *aCanceled = mCanceled;
   return NS_OK;
 }
 
 void nsBaseChannel::SetupNeckoTarget() {
-  mNeckoTarget =
-      nsContentUtils::GetEventTargetByLoadInfo(mLoadInfo, TaskCategory::Other);
+  mNeckoTarget = GetMainThreadSerialEventTarget();
 }
 
 nsBaseChannel::ContentRange::ContentRange(const nsACString& aRangeHeader,

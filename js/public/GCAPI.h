@@ -14,6 +14,7 @@
 #include "mozilla/TimeStamp.h"
 #include "mozilla/Vector.h"
 
+#include "js/CharacterEncoding.h"  // JS::UTF8Chars
 #include "js/GCAnnotations.h"
 #include "js/shadow/Zone.h"
 #include "js/SliceBudget.h"
@@ -316,15 +317,6 @@ typedef enum JSGCParamKey {
   JSGC_NURSERY_FREE_THRESHOLD_FOR_IDLE_COLLECTION = 27,
 
   /**
-   * If this percentage of the nursery is tenured and the nursery is at least
-   * 4MB, then proceed to examine which groups we should pretenure.
-   *
-   * Default: PretenureThreshold
-   * Pref: None
-   */
-  JSGC_PRETENURE_THRESHOLD = 28,
-
-  /**
    * Attempt to run a minor GC in the idle time if the free space falls
    * below this percentage (from 0 to 99).
    *
@@ -412,19 +404,6 @@ typedef enum JSGCParamKey {
   JSGC_HELPER_THREAD_COUNT = 41,
 
   /**
-   * If the percentage of the tenured strings exceeds this threshold, string
-   * will be allocated in tenured heap instead. (Default is allocated in
-   * nursery.)
-   */
-  JSGC_PRETENURE_STRING_THRESHOLD = 42,
-
-  /**
-   * If the finalization rate of the tenured strings exceeds this threshold,
-   * string will be allocated in nursery.
-   */
-  JSGC_STOP_PRETENURE_STRING_THRESHOLD = 43,
-
-  /**
    * A number that is incremented on every major GC slice.
    */
   JSGC_MAJOR_GC_NUMBER = 44,
@@ -477,9 +456,9 @@ typedef enum JSGCParamKey {
   /**
    * The heap size above which to use parallel marking.
    *
-   * Default: ParallelMarkingThresholdKB
+   * Default: ParallelMarkingThresholdMB
    */
-  JSGC_PARALLEL_MARKING_THRESHOLD_KB = 50,
+  JSGC_PARALLEL_MARKING_THRESHOLD_MB = 50,
 } JSGCParamKey;
 
 /*
@@ -556,9 +535,11 @@ using JSHostCleanupFinalizationRegistryCallback =
  */
 struct JSExternalStringCallbacks {
   /**
-   * Finalizes external strings created by JS_NewExternalString. The finalizer
-   * can be called off the main thread.
+   * Finalizes external strings created by JS_NewExternalStringLatin1 or
+   * JS_NewExternalUCString. The finalizer can be called off the main
+   * thread.
    */
+  virtual void finalize(JS::Latin1Char* chars) const = 0;
   virtual void finalize(char16_t* chars) const = 0;
 
   /**
@@ -569,6 +550,8 @@ struct JSExternalStringCallbacks {
    *
    * Implementations of this callback MUST NOT do anything that can cause GC.
    */
+  virtual size_t sizeOfBuffer(const JS::Latin1Char* chars,
+                              mozilla::MallocSizeOf mallocSizeOf) const = 0;
   virtual size_t sizeOfBuffer(const char16_t* chars,
                               mozilla::MallocSizeOf mallocSizeOf) const = 0;
 };
@@ -639,6 +622,7 @@ namespace JS {
   D(DOCSHELL, 54)                                                      \
   D(HTML_PARSER, 55)                                                   \
   D(DOM_TESTUTILS, 56)                                                 \
+  D(PREPARE_FOR_PAGELOAD, 57)                                          \
                                                                        \
   /* Reasons reserved for embeddings. */                               \
   D(RESERVED1, FIRST_RESERVED_REASON)                                  \
@@ -1045,16 +1029,25 @@ class JS_PUBLIC_API AutoRequireNoGC {
 class JS_PUBLIC_API AutoAssertNoGC : public AutoRequireNoGC {
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
  protected:
-  JSContext* cx_;
+  JSContext* cx_;  // nullptr if inactive.
 
  public:
-  // This gets the context from TLS if it is not passed in.
+  // Nullptr here means get the context from TLS. It does not mean inactive
+  // (though cx_ may end up nullptr, and thus inactive, if TLS has not yet been
+  // initialized.)
   explicit AutoAssertNoGC(JSContext* cx = nullptr);
+  AutoAssertNoGC(AutoAssertNoGC&& other) : cx_(other.cx_) {
+    other.cx_ = nullptr;
+  }
   ~AutoAssertNoGC();
+
+  void reset();
 #else
  public:
   explicit AutoAssertNoGC(JSContext* cx = nullptr) {}
   ~AutoAssertNoGC() {}
+
+  void reset() {}
 #endif
 };
 
@@ -1125,11 +1118,15 @@ class JS_PUBLIC_API AutoCheckCannotGC : public AutoAssertNoGC {
 #  else
   AutoCheckCannotGC(const AutoCheckCannotGC& other) : AutoCheckCannotGC() {}
 #  endif
+  AutoCheckCannotGC(AutoCheckCannotGC&& other)
+      : AutoAssertNoGC(std::forward<AutoAssertNoGC>(other)) {}
 #else
 class JS_PUBLIC_API AutoCheckCannotGC : public AutoRequireNoGC {
  public:
   explicit AutoCheckCannotGC(JSContext* cx = nullptr) {}
   AutoCheckCannotGC(const AutoCheckCannotGC& other) : AutoCheckCannotGC() {}
+  AutoCheckCannotGC(AutoCheckCannotGC&& other) : AutoCheckCannotGC() {}
+  void reset() {}
 #endif
 } JS_HAZ_GC_INVALIDATED JS_HAZ_GC_REF;
 
@@ -1255,7 +1252,10 @@ extern JS_PUBLIC_API void JS_SetGCParametersBasedOnAvailableMemory(
  * Create a new JSString whose chars member refers to external memory, i.e.,
  * memory requiring application-specific finalization.
  */
-extern JS_PUBLIC_API JSString* JS_NewExternalString(
+extern JS_PUBLIC_API JSString* JS_NewExternalStringLatin1(
+    JSContext* cx, const JS::Latin1Char* chars, size_t length,
+    const JSExternalStringCallbacks* callbacks);
+extern JS_PUBLIC_API JSString* JS_NewExternalUCString(
     JSContext* cx, const char16_t* chars, size_t length,
     const JSExternalStringCallbacks* callbacks);
 
@@ -1266,13 +1266,27 @@ extern JS_PUBLIC_API JSString* JS_NewExternalString(
  * external string allocated by a previous call and |*allocatedExternal| is set
  * to false. If |*allocatedExternal| is false, |fin| won't be called.
  */
-extern JS_PUBLIC_API JSString* JS_NewMaybeExternalString(
+extern JS_PUBLIC_API JSString* JS_NewMaybeExternalStringLatin1(
+    JSContext* cx, const JS::Latin1Char* chars, size_t length,
+    const JSExternalStringCallbacks* callbacks, bool* allocatedExternal);
+extern JS_PUBLIC_API JSString* JS_NewMaybeExternalUCString(
     JSContext* cx, const char16_t* chars, size_t length,
     const JSExternalStringCallbacks* callbacks, bool* allocatedExternal);
 
 /**
- * Return the 'callbacks' arg passed to JS_NewExternalString or
- * JS_NewMaybeExternalString.
+ * Similar to JS_NewMaybeExternalStringLatin1.
+ *
+ * Create an external Latin1 string if the utf8 buffer contains only ASCII
+ * chars, otherwise copy the chars into a non-external string.
+ */
+extern JS_PUBLIC_API JSString* JS_NewMaybeExternalStringUTF8(
+    JSContext* cx, const JS::UTF8Chars& utf8,
+    const JSExternalStringCallbacks* callbacks, bool* allocatedExternal);
+
+/**
+ * Return the 'callbacks' arg passed to JS_NewExternalStringLatin1,
+ * JS_NewExternalUCString, JS_NewMaybeExternalStringLatin1,
+ * or JS_NewMaybeExternalUCString.
  */
 extern JS_PUBLIC_API const JSExternalStringCallbacks*
 JS_GetExternalStringCallbacks(JSString* str);
@@ -1285,6 +1299,10 @@ extern JS_PUBLIC_API GCReason WantEagerMajorGC(JSRuntime* rt);
 
 extern JS_PUBLIC_API void MaybeRunNurseryCollection(JSRuntime* rt,
                                                     JS::GCReason reason);
+
+extern JS_PUBLIC_API void RunNurseryCollection(
+    JSRuntime* rt, JS::GCReason reason,
+    mozilla::TimeDuration aSinceLastMinorGC);
 
 extern JS_PUBLIC_API void SetHostCleanupFinalizationRegistryCallback(
     JSContext* cx, JSHostCleanupFinalizationRegistryCallback cb, void* data);

@@ -33,7 +33,7 @@
 namespace mozilla::dom {
 EventWithOptionsRunnable::EventWithOptionsRunnable(Worker& aWorker)
     : WorkerDebuggeeRunnable(aWorker.mWorkerPrivate,
-                             WorkerRunnable::WorkerThreadModifyBusyCount),
+                             WorkerRunnable::WorkerThread),
       StructuredCloneHolder(CloningSupported, TransferringSupported,
                             StructuredCloneScope::SameProcess) {}
 
@@ -131,24 +131,12 @@ bool EventWithOptionsRunnable::BuildAndFireEvent(
 
 bool EventWithOptionsRunnable::WorkerRun(JSContext* aCx,
                                          WorkerPrivate* aWorkerPrivate) {
-  if (mBehavior == ParentThreadUnchangedBusyCount) {
+  if (mTarget == ParentThread) {
     // Don't fire this event if the JS object has been disconnected from the
     // private object.
     if (!aWorkerPrivate->IsAcceptingEvents()) {
       return true;
     }
-
-    // Once a window has frozen its workers, their
-    // mMainThreadDebuggeeEventTargets should be paused, and their
-    // WorkerDebuggeeRunnables should not be being executed. The same goes for
-    // WorkerDebuggeeRunnables sent from child to parent workers, but since a
-    // frozen parent worker runs only control runnables anyway, that is taken
-    // care of naturally.
-    MOZ_ASSERT(!aWorkerPrivate->IsFrozen());
-
-    // Similarly for paused windows; all its workers should have been informed.
-    // (Subworkers are unaffected by paused windows.)
-    MOZ_ASSERT(!aWorkerPrivate->IsParentWindowPaused());
 
     aWorkerPrivate->AssertInnerWindowIsCorrect();
 
@@ -157,6 +145,13 @@ bool EventWithOptionsRunnable::WorkerRun(JSContext* aCx,
   }
 
   MOZ_ASSERT(aWorkerPrivate == GetWorkerPrivateFromContext(aCx));
+  MOZ_ASSERT(aWorkerPrivate->GlobalScope());
+
+  // If the worker start shutting down, don't dispatch the event.
+  if (NS_FAILED(
+          aWorkerPrivate->GlobalScope()->CheckCurrentGlobalCorrectness())) {
+    return true;
+  }
 
   return BuildAndFireEvent(aCx, aWorkerPrivate, aWorkerPrivate->GlobalScope());
 }

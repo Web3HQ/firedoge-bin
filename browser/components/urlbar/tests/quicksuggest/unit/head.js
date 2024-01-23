@@ -2,11 +2,10 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
 /* import-globals-from ../../unit/head.js */
+/* eslint-disable jsdoc/require-param */
 
 ChromeUtils.defineESModuleGetters(this, {
   QuickSuggest: "resource:///modules/QuickSuggest.sys.mjs",
-  QuickSuggestRemoteSettings:
-    "resource:///modules/urlbar/private/QuickSuggestRemoteSettings.sys.mjs",
   TelemetryTestUtils: "resource://testing-common/TelemetryTestUtils.sys.mjs",
   UrlbarProviderAutofill: "resource:///modules/UrlbarProviderAutofill.sys.mjs",
   UrlbarProviderQuickSuggest:
@@ -20,6 +19,208 @@ add_setup(async function setUpQuickSuggestXpcshellTest() {
   // TelemetryEnvironment initialization in xpcshell tests, so just skip it.
   UrlbarPrefs._testSkipTelemetryEnvironmentInit = true;
 });
+
+/**
+ * Adds two tasks: One with the Rust backend disabled and one with it enabled.
+ * The names of the task functions will be the name of the passed-in task
+ * function appended with "_rustDisabled" and "_rustEnabled" respectively. Call
+ * with the usual `add_task()` arguments.
+ */
+function add_tasks_with_rust(...args) {
+  let taskFnIndex = args.findIndex(a => typeof a == "function");
+  let taskFn = args[taskFnIndex];
+
+  for (let rustEnabled of [false, true]) {
+    let newTaskFn = async (...taskFnArgs) => {
+      info("add_tasks_with_rust: Setting rustEnabled: " + rustEnabled);
+      UrlbarPrefs.set("quicksuggest.rustEnabled", rustEnabled);
+      info("add_tasks_with_rust: Done setting rustEnabled: " + rustEnabled);
+
+      // The current backend may now start syncing, so wait for it to finish.
+      info("add_tasks_with_rust: Forcing sync");
+      await QuickSuggestTestUtils.forceSync();
+      info("add_tasks_with_rust: Done forcing sync");
+
+      let rv;
+      try {
+        info(
+          "add_tasks_with_rust: Calling original task function: " + taskFn.name
+        );
+        rv = await taskFn(...taskFnArgs);
+      } catch (e) {
+        // Clearly report any unusual errors to make them easier to spot and to
+        // make the flow of the test clearer. The harness throws NS_ERROR_ABORT
+        // when a normal assertion fails, so don't report that.
+        if (e.result != Cr.NS_ERROR_ABORT) {
+          Assert.ok(
+            false,
+            "add_tasks_with_rust: The original task function threw an error: " +
+              e
+          );
+        }
+        throw e;
+      } finally {
+        info(
+          "add_tasks_with_rust: Done calling original task function: " +
+            taskFn.name
+        );
+        info("add_tasks_with_rust: Clearing rustEnabled");
+        UrlbarPrefs.clear("quicksuggest.rustEnabled");
+        info("add_tasks_with_rust: Done clearing rustEnabled");
+
+        // The current backend may now start syncing, so wait for it to finish.
+        info("add_tasks_with_rust: Forcing sync");
+        await QuickSuggestTestUtils.forceSync();
+        info("add_tasks_with_rust: Done forcing sync");
+      }
+      return rv;
+    };
+
+    Object.defineProperty(newTaskFn, "name", {
+      value: taskFn.name + (rustEnabled ? "_rustEnabled" : "_rustDisabled"),
+    });
+    let addTaskArgs = [...args];
+    addTaskArgs[taskFnIndex] = newTaskFn;
+    add_task(...addTaskArgs);
+  }
+}
+
+/**
+ * Returns an expected Wikipedia (non-sponsored) result that can be passed to
+ * `check_results()` regardless of whether the Rust backend is enabled.
+ *
+ * @returns {object}
+ *   An object that can be passed to `check_results()`.
+ */
+function makeWikipediaResult({
+  source,
+  provider,
+  keyword = "wikipedia",
+  title = "Wikipedia Suggestion",
+  url = "http://example.com/wikipedia",
+  originalUrl = "http://example.com/wikipedia",
+  icon = null,
+  iconBlob = new Blob([new Uint8Array([])]),
+  impressionUrl = "http://example.com/wikipedia-impression",
+  clickUrl = "http://example.com/wikipedia-click",
+  blockId = 1,
+  advertiser = "Wikipedia",
+  iabCategory = "5 - Education",
+  suggestedIndex = -1,
+  isSuggestedIndexRelativeToGroup = true,
+}) {
+  let result = {
+    suggestedIndex,
+    isSuggestedIndexRelativeToGroup,
+    type: UrlbarUtils.RESULT_TYPE.URL,
+    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    heuristic: false,
+    payload: {
+      title,
+      url,
+      originalUrl,
+      displayUrl: url.replace(/^https:\/\//, ""),
+      isSponsored: false,
+      qsSuggestion: keyword,
+      sponsoredAdvertiser: "Wikipedia",
+      sponsoredIabCategory: "5 - Education",
+      helpUrl: QuickSuggest.HELP_URL,
+      helpL10n: {
+        id: "urlbar-result-menu-learn-more-about-firefox-suggest",
+      },
+      isBlockable: true,
+      blockL10n: {
+        id: "urlbar-result-menu-dismiss-firefox-suggest",
+      },
+      telemetryType: "adm_nonsponsored",
+    },
+  };
+
+  if (UrlbarPrefs.get("quickSuggestRustEnabled")) {
+    result.payload.source = source || "rust";
+    result.payload.provider = provider || "Wikipedia";
+    result.payload.iconBlob = iconBlob;
+  } else {
+    result.payload.source = source || "remote-settings";
+    result.payload.provider = provider || "AdmWikipedia";
+    result.payload.icon = icon;
+    result.payload.sponsoredImpressionUrl = impressionUrl;
+    result.payload.sponsoredClickUrl = clickUrl;
+    result.payload.sponsoredBlockId = blockId;
+    result.payload.sponsoredAdvertiser = advertiser;
+    result.payload.sponsoredIabCategory = iabCategory;
+  }
+
+  return result;
+}
+
+/**
+ * Returns an expected AMP (sponsored) result that can be passed to
+ * `check_results()` regardless of whether the Rust backend is enabled.
+ *
+ * @returns {object}
+ *   An object that can be passed to `check_results()`.
+ */
+function makeAmpResult({
+  source,
+  provider,
+  keyword = "amp",
+  title = "AMP Suggestion",
+  url = "http://example.com/amp",
+  originalUrl = "http://example.com/amp",
+  icon = null,
+  iconBlob = new Blob([new Uint8Array([])]),
+  impressionUrl = "http://example.com/amp-impression",
+  clickUrl = "http://example.com/amp-click",
+  blockId = 1,
+  advertiser = "Amp",
+  iabCategory = "22 - Shopping",
+  suggestedIndex = -1,
+  isSuggestedIndexRelativeToGroup = true,
+} = {}) {
+  let result = {
+    suggestedIndex,
+    isSuggestedIndexRelativeToGroup,
+    type: UrlbarUtils.RESULT_TYPE.URL,
+    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    heuristic: false,
+    payload: {
+      title,
+      url,
+      originalUrl,
+      displayUrl: url.replace(/^https:\/\//, ""),
+      isSponsored: true,
+      qsSuggestion: keyword,
+      sponsoredImpressionUrl: impressionUrl,
+      sponsoredClickUrl: clickUrl,
+      sponsoredBlockId: blockId,
+      sponsoredAdvertiser: advertiser,
+      sponsoredIabCategory: iabCategory,
+      helpUrl: QuickSuggest.HELP_URL,
+      helpL10n: {
+        id: "urlbar-result-menu-learn-more-about-firefox-suggest",
+      },
+      isBlockable: true,
+      blockL10n: {
+        id: "urlbar-result-menu-dismiss-firefox-suggest",
+      },
+      telemetryType: "adm_sponsored",
+      descriptionL10n: { id: "urlbar-result-action-sponsored" },
+    },
+  };
+
+  if (UrlbarPrefs.get("quickSuggestRustEnabled")) {
+    result.payload.source = source || "rust";
+    result.payload.provider = provider || "Amp";
+    result.payload.iconBlob = iconBlob;
+  } else {
+    result.payload.source = source || "remote-settings";
+    result.payload.provider = provider || "AdmWikipedia";
+    result.payload.icon = icon;
+  }
+
+  return result;
+}
 
 /**
  * Tests quick suggest prefs migrations.
@@ -259,7 +460,7 @@ async function doShowLessFrequentlyTests({
   keyword,
 }) {
   // Do some sanity checks on the keyword. Any checks that fail are errors in
-  // the test. This function assumes
+  // the test.
   let spaceIndex = keyword.indexOf(" ");
   if (spaceIndex < 0) {
     throw new Error("keyword must contain a space");
@@ -311,16 +512,19 @@ async function doShowLessFrequentlyTests({
     },
   ];
 
-  info("Testing 'show less frequently' with cap in remote settings");
-  await doOneShowLessFrequentlyTest({
-    tests,
-    feature,
-    expectedResult,
-    showLessFrequentlyCountPref,
-    rs: {
-      show_less_frequently_cap: 3,
-    },
-  });
+  // The Rust implementation doesn't support the remote settings config.
+  if (!UrlbarPrefs.get("quicksuggest.rustEnabled")) {
+    info("Testing 'show less frequently' with cap in remote settings");
+    await doOneShowLessFrequentlyTest({
+      tests,
+      feature,
+      expectedResult,
+      showLessFrequentlyCountPref,
+      rs: {
+        show_less_frequently_cap: 3,
+      },
+    });
+  }
 
   // Nimbus should override remote settings.
   info("Testing 'show less frequently' with cap in Nimbus and remote settings");
@@ -466,4 +670,66 @@ async function doOneShowLessFrequentlyTest({
   await cleanUpNimbus();
   UrlbarPrefs.clear(showLessFrequentlyCountPref);
   UrlbarPrefs.set("quicksuggest.dataCollection.enabled", true);
+}
+
+/**
+ * Queries the Rust component directly and checks the returned suggestions. The
+ * point is to make sure the Rust backend passes the correct providers to the
+ * Rust component depending on the types of enabled suggestions. Assuming the
+ * Rust component isn't buggy, it should return suggestions only for the
+ * passed-in providers.
+ *
+ * @param {object} options
+ *   Options object
+ * @param {string} options.searchString
+ *   The search string.
+ * @param {Array} options.tests
+ *   Array of test objects: `{ prefs, expectedUrls }`
+ *
+ *   For each object, the given prefs are set, the Rust component is queried
+ *   using the given search string, and the URLs of the returned suggestions are
+ *   compared to the given expected URLs (order doesn't matter).
+ *
+ *   {object} prefs
+ *     An object mapping pref names (relative to `browser.urlbar`) to values.
+ *     These prefs will be set before querying and should be used to enable or
+ *     disable particular types of suggestions.
+ *   {Array} expectedUrls
+ *     An array of the URLs of the suggestions that are expected to be returned.
+ *     The order doesn't matter.
+ */
+async function doRustProvidersTests({ searchString, tests }) {
+  UrlbarPrefs.set("quicksuggest.rustEnabled", true);
+
+  for (let { prefs, expectedUrls } of tests) {
+    info(
+      "Starting Rust providers test: " + JSON.stringify({ prefs, expectedUrls })
+    );
+
+    info("Setting prefs and forcing sync");
+    for (let [name, value] of Object.entries(prefs)) {
+      UrlbarPrefs.set(name, value);
+    }
+    await QuickSuggestTestUtils.forceSync();
+
+    info("Querying with search string: " + JSON.stringify(searchString));
+    let suggestions = await QuickSuggest.rustBackend.query(searchString);
+    info("Got suggestions: " + JSON.stringify(suggestions));
+
+    Assert.deepEqual(
+      suggestions.map(s => s.url).sort(),
+      expectedUrls.sort(),
+      "query() should return the expected suggestions (by URL)"
+    );
+
+    info("Clearing prefs and forcing sync");
+    for (let name of Object.keys(prefs)) {
+      UrlbarPrefs.clear(name);
+    }
+    await QuickSuggestTestUtils.forceSync();
+  }
+
+  info("Clearing rustEnabled pref and forcing sync");
+  UrlbarPrefs.clear("quicksuggest.rustEnabled");
+  await QuickSuggestTestUtils.forceSync();
 }

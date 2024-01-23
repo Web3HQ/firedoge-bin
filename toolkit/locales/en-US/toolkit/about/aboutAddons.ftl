@@ -270,6 +270,9 @@ shortcuts-no-addons = You don’t have any extensions enabled.
 shortcuts-no-commands = The following extensions do not have shortcuts:
 shortcuts-input =
   .placeholder = Type a shortcut
+# Accessible name for a trashcan icon button that removes an existent shortcut
+shortcuts-remove-button =
+  .aria-label = Remove shortcut
 
 shortcuts-browserAction2 = Activate toolbar button
 shortcuts-pageAction = Activate page action
@@ -420,7 +423,8 @@ addon-detail-reviews-link =
 
 # Variables:
 #   $addon (string) - Name of the add-on
-pending-uninstall-description = <span data-l10n-name="addon-name">{ $addon }</span> has been removed.
+pending-uninstall-description2 =
+    .message = { $addon } has been removed.
 pending-uninstall-undo-button = Undo
 
 addon-detail-updates-label = Allow automatic updates
@@ -547,3 +551,14 @@ details-notification-softblocked-link = More Information
 
 details-notification-gmp-pending2 =
     .message = { $name } will be installed shortly.
+
+## Gecko Media Plugins (GMPs)
+
+plugins-gmp-license-info = License information
+plugins-gmp-privacy-info = Privacy Information
+
+plugins-openh264-name = OpenH264 Video Codec provided by Cisco Systems, Inc.
+plugins-openh264-description = This plugin is automatically installed by Mozilla to comply with the WebRTC specification and to enable WebRTC calls with devices that require the H.264 video codec. Visit https://www.openh264.org/ to view the codec source code and learn more about the implementation.
+
+plugins-widevine-name = Widevine Content Decryption Module provided by Google Inc.
+plugins-widevine-description = This plugin enables playback of encrypted media in compliance with the Encrypted Media Extensions specification. Encrypted media is typically used by sites to protect against copying of premium media content. Visit https://www.w3.org/TR/encrypted-media/ for more information on Encrypted Media Extensions.

@@ -284,8 +284,6 @@ BrowserParent::BrowserParent(ContentParent* aManager, const TabId& aTabId,
       mBrowserBridgeParent(nullptr),
       mBrowserHost(nullptr),
       mContentCache(*this),
-      mRemoteLayerTreeOwner{},
-      mChildToParentConversionMatrix{},
       mRect(0, 0, 0, 0),
       mDimensions(0, 0),
       mDPI(0),
@@ -293,10 +291,7 @@ BrowserParent::BrowserParent(ContentParent* aManager, const TabId& aTabId,
       mDefaultScale(0),
       mUpdatedDimensions(false),
       mSizeMode(nsSizeMode_Normal),
-      mClientOffset{},
-      mChromeOffset{},
       mCreatingWindow(false),
-      mDelayedFrameScripts{},
       mVsyncParent(nullptr),
       mMarkedDestroying(false),
       mIsDestroyed(false),
@@ -1358,10 +1353,8 @@ IPCResult BrowserParent::RecvNewWindowGlobal(
   // the wrong type of webIsolated process
   EnumSet<ContentParent::ValidatePrincipalOptions> validationOptions = {};
   nsCOMPtr<nsIURI> docURI = aInit.documentURI();
-  if (docURI->SchemeIs("about") || docURI->SchemeIs("blob") ||
-      docURI->SchemeIs("chrome")) {
+  if (docURI->SchemeIs("blob") || docURI->SchemeIs("chrome")) {
     // XXXckerschb TODO - Do not use SystemPrincipal for:
-    // Bug 1700639: about:plugins
     // Bug 1699385: Remove allowSystem for blobs
     // Bug 1698087: chrome://devtools/content/shared/webextension-fallback.html
     // chrome reftests, e.g.
@@ -1369,6 +1362,20 @@ IPCResult BrowserParent::RecvNewWindowGlobal(
     //   * chrome://reftest/content/xul-document-load/test003.xhtml
     //   * chrome://reftest/content/forms/input/text/centering-1.xhtml
     validationOptions = {ContentParent::ValidatePrincipalOptions::AllowSystem};
+  }
+
+  // Some reftests have frames inside their chrome URIs and those load
+  // about:blank:
+  if (xpc::IsInAutomation() && docURI->SchemeIs("about")) {
+    WindowGlobalParent* wgp = browsingContext->GetParentWindowContext();
+    nsAutoCString spec;
+    NS_ENSURE_SUCCESS(docURI->GetSpec(spec),
+                      IPC_FAIL(this, "Should have spec for about: URI"));
+    if (spec.Equals("about:blank") && wgp &&
+        wgp->DocumentPrincipal()->IsSystemPrincipal()) {
+      validationOptions = {
+          ContentParent::ValidatePrincipalOptions::AllowSystem};
+    }
   }
 
   if (!mManager->ValidatePrincipal(aInit.principal(), validationOptions)) {
@@ -1417,6 +1424,7 @@ void BrowserParent::MouseEnterIntoWidget() {
     // become the current cursor.  When we mouseexit, we stop.
     mRemoteTargetSetsCursor = true;
     widget->SetCursor(mCursor);
+    EventStateManager::ClearCursorSettingManager();
   }
 
   // Mark that we have missed a mouse enter event, so that
@@ -1447,15 +1455,15 @@ void BrowserParent::SendRealMouseEvent(WidgetMouseEvent& aEvent) {
     }
   }
 
-  aEvent.mRefPoint = TransformParentToChild(aEvent.mRefPoint);
+  aEvent.mRefPoint = TransformParentToChild(aEvent);
 
-  nsCOMPtr<nsIWidget> widget = GetWidget();
-  if (widget) {
+  if (nsCOMPtr<nsIWidget> widget = GetWidget()) {
     // When we mouseenter the remote target, the remote target's cursor should
     // become the current cursor.  When we mouseexit, we stop.
     if (eMouseEnterIntoWidget == aEvent.mMessage) {
       mRemoteTargetSetsCursor = true;
       widget->SetCursor(mCursor);
+      EventStateManager::ClearCursorSettingManager();
     } else if (eMouseExitFromWidget == aEvent.mMessage) {
       mRemoteTargetSetsCursor = false;
     }
@@ -2220,11 +2228,10 @@ void BrowserParent::SendRealTouchMoveEvent(
   MOZ_ASSERT(!ret || aEvent.HasBeenPostedToRemoteProcess());
 }
 
-bool BrowserParent::SendHandleTap(TapType aType,
-                                  const LayoutDevicePoint& aPoint,
-                                  Modifiers aModifiers,
-                                  const ScrollableLayerGuid& aGuid,
-                                  uint64_t aInputBlockId) {
+bool BrowserParent::SendHandleTap(
+    TapType aType, const LayoutDevicePoint& aPoint, Modifiers aModifiers,
+    const ScrollableLayerGuid& aGuid, uint64_t aInputBlockId,
+    const Maybe<DoubleTapToZoomMetrics>& aDoubleTapToZoomMetrics) {
   if (mIsDestroyed || !mIsReadyToHandleInputEvents) {
     return false;
   }
@@ -2240,12 +2247,12 @@ bool BrowserParent::SendHandleTap(TapType aType,
     }
   }
   return Manager()->IsInputPriorityEventEnabled()
-             ? PBrowserParent::SendHandleTap(aType,
-                                             TransformParentToChild(aPoint),
-                                             aModifiers, aGuid, aInputBlockId)
+             ? PBrowserParent::SendHandleTap(
+                   aType, TransformParentToChild(aPoint), aModifiers, aGuid,
+                   aInputBlockId, aDoubleTapToZoomMetrics)
              : PBrowserParent::SendNormalPriorityHandleTap(
                    aType, TransformParentToChild(aPoint), aModifiers, aGuid,
-                   aInputBlockId);
+                   aInputBlockId, aDoubleTapToZoomMetrics);
 }
 
 mozilla::ipc::IPCResult BrowserParent::RecvSyncMessage(
@@ -2572,6 +2579,19 @@ LayoutDevicePoint BrowserParent::TransformPoint(
     const LayoutDevicePoint& aPoint,
     const LayoutDeviceToLayoutDeviceMatrix4x4& aMatrix) {
   return aMatrix.TransformPoint(aPoint);
+}
+
+LayoutDeviceIntPoint BrowserParent::TransformParentToChild(
+    const WidgetMouseEvent& aEvent) {
+  MOZ_ASSERT(aEvent.mWidget);
+
+  nsCOMPtr<nsIWidget> widget = GetWidget();
+  if (widget && widget != aEvent.mWidget) {
+    return TransformParentToChild(
+        aEvent.mRefPoint +
+        nsLayoutUtils::WidgetToWidgetOffset(aEvent.mWidget, widget));
+  }
+  return TransformParentToChild(aEvent.mRefPoint);
 }
 
 LayoutDeviceIntPoint BrowserParent::TransformParentToChild(
@@ -3025,7 +3045,10 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyContentBlockingEvent(
     nsTArray<nsCString>&& aTrackingFullHashes,
     const Maybe<
         mozilla::ContentBlockingNotifier::StorageAccessPermissionGrantedReason>&
-        aReason) {
+        aReason,
+    const Maybe<mozilla::ContentBlockingNotifier::CanvasFingerprinter>&
+        aCanvasFingerprinter,
+    const Maybe<bool>& aCanvasFingerprinterKnownText) {
   RefPtr<BrowsingContext> bc = GetBrowsingContext();
 
   if (!bc || bc->IsDiscarded()) {
@@ -3048,8 +3071,9 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyContentBlockingEvent(
       aRequestData.requestURI(), aRequestData.originalRequestURI(),
       aRequestData.matchedList());
 
-  wgp->NotifyContentBlockingEvent(aEvent, request, aBlocked, aTrackingOrigin,
-                                  aTrackingFullHashes, aReason);
+  wgp->NotifyContentBlockingEvent(
+      aEvent, request, aBlocked, aTrackingOrigin, aTrackingFullHashes, aReason,
+      aCanvasFingerprinter, aCanvasFingerprinterKnownText);
 
   return IPC_OK();
 }
@@ -3225,13 +3249,8 @@ bool BrowserParent::SendInsertText(const nsString& aStringToInsert) {
              : PBrowserParent::SendNormalPriorityInsertText(aStringToInsert);
 }
 
-bool BrowserParent::SendPasteTransferable(
-    IPCTransferableData&& aTransferableData, const bool& aIsPrivateData,
-    nsIPrincipal* aRequestingPrincipal,
-    const nsContentPolicyType& aContentPolicyType) {
-  return PBrowserParent::SendPasteTransferable(
-      std::move(aTransferableData), aIsPrivateData, aRequestingPrincipal,
-      aContentPolicyType);
+bool BrowserParent::SendPasteTransferable(IPCTransferable&& aTransferable) {
+  return PBrowserParent::SendPasteTransferable(std::move(aTransferable));
 }
 
 /* static */
@@ -3847,7 +3866,8 @@ bool BrowserParent::AsyncPanZoomEnabled() const {
 void BrowserParent::StartPersistence(
     CanonicalBrowsingContext* aContext,
     nsIWebBrowserPersistDocumentReceiver* aRecv, ErrorResult& aRv) {
-  auto* actor = new WebBrowserPersistDocumentParent();
+  RefPtr<WebBrowserPersistDocumentParent> actor =
+      new WebBrowserPersistDocumentParent();
   actor->SetOnReady(aRecv);
   bool ok = Manager()->SendPWebBrowserPersistDocumentConstructor(actor, this,
                                                                  aContext);

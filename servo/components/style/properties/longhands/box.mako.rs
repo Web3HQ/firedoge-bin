@@ -232,7 +232,6 @@ ${helpers.predefined_type(
     "computed::OffsetPath::none()",
     engines="gecko",
     animation_value_type="motion::OffsetPath",
-    gecko_pref="layout.css.motion-path.enabled",
     flags="CAN_ANIMATE_ON_COMPOSITOR",
     spec="https://drafts.fxtf.org/motion-1/#offset-path-property",
     servo_restyle_damage="reflow_out_of_flow",
@@ -246,7 +245,6 @@ ${helpers.predefined_type(
     "computed::LengthPercentage::zero()",
     engines="gecko",
     animation_value_type="ComputedValue",
-    gecko_pref="layout.css.motion-path.enabled",
     flags="CAN_ANIMATE_ON_COMPOSITOR",
     spec="https://drafts.fxtf.org/motion-1/#offset-distance-property",
     servo_restyle_damage="reflow_out_of_flow",
@@ -260,7 +258,6 @@ ${helpers.predefined_type(
     "computed::OffsetRotate::auto()",
     engines="gecko",
     animation_value_type="ComputedValue",
-    gecko_pref="layout.css.motion-path.enabled",
     flags="CAN_ANIMATE_ON_COMPOSITOR",
     spec="https://drafts.fxtf.org/motion-1/#offset-rotate-property",
     servo_restyle_damage="reflow_out_of_flow",
@@ -274,7 +271,6 @@ ${helpers.predefined_type(
     "computed::PositionOrAuto::auto()",
     engines="gecko",
     animation_value_type="ComputedValue",
-    gecko_pref="layout.css.motion-path.enabled",
     flags="CAN_ANIMATE_ON_COMPOSITOR",
     spec="https://drafts.fxtf.org/motion-1/#offset-anchor-property",
     servo_restyle_damage="reflow_out_of_flow",
@@ -499,7 +495,7 @@ ${helpers.predefined_type(
     engines="gecko",
     spec="https://drafts.csswg.org/css-contain/#content-visibility",
     gecko_pref="layout.css.content-visibility.enabled",
-    animation_value_type="none",
+    animation_value_type="ComputedValue",
     affects="layout",
 )}
 
@@ -633,4 +629,16 @@ ${helpers.predefined_type(
     animation_value_type="discrete",
     spec="https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property",
     affects="layout",
+)}
+
+${helpers.predefined_type(
+    "zoom",
+    "Zoom",
+    "computed::box_::Zoom::ONE",
+    engines="gecko",
+    animation_value_type="Number",
+    spec="Non-standard (https://github.com/atanassov/css-zoom/ is the closest)",
+    gecko_pref="layout.css.zoom.enabled",
+    affects="layout",
+    enabled_in="chrome",
 )}

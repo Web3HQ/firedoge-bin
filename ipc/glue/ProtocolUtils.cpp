@@ -79,9 +79,9 @@ IPCResult IPCResult::FailImpl(NotNull<IProtocol*> actor, const char* where,
   // We already leak the same information potentially on child process failures
   // even in release, and here we are only in DEBUG.
   MOZ_CRASH_UNSAFE(crashMsg.get());
-#endif
-
+#else
   return IPCResult(false);
+#endif
 }
 
 void AnnotateSystemError() {
@@ -629,7 +629,7 @@ void IProtocol::DestroySubtree(ActorDestroyReason aWhy) {
 
 IToplevelProtocol::IToplevelProtocol(const char* aName, ProtocolId aProtoId,
                                      Side aSide)
-    : IProtocol(aProtoId, aSide),
+    : IRefCountedProtocol(aProtoId, aSide),
       mOtherPid(base::kInvalidProcessId),
       mLastLocalId(0),
       mChannel(aName, this) {

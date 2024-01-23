@@ -9,7 +9,7 @@ import { getBlackBoxRanges } from "./source-blackbox";
 // eslint-disable-next-line
 import { getSelectedLocation as _getSelectedLocation } from "../utils/selected-location";
 import { isFrameBlackBoxed } from "../utils/source";
-import { createSelector } from "reselect";
+import { createSelector } from "devtools/client/shared/vendor/reselect";
 
 export const getSelectedFrame = createSelector(
   (state, thread) => state.pause.threads[thread],
@@ -49,6 +49,10 @@ export function getThreadContext(state) {
   return state.pause.threadcx;
 }
 
+export function getNavigateCounter(state) {
+  return state.pause.threadcx.navigateCounter;
+}
+
 export function getPauseReason(state, thread) {
   return getThreadPauseState(state.pause, thread).why;
 }
@@ -86,6 +90,10 @@ export function isEvaluatingExpression(state, thread) {
 
 export function getIsWaitingOnBreak(state, thread) {
   return getThreadPauseState(state.pause, thread).isWaitingOnBreak;
+}
+
+export function getShouldPauseOnDebuggerStatement(state) {
+  return state.pause.shouldPauseOnDebuggerStatement;
 }
 
 export function getShouldPauseOnExceptions(state) {

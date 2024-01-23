@@ -24,8 +24,14 @@ const VALID_EXPLAINER_L10N_IDS = new Map([
  */
 class AnalysisExplainer extends MozLitElement {
   static properties = {
-    productURL: { type: String, reflect: true },
+    productUrl: { type: String, reflect: true },
   };
+
+  static get queries() {
+    return {
+      reviewQualityExplainerLink: "#review-quality-url",
+    };
+  }
 
   getGradesDescriptionTemplate() {
     return html`
@@ -83,10 +89,10 @@ class AnalysisExplainer extends MozLitElement {
   // placeholder "retailer", which should never be visible to users.
   getRetailerDisplayName() {
     let defaultName = "retailer";
-    if (!this.productURL) {
+    if (!this.productUrl) {
       return defaultName;
     }
-    let url = new URL(this.productURL);
+    let url = new URL(this.productUrl);
     let hostname = url.hostname;
     let displayNames = {
       "www.amazon.com": "Amazon",
@@ -98,16 +104,12 @@ class AnalysisExplainer extends MozLitElement {
 
   handleReviewQualityUrlClicked(e) {
     if (e.target.localName == "a" && e.button == 0) {
-      this.dispatchEvent(
-        new CustomEvent("ShoppingTelemetryEvent", {
-          composed: true,
-          bubbles: true,
-          detail: "surfaceReviewQualityExplainerURLClicked",
-        })
-      );
+      Glean.shopping.surfaceShowQualityExplainerUrlClicked.record();
     }
   }
 
+  // Bug 1857620: rather than manually set the utm parameters on the SUMO link,
+  // we should instead update moz-support-link to allow arbitrary utm parameters.
   render() {
     return html`
       <link
@@ -121,7 +123,7 @@ class AnalysisExplainer extends MozLitElement {
       >
         <div slot="content">
           <div id="analysis-explainer-wrapper">
-            <p data-l10n-id="shopping-analysis-explainer-intro"></p>
+            <p data-l10n-id="shopping-analysis-explainer-intro2"></p>
             ${this.getGradesDescriptionTemplate()}
             ${this.getGradingScaleListTemplate()}
             <p
@@ -134,13 +136,16 @@ class AnalysisExplainer extends MozLitElement {
               })}"
             ></p>
             <p
-              data-l10n-id="shopping-analysis-explainer-learn-more"
+              data-l10n-id="shopping-analysis-explainer-learn-more2"
               @click=${this.handleReviewQualityUrlClicked}
             >
               <a
-                is="moz-support-link"
-                support-page="todo"
+                id="review-quality-url"
                 data-l10n-name="review-quality-url"
+                target="_blank"
+                href="${window.RPMGetFormatURLPref(
+                  "app.support.baseURL"
+                )}review-checker-review-quality?as=u&utm_source=inproduct&utm_campaign=learn-more&utm_term=core-sidebar"
               ></a>
             </p>
           </div>

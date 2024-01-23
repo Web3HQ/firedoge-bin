@@ -36,6 +36,7 @@
 #include "js/experimental/JSStencil.h"  // JS::Stencil
 #include "js/GCAPI.h"                   // JS::AutoCheckCannotGC
 #include "js/Printer.h"                 // js::Fprinter
+#include "js/RealmOptions.h"            // JS::RealmBehaviors
 #include "js/RootingAPI.h"              // Rooted
 #include "js/Transcoding.h"             // JS::TranscodeBuffer
 #include "js/Utility.h"                 // js_malloc, js_calloc, js_free
@@ -50,6 +51,7 @@
 #include "vm/JSObject.h"      // JSObject, TenuredObject
 #include "vm/JSONPrinter.h"   // js::JSONPrinter
 #include "vm/JSScript.h"      // BaseScript, JSScript
+#include "vm/Realm.h"         // JS::Realm
 #include "vm/RegExpObject.h"  // js::RegExpObject
 #include "vm/Scope.h"  // Scope, *Scope, ScopeKind::*, ScopeKindString, ScopeIter, ScopeKindIsCatch, BindingIter, GetScopeDataTrailingNames, SizeOfParserScopeData
 #include "vm/ScopeKind.h"    // ScopeKind
@@ -97,7 +99,7 @@ static ParserBindingIter InputBindingIter(const FakeStencilGlobalScope&) {
 InputName InputScript::displayAtom() const {
   return script_.match(
       [](BaseScript* ptr) {
-        return InputName(ptr, ptr->function()->displayAtom());
+        return InputName(ptr, ptr->function()->fullDisplayAtom());
       },
       [](const ScriptStencilRef& ref) {
         return InputName(ref, ref.scriptData().functionAtom);
@@ -1529,9 +1531,9 @@ bool CompilationSyntaxParseCache::copyScriptInfo(
     new (mozilla::KnownNotNull, &scriptExtra[i]) ScriptStencilExtra();
     ScriptStencilExtra& extra = scriptExtra[i];
 
-    if (fun->displayAtom()) {
+    if (fun->fullDisplayAtom()) {
       TaggedParserAtomIndex displayAtom =
-          parseAtoms.internJSAtom(fc, atomCache, fun->displayAtom());
+          parseAtoms.internJSAtom(fc, atomCache, fun->fullDisplayAtom());
       if (!displayAtom) {
         return false;
       }
@@ -2040,6 +2042,10 @@ static JSFunction* CreateFunctionFast(JSContext* cx,
     fun->initAtom(atom);
   }
 
+#ifdef DEBUG
+  fun->assertFunctionKindIntegrity();
+#endif
+
   return fun;
 }
 
@@ -2398,7 +2404,7 @@ static void UpdateEmittedInnerFunctions(JSContext* cx,
 
       // Inferred and Guessed names are computed by BytecodeEmitter and so may
       // need to be applied to existing JSFunctions during delazification.
-      if (fun->displayAtom() == nullptr) {
+      if (fun->fullDisplayAtom() == nullptr) {
         JSAtom* funcAtom = nullptr;
         if (scriptStencil.functionFlags.hasInferredName() ||
             scriptStencil.functionFlags.hasGuessedAtom()) {
@@ -2614,6 +2620,10 @@ bool CompilationStencil::instantiateStencilAfterPreparation(
   // delazification compiles. Delazification will update existing GC things.
   bool isInitialParse = stencil.isInitialStencil();
   MOZ_ASSERT(stencil.isInitialStencil() == input.isInitialStencil());
+
+  // Assert the consistency between the compile option and the target global.
+  MOZ_ASSERT_IF(cx->realm()->behaviors().discardSource(),
+                !stencil.canLazilyParse);
 
   CompilationAtomCache& atomCache = input.atomCache;
   const JS::InstantiateOptions options(input.options);
@@ -4270,6 +4280,9 @@ void js::DumpFunctionFlagsItems(js::JSONPrinter& json,
         case FunctionFlags::Flags::CONSTRUCTOR:
           json.value("CONSTRUCTOR");
           break;
+        case FunctionFlags::Flags::LAZY_ACCESSOR_NAME:
+          json.value("LAZY_ACCESSOR_NAME");
+          break;
         case FunctionFlags::Flags::LAMBDA:
           json.value("LAMBDA");
           break;
@@ -4421,7 +4434,7 @@ void ScriptStencilExtra::dumpFields(js::JSONPrinter& json) const {
   json.property("toStringStart", extent.toStringStart);
   json.property("toStringEnd", extent.toStringEnd);
   json.property("lineno", extent.lineno);
-  json.property("column", extent.column.zeroOriginValue());
+  json.property("column", extent.column.oneOriginValue());
   json.endObject();
 
   json.property("memberInitializers", memberInitializers_);
@@ -4584,7 +4597,7 @@ static void DumpInputScriptFields(js::JSONPrinter& json,
     json.property("toStringStart", extent.toStringStart);
     json.property("toStringEnd", extent.toStringEnd);
     json.property("lineno", extent.lineno);
-    json.property("column", extent.column.zeroOriginValue());
+    json.property("column", extent.column.oneOriginValue());
   }
   json.endObject();
 

@@ -65,17 +65,17 @@ already_AddRefed<ModuleLoadRequest> ComponentModuleLoader::CreateStaticImport(
     nsIURI* aURI, ModuleLoadRequest* aParent) {
   RefPtr<ComponentLoadContext> context = new ComponentLoadContext();
   RefPtr<ModuleLoadRequest> request = new ModuleLoadRequest(
-      aURI, aParent->mFetchOptions, dom::SRIMetadata(), aParent->mURI, context,
-      false, /* is top level */
-      false, /* is dynamic import */
+      aURI, aParent->ReferrerPolicy(), aParent->mFetchOptions,
+      dom::SRIMetadata(), aParent->mURI, context, false, /* is top level */
+      false,                                             /* is dynamic import */
       this, aParent->mVisitedSet, aParent->GetRootModule());
+  request->NoCacheEntryFound();
   return request.forget();
 }
 
 already_AddRefed<ModuleLoadRequest> ComponentModuleLoader::CreateDynamicImport(
     JSContext* aCx, nsIURI* aURI, LoadedScript* aMaybeActiveScript,
-    JS::Handle<JS::Value> aReferencingPrivate, JS::Handle<JSString*> aSpecifier,
-    JS::Handle<JSObject*> aPromise) {
+    JS::Handle<JSString*> aSpecifier, JS::Handle<JSObject*> aPromise) {
   return nullptr;  // Not yet implemented.
 }
 

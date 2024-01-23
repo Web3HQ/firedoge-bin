@@ -139,6 +139,7 @@ async function openTranslationsPanel({
   openFromAppMenu = false,
   openWithKeyboard = false,
 }) {
+  logAction();
   await closeTranslationsPanelIfOpen();
   if (openFromAppMenu) {
     await openTranslationsPanelViaAppMenu({ onOpenPanel, openWithKeyboard });
@@ -163,7 +164,7 @@ async function openTranslationsPanelViaTranslationsButton({
   onOpenPanel = null,
   openWithKeyboard = false,
 }) {
-  info("Opening the translations panel via the translations button");
+  logAction();
   const { button } = await assertTranslationsButton(
     { button: true },
     "The translations button is visible."
@@ -182,11 +183,34 @@ async function openTranslationsPanelViaTranslationsButton({
 }
 
 /**
+ * Provide a uniform way to log actions. This abuses the Error stack to get the callers
+ * of the action. This should help in test debugging.
+ */
+function logAction(...params) {
+  const error = new Error();
+  const stackLines = error.stack.split("\n");
+  const actionName = stackLines[1]?.split("@")[0] ?? "";
+  const taskFileLocation = stackLines[2]?.split("@")[1] ?? "";
+  if (taskFileLocation.includes("head.js")) {
+    // Only log actions that were done at the test level.
+    return;
+  }
+
+  info(`Action: ${actionName}(${params.join(", ")})`);
+  info(
+    `Source: ${taskFileLocation.replace(
+      "chrome://mochitests/content/browser/",
+      ""
+    )}`
+  );
+}
+
+/**
  * Opens the translations panel settings menu.
  * Requires that the translations panel is already open.
  */
 async function openTranslationsSettingsMenu() {
-  info("Opening the translations panel settings menu");
+  logAction();
   const gearIcons = getAllByL10nId("translations-panel-settings-button");
   for (const gearIcon of gearIcons) {
     if (gearIcon.hidden) {
@@ -218,7 +242,7 @@ async function openTranslationsPanelViaAppMenu({
   onOpenPanel = null,
   openWithKeyboard = false,
 }) {
-  info("Opening the translations panel via the app menu");
+  logAction();
   const appMenuButton = getById("PanelUI-menu-button");
   if (openWithKeyboard) {
     hitEnterKey(appMenuButton, "Opening the app-menu button with keyboard");
@@ -254,7 +278,7 @@ async function openTranslationsPanelViaAppMenu({
  * @param {string} langTag - A BCP-47 language tag.
  */
 function switchSelectedFromLanguage(langTag) {
-  info(`Switching the from-language to ${langTag}`);
+  logAction(langTag);
   const { fromMenuList } = TranslationsPanel.elements;
   fromMenuList.value = langTag;
   fromMenuList.dispatchEvent(new Event("command"));
@@ -281,7 +305,7 @@ function assertSelectedFromLanguage(langTag) {
  * @param {string} langTag - A BCP-47 language tag.
  */
 function switchSelectedToLanguage(langTag) {
-  info(`Switching the to-language to ${langTag}`);
+  logAction(langTag);
   const { toMenuList } = TranslationsPanel.elements;
   toMenuList.value = langTag;
   toMenuList.dispatchEvent(new Event("command"));
@@ -308,6 +332,7 @@ function assertSelectedToLanguage(langTag) {
  * otherwise the test will fail.
  */
 async function clickSettingsMenuItemByL10nId(l10nId) {
+  logAction(l10nId);
   info(`Toggling the "${l10nId}" settings menu item.`);
   click(getByL10nId(l10nId), `Clicking the "${l10nId}" settings menu item.`);
   await closeSettingsMenuIfOpen();
@@ -319,6 +344,7 @@ async function clickSettingsMenuItemByL10nId(l10nId) {
  * otherwise the test will fail.
  */
 async function clickAlwaysOfferTranslations() {
+  logAction();
   await clickSettingsMenuItemByL10nId(
     "translations-panel-settings-always-offer-translation"
   );
@@ -333,6 +359,7 @@ async function clickAlwaysTranslateLanguage({
   downloadHandler = null,
   pivotTranslation = false,
 } = {}) {
+  logAction();
   await clickSettingsMenuItemByL10nId(
     "translations-panel-settings-always-translate-language"
   );
@@ -351,6 +378,7 @@ async function clickAlwaysTranslateLanguage({
  * otherwise the test will fail.
  */
 async function clickNeverTranslateLanguage() {
+  logAction();
   await clickSettingsMenuItemByL10nId(
     "translations-panel-settings-never-translate-language"
   );
@@ -362,6 +390,7 @@ async function clickNeverTranslateLanguage() {
  * otherwise the test will fail.
  */
 async function clickNeverTranslateSite() {
+  logAction();
   await clickSettingsMenuItemByL10nId(
     "translations-panel-settings-never-translate-site"
   );
@@ -373,6 +402,7 @@ async function clickNeverTranslateSite() {
  * otherwise the test will fail.
  */
 async function clickManageLanguages() {
+  logAction();
   await clickSettingsMenuItemByL10nId(
     "translations-panel-settings-manage-languages"
   );
@@ -545,9 +575,9 @@ async function assertLangTagIsShownOnTranslationsButton(
  * Simulates clicking the cancel button.
  */
 async function clickCancelButton() {
-  info("Clicking the cancel button");
+  logAction();
   const { cancelButton } = TranslationsPanel.elements;
-  ok(isVisible(cancelButton), "Expected the cancel button to be visible");
+  assertIsVisible(true, { element: cancelButton });
   await waitForTranslationsPopupEvent("popuphidden", () => {
     click(cancelButton, "Clicking the cancel button");
   });
@@ -557,9 +587,9 @@ async function clickCancelButton() {
  * Simulates clicking the restore-page button.
  */
 async function clickRestoreButton() {
-  info("Clicking the restore button");
+  logAction();
   const { restoreButton } = TranslationsPanel.elements;
-  ok(isVisible(restoreButton), "Expect the restore-page button to be visible");
+  assertIsVisible(true, { element: restoreButton });
   await waitForTranslationsPopupEvent("popuphidden", () => {
     click(restoreButton, "Click the restore-page button");
   });
@@ -569,12 +599,9 @@ async function clickRestoreButton() {
  * Simulates clicking the dismiss-error button.
  */
 async function clickDismissErrorButton() {
-  info("Clicking the dismiss-error button");
+  logAction();
   const { dismissErrorButton } = TranslationsPanel.elements;
-  ok(
-    isVisible(dismissErrorButton),
-    "Expect the dismiss-error button to be visible"
-  );
+  assertIsVisible(true, { element: dismissErrorButton });
   await waitForTranslationsPopupEvent("popuphidden", () => {
     click(dismissErrorButton, "Click the dismiss-error button");
   });
@@ -586,7 +613,8 @@ async function clickDismissErrorButton() {
  * @param {object} config
  * @param {Function} config.downloadHandler
  *  - The function handle expected downloads, resolveDownloads() or rejectDownloads()
- *    Leave as null to test more granularly, such as testing opening the loading view.
+ *    Leave as null to test more granularly, such as testing opening the loading view,
+ *    or allowing for the automatic downloading of files.
  * @param {boolean} config.pivotTranslation
  *  - True if the expected translation is a pivot translation, otherwise false.
  *    Affects the number of expected downloads.
@@ -595,17 +623,18 @@ async function clickTranslateButton({
   downloadHandler = null,
   pivotTranslation = false,
 } = {}) {
-  info("Clicking the translate button");
+  logAction();
   const { translateButton } = TranslationsPanel.elements;
-  ok(isVisible(translateButton), "Expect the translate button to be visible");
+  assertIsVisible(true, { element: translateButton });
   await waitForTranslationsPopupEvent("popuphidden", () => {
-    click(translateButton, "Click the translate button");
+    click(translateButton);
   });
-  await assertTranslationsButton(
-    { button: true, circleArrows: true, locale: false, icon: true },
-    "The icon presents the loading indicator."
-  );
+
   if (downloadHandler) {
+    await assertTranslationsButton(
+      { button: true, circleArrows: true, locale: false, icon: true },
+      "The icon presents the loading indicator."
+    );
     await downloadHandler(pivotTranslation ? 2 : 1);
   }
 }
@@ -619,12 +648,9 @@ async function clickTranslateButton({
  *    False if the default view should be expected
  */
 async function clickChangeSourceLanguageButton({ firstShow = false } = {}) {
-  info("Clicking the change-source-language button");
+  logAction();
   const { changeSourceLanguageButton } = TranslationsPanel.elements;
-  ok(
-    isVisible(changeSourceLanguageButton),
-    "Expect the translate button to be visible"
-  );
+  assertIsVisible(true, { element: changeSourceLanguageButton });
   await waitForTranslationsPopupEvent(
     "popupshown",
     () => {
@@ -674,11 +700,9 @@ function assertPanelElementVisibility(expectations = {}) {
       `Expected translations panel elements to have property ${propertyName}`
     );
     if (finalExpectations.hasOwnProperty(propertyName)) {
-      is(
-        isVisible(elements[propertyName]),
-        finalExpectations[propertyName],
-        `The element "${propertyName}" visibility should match the expectation`
-      );
+      assertIsVisible(finalExpectations[propertyName], {
+        element: elements[propertyName],
+      });
     }
   }
 }
@@ -832,6 +856,7 @@ async function navigate(
   message,
   { url, onOpenPanel = null, downloadHandler = null, pivotTranslation = false }
 ) {
+  logAction();
   // When the translations panel is open from the app menu,
   // it doesn't close on navigate the way that it does when it's
   // open from the translations button, so ensure that we always
@@ -842,11 +867,11 @@ async function navigate(
 
   // Load a blank page first to ensure that tests don't hang.
   // I don't know why this is needed, but it appears to be necessary.
-  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, BLANK_PAGE);
+  BrowserTestUtils.startLoadingURIString(gBrowser.selectedBrowser, BLANK_PAGE);
   await BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
 
   const loadTargetPage = async () => {
-    BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, url);
+    BrowserTestUtils.startLoadingURIString(gBrowser.selectedBrowser, url);
     await BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
 
     if (downloadHandler) {
@@ -875,6 +900,7 @@ async function navigate(
  * Fails if the reader-mode button is hidden.
  */
 async function toggleReaderMode() {
+  logAction();
   const readerButton = document.getElementById("reader-mode-button");
   await waitForCondition(() => readerButton.hidden === false);
 
@@ -899,7 +925,7 @@ async function toggleReaderMode() {
  * @param {string} url
  */
 async function addTab(url) {
-  info(`Adding tab for "${url}"`);
+  logAction(url);
   const tab = await BrowserTestUtils.openNewForegroundTab(
     gBrowser,
     url,
@@ -917,20 +943,22 @@ async function addTab(url) {
  * Switches to a given tab.
  *
  * @param {object} tab - The tab to switch to
+ * @param {string} name
  */
-async function switchTab(tab) {
-  info("Switching tabs");
-  await BrowserTestUtils.switchTab(gBrowser, tab);
+async function switchTab(tab, name) {
+  logAction("tab", name);
+  gBrowser.selectedTab = tab;
+  await new Promise(resolve => setTimeout(resolve, 0));
 }
 
 /**
  * Simulates clicking an element with the mouse.
  *
  * @param {element} element - The element to click.
- * @param {string} message - A message to log to info.
+ * @param {string} [message] - A message to log to info.
  */
 function click(element, message) {
-  info(message);
+  logAction(message);
   return new Promise(resolve => {
     element.addEventListener(
       "click",
@@ -964,6 +992,242 @@ function isVisible(element) {
   const win = element.ownerDocument.ownerGlobal;
   const { visibility, display } = win.getComputedStyle(element);
   return visibility === "visible" && display !== "none";
+}
+
+/**
+ * Asserts the visibility state of an element retrieved by one of the three available options.
+ *
+ * @param {boolean} expected - The expected visibility state (true for visible, false for invisible).
+ * @param {object} options - The element retrieval options
+ * @param {Element} options.element - The HTML element to check visibility for.
+ * @param {string} options.id - The Id of the element to retrieve and check visibility for.
+ * @throws Throws if the visibility does not match the expected visibility state.
+ */
+function assertIsVisible(expected, { element, id }) {
+  if (id && element) {
+    throw new Error(
+      "assertIsVisible() expects either an element or an id, but both were specified."
+    );
+  }
+
+  if (element) {
+    return is(
+      isVisible(element),
+      expected,
+      `Expected element with id '${element.id}' to be ${
+        expected ? "visible" : "invisible"
+      }.`
+    );
+  }
+
+  if (id) {
+    return is(
+      maybeGetById(id) !== null,
+      expected,
+      `Expected element with id '${id}' to be ${
+        expected ? "visible" : "invisible"
+      }.`
+    );
+  }
+
+  throw new Error(
+    "assertIsVisible() was called with no specified element or id."
+  );
+}
+
+/**
+ * Opens the context menu at a specified element on the page, based on the provided options.
+ *
+ * @param {Function} runInPage - A content-exposed function to run within the context of the page.
+ * @param {object} options - Options for opening the context menu.
+ * @param {boolean} options.selectFirstParagraph - Selects the first paragraph before opening the context menu.
+ * @param {boolean} options.selectSpanishParagraph - Selects the Spanish paragraph before opening the context menu.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {boolean} options.openAtFirstParagraph - Opens the context menu at the first paragraph in the test page.
+ * @param {boolean} options.openAtSpanishParagraph - Opens the context menu at the Spanish paragraph in the test page.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {boolean} options.openAtEnglishHyperlink - Opens the context menu at the English hyperlink in the test page.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {boolean} options.openAtSpanishHyperlink - Opens the context menu at the Spanish hyperlink in the test page.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @throws Throws an error if no valid option was provided for opening the menu.
+ */
+async function openContextMenu(
+  runInPage,
+  {
+    selectFirstParagraph,
+    selectSpanishParagraph,
+    openAtFirstParagraph,
+    openAtSpanishParagraph,
+    openAtEnglishHyperlink,
+    openAtSpanishHyperlink,
+  }
+) {
+  logAction();
+
+  if (selectFirstParagraph === true) {
+    await runInPage(async TranslationsTest => {
+      const { getFirstParagraph } = TranslationsTest.getSelectors();
+      const paragraph = getFirstParagraph();
+      TranslationsTest.selectContentElement(paragraph);
+    });
+  }
+
+  if (selectSpanishParagraph === true) {
+    await runInPage(async TranslationsTest => {
+      const { getSpanishParagraph } = TranslationsTest.getSelectors();
+      const paragraph = getSpanishParagraph();
+      TranslationsTest.selectContentElement(paragraph);
+    });
+  }
+
+  if (openAtFirstParagraph === true) {
+    await runInPage(async TranslationsTest => {
+      const { getFirstParagraph } = TranslationsTest.getSelectors();
+      const paragraph = getFirstParagraph();
+      await TranslationsTest.rightClickContentElement(paragraph);
+    });
+    return;
+  }
+
+  if (openAtSpanishParagraph === true) {
+    await runInPage(async TranslationsTest => {
+      const { getSpanishParagraph } = TranslationsTest.getSelectors();
+      const paragraph = getSpanishParagraph();
+      await TranslationsTest.rightClickContentElement(paragraph);
+    });
+    return;
+  }
+
+  if (openAtEnglishHyperlink === true) {
+    await runInPage(async TranslationsTest => {
+      const { getEnglishHyperlink } = TranslationsTest.getSelectors();
+      const hyperlink = getEnglishHyperlink();
+      await TranslationsTest.rightClickContentElement(hyperlink);
+    });
+    return;
+  }
+
+  if (openAtSpanishHyperlink === true) {
+    await runInPage(async TranslationsTest => {
+      const { getSpanishHyperlink } = TranslationsTest.getSelectors();
+      const hyperlink = getSpanishHyperlink();
+      await TranslationsTest.rightClickContentElement(hyperlink);
+    });
+    return;
+  }
+
+  throw new Error(
+    "openContextMenu() was not provided a declaration for which element to open the menu at."
+  );
+}
+
+/**
+ * Opens the context menu then asserts properties of the translate-selection item in the context menu.
+ *
+ * @param {Function} runInPage - A content-exposed function to run within the context of the page.
+ * @param {object} options - Options for how to open the context menu and what properties to assert about the translate-selection item.
+ * @param {boolean} options.selectFirstParagraph - Selects the first paragraph before opening the context menu.
+ * @param {boolean} options.selectSpanishParagraph - Selects the Spanish paragraph before opening the context menu.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {boolean} options.expectMenuItemIsVisible - Whether the translate-selection item is expected to be visible.
+ *                                                  Does not assert visibility if left undefined.
+ * @param {string} options.expectedTargetLanguage - The target language for translation.
+ * @param {boolean} options.openAtFirstParagraph - Opens the context menu at the first paragraph in the test page.
+ * @param {boolean} options.openAtSpanishParagraph - Opens the context menu at the Spanish paragraph in the test page.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {boolean} options.openAtEnglishHyperlink - Opens the context menu at the English hyperlink in the test page.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {boolean} options.openAtSpanishHyperlink - Opens the context menu at the Spanish hyperlink in the test page.
+ *                                                   This is only available in SPANISH_TEST_PAGE.
+ * @param {string} [message] - A message to log to info.
+ * @throws Throws an error if the properties of the translate-selection item do not match the expected options.
+ */
+async function assertContextMenuTranslateSelectionItem(
+  runInPage,
+  {
+    selectFirstParagraph,
+    selectSpanishParagraph,
+    expectMenuItemIsVisible,
+    expectedTargetLanguage,
+    openAtFirstParagraph,
+    openAtSpanishParagraph,
+    openAtEnglishHyperlink,
+    openAtSpanishHyperlink,
+  },
+  message
+) {
+  logAction();
+
+  if (message) {
+    info(message);
+  }
+
+  await closeTranslationsPanelIfOpen();
+  await closeContextMenuIfOpen();
+
+  await openContextMenu(runInPage, {
+    selectFirstParagraph,
+    selectSpanishParagraph,
+    openAtFirstParagraph,
+    openAtSpanishParagraph,
+    openAtEnglishHyperlink,
+    openAtSpanishHyperlink,
+  });
+
+  const menuItem = maybeGetById(
+    "context-translate-selection",
+    /* ensureIsVisible */ false
+  );
+
+  if (expectMenuItemIsVisible !== undefined) {
+    assertIsVisible(expectMenuItemIsVisible, { element: menuItem });
+  }
+
+  if (expectMenuItemIsVisible === true) {
+    if (expectedTargetLanguage) {
+      // Target language expected, check for the data-l10n-id with a `{$language}` argument.
+      const expectedL10nId =
+        selectFirstParagraph === true || selectSpanishParagraph === true
+          ? "main-context-menu-translate-selection-to-language"
+          : "main-context-menu-translate-link-text-to-language";
+      await waitForCondition(
+        () => menuItem.getAttribute("data-l10n-id") === expectedL10nId,
+        `Waiting for translate-selection context menu item to localize with target language ${expectedTargetLanguage}`
+      );
+
+      is(
+        menuItem.getAttribute("data-l10n-id"),
+        expectedL10nId,
+        "Expected the translate-selection context menu item to be localized with a target language."
+      );
+
+      const l10nArgs = JSON.parse(menuItem.getAttribute("data-l10n-args"));
+      is(
+        l10nArgs.language,
+        getIntlDisplayName(expectedTargetLanguage),
+        `Expected the translate-selection context menu item to have the target language '${expectedTargetLanguage}'.`
+      );
+    } else {
+      // No target language expected, check for the data-l10n-id that has no `{$language}` argument.
+      const expectedL10nId =
+        selectFirstParagraph === true || selectSpanishParagraph === true
+          ? "main-context-menu-translate-selection"
+          : "main-context-menu-translate-link-text";
+      await waitForCondition(
+        () => menuItem.getAttribute("data-l10n-id") === expectedL10nId,
+        "Waiting for translate-selection context menu item to localize without target language."
+      );
+
+      is(
+        menuItem.getAttribute("data-l10n-id"),
+        expectedL10nId,
+        "Expected the translate-selection context menu item to be localized without a target language."
+      );
+    }
+  }
+
+  await closeContextMenuIfOpen();
 }
 
 /**
@@ -1004,21 +1268,45 @@ function getAllByL10nId(l10nId, doc = document) {
 }
 
 /**
- * Retrieves an element by its id.
+ * Retrieves an element by its Id.
  *
  * @param {string} id
  * @param {Document} [doc]
  * @returns {Element}
+ * @throws Throws if the element is not visible in the DOM.
  */
 function getById(id, doc = document) {
+  const element = maybeGetById(id, /* ensureIsVisible */ true, doc);
+  if (!element) {
+    throw new Error("The element is not visible in the DOM: #" + id);
+  }
+  return element;
+}
+
+/**
+ * Attempts to retrieve an element by its Id.
+ *
+ * @param {string} id - The Id of the element to retrieve.
+ * @param {boolean} [ensureIsVisible=true] - If set to true, the function will return null when the element is not visible.
+ * @param {Document} [doc=document] - The document from which to retrieve the element.
+ * @returns {Element | null} - The retrieved element.
+ * @throws Throws if no element was found by the given Id.
+ */
+function maybeGetById(id, ensureIsVisible = true, doc = document) {
   const element = doc.getElementById(id);
   if (!element) {
     throw new Error("Could not find the element by id: #" + id);
   }
+
+  if (!ensureIsVisible) {
+    return element;
+  }
+
   if (isVisible(element)) {
     return element;
   }
-  throw new Error("The element is not visible in the DOM: #" + id);
+
+  return null;
 }
 
 /**
@@ -1089,16 +1377,29 @@ async function waitForViewShown(callback) {
   await new Promise(resolve => setTimeout(resolve, 0));
 }
 
-const FRENCH_PAGE_URL = TRANSLATIONS_TESTER_FR;
-const ENGLISH_PAGE_URL = TRANSLATIONS_TESTER_EN;
-const SPANISH_PAGE_URL = TRANSLATIONS_TESTER_ES;
-const SPANISH_PAGE_URL_2 = TRANSLATIONS_TESTER_ES_2;
-const SPANISH_PAGE_URL_DOT_ORG = TRANSLATIONS_TESTER_ES_DOT_ORG;
-const LANGUAGE_PAIRS = [
-  { fromLang: "es", toLang: "en" },
-  { fromLang: "en", toLang: "es" },
-  { fromLang: "fr", toLang: "en" },
-  { fromLang: "en", toLang: "fr" },
-  { fromLang: "en", toLang: "uk" },
-  { fromLang: "uk", toLang: "en" },
-];
+/**
+ * Opens the Translation Settings page by clicking the settings button sent in the argument.
+ *
+ * @param  {HTMLElement} settingsButton
+ * @returns {Element}
+ */
+async function openAboutPreferencesTranslationsSettingsPane(settingsButton) {
+  const document = gBrowser.selectedBrowser.contentDocument;
+
+  const promise = BrowserTestUtils.waitForEvent(
+    document,
+    "paneshown",
+    false,
+    event => event.detail.category === "paneTranslations"
+  );
+
+  click(settingsButton, "Click settings button");
+  await promise;
+
+  const elements = {
+    backButton: document.getElementById("translations-settings-back-button"),
+    header: document.getElementById("translations-settings-header"),
+  };
+
+  return elements;
+}

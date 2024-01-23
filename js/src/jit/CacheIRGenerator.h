@@ -488,7 +488,23 @@ class MOZ_RAII OptimizeSpreadCallIRGenerator : public IRGenerator {
   void trackAttached(const char* name /* must be a C string literal */);
 };
 
-enum class StringChar { CodeAt, At };
+class MOZ_RAII OptimizeGetIteratorIRGenerator : public IRGenerator {
+  HandleValue val_;
+
+  AttachDecision tryAttachArray();
+  AttachDecision tryAttachNotOptimizable();
+
+ public:
+  OptimizeGetIteratorIRGenerator(JSContext* cx, HandleScript script,
+                                 jsbytecode* pc, ICState state,
+                                 HandleValue value);
+
+  AttachDecision tryAttachStub();
+
+  void trackAttached(const char* name /* must be a C string literal */);
+};
+
+enum class StringChar { CharCodeAt, CodePointAt, CharAt, At };
 enum class ScriptedThisResult { NoAction, UninitializedThis, PlainObjectShape };
 
 class MOZ_RAII CallIRGenerator : public IRGenerator {
@@ -632,14 +648,21 @@ class MOZ_RAII InlinableNativeIRGenerator {
   AttachDecision tryAttachStringToStringValueOf();
   AttachDecision tryAttachStringChar(StringChar kind);
   AttachDecision tryAttachStringCharCodeAt();
+  AttachDecision tryAttachStringCodePointAt();
   AttachDecision tryAttachStringCharAt();
+  AttachDecision tryAttachStringAt();
   AttachDecision tryAttachStringFromCharCode();
   AttachDecision tryAttachStringFromCodePoint();
+  AttachDecision tryAttachStringIncludes();
   AttachDecision tryAttachStringIndexOf();
+  AttachDecision tryAttachStringLastIndexOf();
   AttachDecision tryAttachStringStartsWith();
   AttachDecision tryAttachStringEndsWith();
   AttachDecision tryAttachStringToLowerCase();
   AttachDecision tryAttachStringToUpperCase();
+  AttachDecision tryAttachStringTrim();
+  AttachDecision tryAttachStringTrimStart();
+  AttachDecision tryAttachStringTrimEnd();
   AttachDecision tryAttachStringReplaceString();
   AttachDecision tryAttachStringSplitString();
   AttachDecision tryAttachMathRandom();
@@ -695,6 +718,7 @@ class MOZ_RAII InlinableNativeIRGenerator {
   AttachDecision tryAttachAssertRecoveredOnBailout();
   AttachDecision tryAttachObjectIs();
   AttachDecision tryAttachObjectIsPrototypeOf();
+  AttachDecision tryAttachObjectKeys();
   AttachDecision tryAttachObjectToString();
   AttachDecision tryAttachBigIntAsIntN();
   AttachDecision tryAttachBigIntAsUintN();
@@ -846,6 +870,7 @@ class MOZ_RAII BinaryArithIRGenerator : public IRGenerator {
   AttachDecision tryAttachStringObjectConcat();
   AttachDecision tryAttachBigInt();
   AttachDecision tryAttachStringInt32Arith();
+  AttachDecision tryAttachStringNumberArith();
 
  public:
   BinaryArithIRGenerator(JSContext* cx, HandleScript, jsbytecode* pc,

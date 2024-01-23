@@ -18,7 +18,6 @@
 #include "mozilla/SharedThreadPool.h"
 #include "mozilla/StaticPrefs_accessibility.h"
 #include "mozilla/StaticPrefs_media.h"
-#include "mozilla/TaskCategory.h"
 #include "mozilla/TaskQueue.h"
 #include "mozilla/Telemetry.h"
 #include "nsCharSeparatedTokenizer.h"
@@ -1028,7 +1027,7 @@ void LogToBrowserConsole(const nsAString& aMsg) {
     nsString msg(aMsg);
     nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
         "LogToBrowserConsole", [msg]() { LogToBrowserConsole(msg); });
-    SchedulerGroup::Dispatch(TaskCategory::Other, task.forget());
+    SchedulerGroup::Dispatch(task.forget());
     return;
   }
   nsCOMPtr<nsIConsoleService> console(
@@ -1215,6 +1214,15 @@ bool OnCellularConnection() {
   }
 
   return false;
+}
+
+bool IsWaveMimetype(const nsACString& aMimeType) {
+  return aMimeType.EqualsLiteral("audio/x-wav") ||
+         aMimeType.EqualsLiteral("audio/wave; codecs=1") ||
+         aMimeType.EqualsLiteral("audio/wave; codecs=3") ||
+         aMimeType.EqualsLiteral("audio/wave; codecs=6") ||
+         aMimeType.EqualsLiteral("audio/wave; codecs=7") ||
+         aMimeType.EqualsLiteral("audio/wave; codecs=65534");
 }
 
 }  // end namespace mozilla

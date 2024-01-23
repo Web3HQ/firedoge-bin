@@ -3,7 +3,7 @@ use crate::{errors::AuthenticatorError, AuthenticatorTransports, KeyHandle};
 use base64::Engine;
 use serde::de::MapAccess;
 use serde::{
-    de::{Error as SerdeError, Visitor},
+    de::{Error as SerdeError, Unexpected, Visitor},
     ser::SerializeMap,
     Deserialize, Deserializer, Serialize, Serializer,
 };
@@ -40,63 +40,39 @@ impl RpIdHash {
     }
 }
 
+// NOTE: WebAuthn requires all fields and CTAP2 does not.
 #[derive(Debug, Serialize, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct RelyingParty {
-    // TODO(baloo): spec is wrong !!!!111
-    //              https://fidoalliance.org/specs/fido-v2.0-ps-20190130/fido-client-to-authenticator-protocol-v2.0-ps-20190130.html#commands
-    //              in the example "A PublicKeyCredentialRpEntity DOM object defined as follows:"
-    //              inconsistent with https://w3c.github.io/webauthn/#sctn-rp-credential-params
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
-// Note: This enum is provided to make old CTAP1/U2F API work. This should be deprecated at some point
-#[derive(Debug, Clone)]
-pub enum RelyingPartyWrapper {
-    Data(RelyingParty),
-    // CTAP1 hash can be derived from full object, see RelyingParty::hash below,
-    // but very old backends might still provide application IDs.
-    Hash(RpIdHash),
-}
-
-impl From<&str> for RelyingPartyWrapper {
-    fn from(rp_id: &str) -> Self {
-        Self::Data(RelyingParty {
-            id: rp_id.to_string(),
+impl RelyingParty {
+    pub fn from<S>(id: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            id: id.into(),
             name: None,
-        })
+        }
     }
-}
 
-impl RelyingPartyWrapper {
     pub fn hash(&self) -> RpIdHash {
-        match *self {
-            RelyingPartyWrapper::Data(ref d) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&d.id);
+        let mut hasher = Sha256::new();
+        hasher.update(&self.id);
 
-                let mut output = [0u8; 32];
-                output.copy_from_slice(hasher.finalize().as_slice());
+        let mut output = [0u8; 32];
+        output.copy_from_slice(hasher.finalize().as_slice());
 
-                RpIdHash(output)
-            }
-            RelyingPartyWrapper::Hash(ref d) => d.clone(),
-        }
-    }
-
-    pub fn id(&self) -> Option<&String> {
-        match self {
-            // CTAP1 case: We only have the hash, not the entire RpID
-            RelyingPartyWrapper::Hash(..) => None,
-            RelyingPartyWrapper::Data(r) => Some(&r.id),
-        }
+        RpIdHash(output)
     }
 }
 
-// TODO(baloo): should we rename this PublicKeyCredentialUserEntity ?
+// NOTE: WebAuthn requires all fields and CTAP2 does not.
 #[derive(Debug, Serialize, Clone, Eq, PartialEq, Deserialize, Default)]
-pub struct User {
+pub struct PublicKeyCredentialUserEntity {
     #[serde(with = "serde_bytes")]
     pub id: Vec<u8>,
     pub name: Option<String>,
@@ -302,7 +278,7 @@ impl<'de> Deserialize<'de> for PublicKeyCredentialDescriptor {
             }
         }
 
-        deserializer.deserialize_bytes(PublicKeyCredentialDescriptorVisitor)
+        deserializer.deserialize_any(PublicKeyCredentialDescriptorVisitor)
     }
 }
 
@@ -329,16 +305,97 @@ pub enum UserVerificationRequirement {
     Required,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CredentialProtectionPolicy {
+    UserVerificationOptional = 1,
+    UserVerificationOptionalWithCredentialIDList = 2,
+    UserVerificationRequired = 3,
+}
+
+impl Serialize for CredentialProtectionPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(*self as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for CredentialProtectionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CredentialProtectionPolicyVisitor;
+
+        impl<'de> Visitor<'de> for CredentialProtectionPolicyVisitor {
+            type Value = CredentialProtectionPolicy;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an integer")
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: SerdeError,
+            {
+                match v {
+                    1 => Ok(CredentialProtectionPolicy::UserVerificationOptional),
+                    2 => Ok(
+                        CredentialProtectionPolicy::UserVerificationOptionalWithCredentialIDList,
+                    ),
+                    3 => Ok(CredentialProtectionPolicy::UserVerificationRequired),
+                    _ => Err(SerdeError::invalid_value(
+                        Unexpected::Unsigned(v),
+                        &"valid CredentialProtectionPolicy",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(CredentialProtectionPolicyVisitor)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AuthenticationExtensionsClientInputs {
+    pub app_id: Option<String>,
+    pub cred_props: Option<bool>,
+    pub credential_protection_policy: Option<CredentialProtectionPolicy>,
+    pub enforce_credential_protection_policy: Option<bool>,
+    pub hmac_create_secret: Option<bool>,
+    pub min_pin_length: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CredentialProperties {
+    pub rk: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AuthenticationExtensionsClientOutputs {
+    pub app_id: Option<bool>,
+    pub cred_props: Option<CredentialProperties>,
+    pub hmac_create_secret: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthenticatorAttachment {
+    CrossPlatform,
+    Platform,
+    Unknown,
+}
+
 #[cfg(test)]
 mod test {
     use super::{
-        COSEAlgorithm, PublicKeyCredentialDescriptor, PublicKeyCredentialParameters, RelyingParty,
-        Transport, User,
+        COSEAlgorithm, PublicKeyCredentialDescriptor, PublicKeyCredentialParameters,
+        PublicKeyCredentialUserEntity, RelyingParty, Transport,
     };
     use serde_cbor::from_slice;
 
-    fn create_user() -> User {
-        User {
+    fn create_user() -> PublicKeyCredentialUserEntity {
+        PublicKeyCredentialUserEntity {
             id: vec![
                 0x30, 0x82, 0x01, 0x93, 0x30, 0x82, 0x01, 0x38, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x30,
                 0x82, 0x01, 0x93, 0x30, 0x82, 0x01, 0x38, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x30, 0x82,
@@ -405,7 +462,7 @@ mod test {
             0x69, 0x74, 0x68, // ...
         ];
         let expected = create_user();
-        let actual: User = from_slice(&input).unwrap();
+        let actual: PublicKeyCredentialUserEntity = from_slice(&input).unwrap();
         assert_eq!(expected, actual);
     }
 
@@ -445,7 +502,7 @@ mod test {
 
     #[test]
     fn serialize_user_nodisplayname() {
-        let user = User {
+        let user = PublicKeyCredentialUserEntity {
             id: vec![
                 0x30, 0x82, 0x01, 0x93, 0x30, 0x82, 0x01, 0x38, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x30,
                 0x82, 0x01, 0x93, 0x30, 0x82, 0x01, 0x38, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x30, 0x82,

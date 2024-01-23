@@ -78,9 +78,6 @@ const internalModuleResolvers = {
 
 // Define mock for XPCOMUtils
 export const XPCOMUtils = withNotImplementedError({
-  defineLazyGetter: (obj, prop, getFn) => {
-    obj[prop] = getFn?.call(obj);
-  },
   defineLazyPreferenceGetter: (
     obj,
     prop,
@@ -123,10 +120,23 @@ export const OSKeyStore = withNotImplementedError({
   ensureLoggedIn: () => true,
 });
 
+// Checks an element's focusability and accessibility via keyboard navigation
+const checkFocusability = element => {
+  return (
+    !element.disabled &&
+    !element.hidden &&
+    element.style.display != "none" &&
+    element.tabIndex != "-1"
+  );
+};
+
 // Define mock for Services
 // NOTE: Services is a global so we need to attach it to the window
 // eslint-disable-next-line no-shadow
 export const Services = withNotImplementedError({
+  focus: withNotImplementedError({
+    elementIsFocusable: checkFocusability,
+  }),
   intl: withNotImplementedError({
     getAvailableLocaleDisplayNames: () => [],
     getRegionDisplayNames: () => [],
@@ -143,6 +153,11 @@ export const Services = withNotImplementedError({
   uuid: withNotImplementedError({ generateUUID: () => "" }),
 });
 window.Services = Services;
+
+// Define mock for Localization
+window.Localization = function () {
+  return { formatValueSync: () => "" };
+};
 
 export const windowUtils = withNotImplementedError({
   removeManuallyManagedState: () => {},

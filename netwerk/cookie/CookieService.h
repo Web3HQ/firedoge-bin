@@ -70,6 +70,7 @@ class CookieService final : public nsICookieService,
                            CookieStruct& aCookieData, bool aRequireHostMatch,
                            CookieStatus aStatus, nsCString& aCookieHeader,
                            bool aFromHttp, bool aIsForeignAndNotAddon,
+                           bool aPartitionedOnly,
                            nsIConsoleReportCollector* aCRC, bool& aSetCookie);
   static CookieStatus CheckPrefs(
       nsIConsoleReportCollector* aCRC, nsICookieJarSettings* aCookieJarSettings,
@@ -99,8 +100,8 @@ class CookieService final : public nsICookieService,
 
   bool SetCookiesFromIPC(const nsACString& aBaseDomain,
                          const OriginAttributes& aAttrs, nsIURI* aHostURI,
-                         bool aFromHttp,
-                         const nsTArray<CookieStruct>& aCookies);
+                         bool aFromHttp, const nsTArray<CookieStruct>& aCookies,
+                         dom::BrowsingContext* aBrowsingContext);
 
  protected:
   virtual ~CookieService();

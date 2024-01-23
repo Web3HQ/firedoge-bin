@@ -87,7 +87,6 @@
 #include "frontend/ModuleSharedContext.h"
 #include "frontend/Parser.h"
 #include "frontend/ScopeBindingCache.h"  // js::frontend::ScopeBindingCache
-#include "frontend/SourceNotes.h"  // SrcNote, SrcNoteType, SrcNoteIterator
 #include "gc/GC.h"
 #include "gc/PublicIterators.h"
 #ifdef DEBUG
@@ -162,7 +161,6 @@
 #include "js/Stack.h"
 #include "js/StreamConsumer.h"
 #include "js/StructuredClone.h"
-#include "js/SweepingAPI.h"
 #include "js/Transcoding.h"  // JS::TranscodeBuffer, JS::TranscodeRange, JS::IsTranscodeFailureResult
 #include "js/Warnings.h"    // JS::SetWarningReporter
 #include "js/WasmModule.h"  // JS::WasmModule
@@ -743,14 +741,17 @@ bool shell::enableIteratorHelpers = false;
 bool shell::enableShadowRealms = false;
 // Pref for String.prototype.{is,to}WellFormed() methods.
 bool shell::enableWellFormedUnicodeStrings = true;
-#ifdef NIGHTLY_BUILD
 bool shell::enableArrayGrouping = false;
+#ifdef NIGHTLY_BUILD
 // Pref for new Set.prototype methods.
 bool shell::enableNewSetMethods = false;
 // Pref for ArrayBuffer.prototype.transfer{,ToFixedLength}() methods.
-bool shell::enableArrayBufferTransfer = false;
+bool shell::enableSymbolsAsWeakMapKeys = false;
 #endif
-bool shell::enableImportAssertions = false;
+bool shell::enableArrayBufferTransfer = true;
+bool shell::enableImportAttributes = false;
+bool shell::enableImportAttributesAssertSyntax = false;
+bool shell::enableDestructuringFuse = true;
 #ifdef JS_GC_ZEAL
 uint32_t shell::gZealBits = 0;
 uint32_t shell::gZealFrequency = 0;
@@ -878,8 +879,9 @@ extern MOZ_EXPORT void add_history(char* line);
 }  // extern "C"
 #endif
 
-ShellContext::ShellContext(JSContext* cx)
-    : isWorker(false),
+ShellContext::ShellContext(JSContext* cx, IsWorkerEnum isWorker_)
+    : cx_(nullptr),
+      isWorker(isWorker_),
       lastWarningEnabled(false),
       trackUnhandledRejections(true),
       timeoutInterval(-1.0),
@@ -898,8 +900,6 @@ ShellContext::ShellContext(JSContext* cx)
       outFilePtr(nullptr),
       offThreadMonitor(mutexid::ShellOffThreadState),
       finalizationRegistryCleanupCallbacks(cx) {}
-
-ShellContext::~ShellContext() { MOZ_ASSERT(offThreadJobs.empty()); }
 
 ShellContext* js::shell::GetShellContext(JSContext* cx) {
   ShellContext* sc = static_cast<ShellContext*>(JS_GetContextPrivate(cx));
@@ -2704,6 +2704,10 @@ static bool Evaluate(JSContext* cx, unsigned argc, Value* vp) {
       }
     }
 
+    if (!js::ValidateLazinessOfStencilAndGlobal(cx, *stencil)) {
+      return false;
+    }
+
     JS::InstantiateOptions instantiateOptions(options);
     RootedScript script(
         cx, JS::InstantiateGlobalStencil(cx, instantiateOptions, stencil));
@@ -3393,7 +3397,7 @@ static bool PCToLine(JSContext* cx, unsigned argc, Value* vp) {
 
 static bool Notes(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
-  Sprinter sprinter(cx);
+  JSSprinter sprinter(cx);
   if (!sprinter.init()) {
     return false;
   }
@@ -3409,7 +3413,7 @@ static bool Notes(JSContext* cx, unsigned argc, Value* vp) {
     }
   }
 
-  JSString* str = JS_NewStringCopyZ(cx, sprinter.string());
+  JSString* str = sprinter.release(cx);
   if (!str) {
     return false;
   }
@@ -3452,7 +3456,7 @@ struct DisassembleOptionParser {
 } /* anonymous namespace */
 
 static bool DisassembleToSprinter(JSContext* cx, unsigned argc, Value* vp,
-                                  Sprinter* sprinter) {
+                                  StringPrinter* sp) {
   CallArgs args = CallArgsFromVp(argc, vp);
   DisassembleOptionParser p(args.length(), args.array());
   if (!p.parse(cx)) {
@@ -3464,7 +3468,7 @@ static bool DisassembleToSprinter(JSContext* cx, unsigned argc, Value* vp,
     RootedScript script(cx, GetTopScript(cx));
     if (script) {
       JSAutoRealm ar(cx, script);
-      if (!JSScript::dump(cx, script, p.options, sprinter)) {
+      if (!JSScript::dump(cx, script, p.options, sp)) {
         return false;
       }
     }
@@ -3485,18 +3489,18 @@ static bool DisassembleToSprinter(JSContext* cx, unsigned argc, Value* vp,
         return false;
       }
 
-      if (!JSScript::dump(cx, script, p.options, sprinter)) {
+      if (!JSScript::dump(cx, script, p.options, sp)) {
         return false;
       }
     }
   }
 
-  return !sprinter->hadOutOfMemory();
+  return true;
 }
 
 static bool DisassembleToString(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
-  Sprinter sprinter(cx);
+  JSSprinter sprinter(cx);
   if (!sprinter.init()) {
     return false;
   }
@@ -3504,16 +3508,7 @@ static bool DisassembleToString(JSContext* cx, unsigned argc, Value* vp) {
     return false;
   }
 
-  const char* chars = sprinter.string();
-  size_t len;
-  JS::UniqueTwoByteChars buf(
-      JS::LossyUTF8CharsToNewTwoByteCharsZ(
-          cx, JS::UTF8Chars(chars, strlen(chars)), &len, js::MallocArena)
-          .get());
-  if (!buf) {
-    return false;
-  }
-  JSString* str = JS_NewUCStringCopyN(cx, buf.get(), len);
+  JSString* str = sprinter.release(cx);
   if (!str) {
     return false;
   }
@@ -3537,7 +3532,11 @@ static bool Disassemble(JSContext* cx, unsigned argc, Value* vp) {
     return false;
   }
 
-  fprintf(gOutFile->fp, "%s\n", sprinter.string());
+  JS::UniqueChars str = sprinter.release();
+  if (!str) {
+    return false;
+  }
+  fprintf(gOutFile->fp, "%s\n", str.get());
   args.rval().setUndefined();
   return true;
 }
@@ -3595,7 +3594,11 @@ static bool DisassFile(JSContext* cx, unsigned argc, Value* vp) {
     return false;
   }
 
-  fprintf(gOutFile->fp, "%s\n", sprinter.string());
+  JS::UniqueChars chars = sprinter.release();
+  if (!chars) {
+    return false;
+  }
+  fprintf(gOutFile->fp, "%s\n", chars.get());
 
   args.rval().setUndefined();
   return true;
@@ -3658,15 +3661,11 @@ static bool DisassWithSrc(JSContext* cx, unsigned argc, Value* vp) {
       if (line2 < line1) {
         if (bupline != line2) {
           bupline = line2;
-          if (!sprinter.jsprintf("%s %3u: BACKUP\n", sep, line2)) {
-            return false;
-          }
+          sprinter.printf("%s %3u: BACKUP\n", sep, line2);
         }
       } else {
         if (bupline && line1 == line2) {
-          if (!sprinter.jsprintf("%s %3u: RESTORE\n", sep, line2)) {
-            return false;
-          }
+          sprinter.printf("%s %3u: RESTORE\n", sep, line2);
         }
         bupline = 0;
         while (line1 < line2) {
@@ -3676,9 +3675,7 @@ static bool DisassWithSrc(JSContext* cx, unsigned argc, Value* vp) {
             return false;
           }
           line1++;
-          if (!sprinter.jsprintf("%s %3u: %s", sep, line1, linebuf)) {
-            return false;
-          }
+          sprinter.printf("%s %3u: %s", sep, line1, linebuf);
         }
       }
 
@@ -3691,7 +3688,11 @@ static bool DisassWithSrc(JSContext* cx, unsigned argc, Value* vp) {
       pc += len;
     }
 
-    fprintf(gOutFile->fp, "%s\n", sprinter.string());
+    JS::UniqueChars str = sprinter.release();
+    if (!str) {
+      return false;
+    }
+    fprintf(gOutFile->fp, "%s\n", str.get());
   }
 
   args.rval().setUndefined();
@@ -4136,10 +4137,11 @@ static void SetStandardRealmOptions(JS::RealmOptions& options) {
       .setIteratorHelpersEnabled(enableIteratorHelpers)
       .setShadowRealmsEnabled(enableShadowRealms)
       .setWellFormedUnicodeStringsEnabled(enableWellFormedUnicodeStrings)
-#ifdef NIGHTLY_BUILD
       .setArrayGroupingEnabled(enableArrayGrouping)
-      .setNewSetMethodsEnabled(enableNewSetMethods)
       .setArrayBufferTransferEnabled(enableArrayBufferTransfer)
+#ifdef NIGHTLY_BUILD
+      .setNewSetMethodsEnabled(enableNewSetMethods)
+      .setSymbolsAsWeakMapKeysEnabled(enableSymbolsAsWeakMapKeys)
 #endif
       ;
 }
@@ -4348,39 +4350,13 @@ static void WorkerMain(UniquePtr<WorkerInput> input) {
   if (!cx) {
     return;
   }
+  auto destroyContext = MakeScopeExit([cx] { JS_DestroyContext(cx); });
 
-  ShellContext* sc = js_new<ShellContext>(cx);
-  if (!sc) {
+  UniquePtr<ShellContext> sc =
+      MakeUnique<ShellContext>(cx, ShellContext::Worker);
+  if (!sc || !sc->registerWithCx(cx)) {
     return;
   }
-
-  auto guard = mozilla::MakeScopeExit([&] {
-    sc->markObservers.reset();
-    JS_SetContextPrivate(cx, nullptr);
-    js_delete(sc);
-    JS_DestroyContext(cx);
-  });
-
-  sc->isWorker = true;
-
-  JS_SetContextPrivate(cx, sc);
-  JS_AddExtraGCRootsTracer(cx, TraceBlackRoots, nullptr);
-  JS_SetGrayGCRootsTracer(cx, TraceGrayRoots, nullptr);
-  SetWorkerContextOptions(cx);
-
-  JS_SetFutexCanWait(cx);
-  JS::SetWarningReporter(cx, WarningReporter);
-  js::SetPreserveWrapperCallbacks(cx, DummyPreserveWrapperCallback,
-                                  DummyHasReleasedWrapperCallback);
-  JS_InitDestroyPrincipalsCallback(cx, ShellPrincipals::destroy);
-  JS_SetDestroyCompartmentCallback(cx, DestroyShellCompartmentPrivate);
-
-  js::SetWindowProxyClass(cx, &ShellWindowProxyClass);
-
-  js::UseInternalJobQueues(cx);
-
-  JS::SetHostCleanupFinalizationRegistryCallback(
-      cx, ShellCleanupFinalizationRegistryCallback, sc);
 
   if (!JS::InitSelfHostedCode(cx)) {
     return;
@@ -4433,7 +4409,6 @@ static void WorkerMain(UniquePtr<WorkerInput> input) {
   } while (0);
 
   KillWatchdog(cx);
-  JS_SetGrayGCRootsTracer(cx, nullptr, nullptr);
 }
 
 // Workers can spawn other workers, so we need a lock to access workerThreads.
@@ -4858,6 +4833,38 @@ static bool InterruptRegexp(JSContext* cx, unsigned argc, Value* vp) {
 }
 #endif
 
+static bool CheckRegExpSyntax(JSContext* cx, unsigned argc, Value* vp) {
+  CallArgs args = CallArgsFromVp(argc, vp);
+  RootedObject callee(cx, &args.callee());
+
+  if (args.length() != 1) {
+    ReportUsageErrorASCII(cx, callee, "Wrong number of arguments.");
+    return false;
+  }
+  if (!args[0].isString()) {
+    ReportUsageErrorASCII(cx, callee, "First argument must be a string.");
+    return false;
+  }
+
+  RootedString string(cx, args[0].toString());
+  AutoStableStringChars stableChars(cx);
+  if (!stableChars.initTwoByte(cx, string)) {
+    return false;
+  }
+
+  const char16_t* chars = stableChars.twoByteRange().begin().get();
+  size_t length = string->length();
+
+  Rooted<JS::Value> error(cx);
+  if (!JS::CheckRegExpSyntax(cx, chars, length, JS::RegExpFlag::NoFlags,
+                             &error)) {
+    return false;
+  }
+
+  args.rval().set(error);
+  return true;
+}
+
 static bool SetJitCompilerOption(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
   RootedObject callee(cx, &args.callee());
@@ -5246,13 +5253,18 @@ static bool InstantiateModuleStencil(JSContext* cx, uint32_t argc, Value* vp) {
   }
 
   /* Prepare the input byte array. */
-  if (!args[0].isObject() || !args[0].toObject().is<js::StencilObject>()) {
+  if (!args[0].isObject()) {
     JS_ReportErrorASCII(cx,
                         "instantiateModuleStencil: Stencil object expected");
     return false;
   }
   Rooted<js::StencilObject*> stencilObj(
-      cx, &args[0].toObject().as<js::StencilObject>());
+      cx, args[0].toObject().maybeUnwrapIf<js::StencilObject>());
+  if (!stencilObj) {
+    JS_ReportErrorASCII(cx,
+                        "instantiateModuleStencil: Stencil object expected");
+    return false;
+  }
 
   if (!stencilObj->stencil()->isModule()) {
     JS_ReportErrorASCII(cx,
@@ -5283,6 +5295,10 @@ static bool InstantiateModuleStencil(JSContext* cx, uint32_t argc, Value* vp) {
     return false;
   }
 
+  if (!js::ValidateLazinessOfStencilAndGlobal(cx, *stencilObj->stencil())) {
+    return false;
+  }
+
   /* Instantiate the stencil. */
   Rooted<frontend::CompilationGCOutput> output(cx);
   if (!frontend::CompilationStencil::instantiateStencils(
@@ -5309,13 +5325,18 @@ static bool InstantiateModuleStencilXDR(JSContext* cx, uint32_t argc,
   }
 
   /* Prepare the input byte array. */
-  if (!args[0].isObject() || !args[0].toObject().is<StencilXDRBufferObject>()) {
+  if (!args[0].isObject()) {
     JS_ReportErrorASCII(
-        cx, "instantiateModuleStencilXDR: stencil XDR object expected");
+        cx, "instantiateModuleStencilXDR: Stencil XDR object expected");
     return false;
   }
   Rooted<StencilXDRBufferObject*> xdrObj(
-      cx, &args[0].toObject().as<StencilXDRBufferObject>());
+      cx, args[0].toObject().maybeUnwrapIf<StencilXDRBufferObject>());
+  if (!xdrObj) {
+    JS_ReportErrorASCII(
+        cx, "instantiateModuleStencilXDR: Stencil XDR object expected");
+    return false;
+  }
   MOZ_ASSERT(xdrObj->hasBuffer());
 
   CompileOptions options(cx);
@@ -5359,6 +5380,10 @@ static bool InstantiateModuleStencilXDR(JSContext* cx, uint32_t argc,
     fc.clearAutoReport();
     JS_ReportErrorASCII(cx,
                         "instantiateModuleStencilXDR: Module stencil expected");
+    return false;
+  }
+
+  if (!js::ValidateLazinessOfStencilAndGlobal(cx, stencil)) {
     return false;
   }
 
@@ -5623,13 +5648,13 @@ static bool DumpAST(JSContext* cx, const JS::ReadOnlyCompileOptions& options,
 
   js::frontend::ParseNode* pn;
   if (goal == frontend::ParseGoal::Script) {
-    pn = parser.parse();
+    pn = parser.parse().unwrapOr(nullptr);
   } else {
     ModuleBuilder builder(&fc, &parser);
 
     SourceExtent extent = SourceExtent::makeGlobalExtent(length);
     ModuleSharedContext modulesc(&fc, options, builder, extent);
-    pn = parser.moduleBody(&modulesc);
+    pn = parser.moduleBody(&modulesc).unwrapOr(nullptr);
   }
 
   if (!pn) {
@@ -5985,7 +6010,7 @@ static bool SyntaxParse(JSContext* cx, unsigned argc, Value* vp) {
     return false;
   }
 
-  bool succeeded = parser.parse();
+  bool succeeded = parser.parse().isOk();
   if (fc.hadErrors()) {
     return false;
   }
@@ -7235,6 +7260,7 @@ static void SingleStepCallback(void* arg, jit::Simulator* sim, void* pc) {
   state.sp = (void*)sim->get_register(jit::Simulator::sp);
   state.lr = (void*)sim->get_register(jit::Simulator::lr);
   state.fp = (void*)sim->get_register(jit::Simulator::fp);
+  state.tempFP = (void*)sim->get_register(jit::Simulator::r7);
 #  elif defined(JS_SIMULATOR_MIPS64) || defined(JS_SIMULATOR_MIPS32)
   state.sp = (void*)sim->getRegister(jit::Simulator::sp);
   state.lr = (void*)sim->getRegister(jit::Simulator::ra);
@@ -8293,7 +8319,7 @@ class ShellAutoEntryMonitor : JS::dbg::AutoEntryMonitor {
     MOZ_ASSERT(!enteredWithoutExit);
     enteredWithoutExit = true;
 
-    RootedString displayId(cx, JS_GetFunctionDisplayId(function));
+    RootedString displayId(cx, JS_GetMaybePartialFunctionDisplayId(function));
     if (displayId) {
       UniqueChars displayIdStr = JS_EncodeStringToUTF8(cx, displayId);
       if (!displayIdStr) {
@@ -8689,6 +8715,10 @@ static bool TransplantObject(JSContext* cx, unsigned argc, Value* vp) {
   RootedObject source(cx, CheckedUnwrapStatic(&reserved.toObject()));
   if (!source) {
     ReportAccessDenied(cx);
+    return false;
+  }
+  if (JS_IsDeadWrapper(source)) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_DEAD_OBJECT);
     return false;
   }
   MOZ_ASSERT(source->getClass()->isDOMClass());
@@ -9323,10 +9353,14 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
 "interruptRegexp(<regexp>, <string>)",
 "  Interrrupt the execution of regular expression.\n"),
 #endif
+    JS_FN_HELP("checkRegExpSyntax", CheckRegExpSyntax, 1, 0,
+"checkRegExpSyntax(<string>)",
+"  Return undefined if the string parses as a RegExp. If the string does not\n"
+"  parse correctly, return the SyntaxError that occurred."),
+
     JS_FN_HELP("enableLastWarning", EnableLastWarning, 0, 0,
 "enableLastWarning()",
 "  Enable storing the last warning."),
-
     JS_FN_HELP("disableLastWarning", DisableLastWarning, 0, 0,
 "disableLastWarning()",
 "  Disable storing the last warning."),
@@ -11006,6 +11040,44 @@ static void SetWorkerContextOptions(JSContext* cx) {
   return true;
 }
 
+bool ShellContext::registerWithCx(JSContext* cx) {
+  cx_ = cx;
+  JS_SetContextPrivate(cx, this);
+
+  if (isWorker) {
+    SetWorkerContextOptions(cx);
+  }
+
+  JS::SetWarningReporter(cx, WarningReporter);
+  JS_SetFutexCanWait(cx);
+  JS_InitDestroyPrincipalsCallback(cx, ShellPrincipals::destroy);
+  JS_SetDestroyCompartmentCallback(cx, DestroyShellCompartmentPrivate);
+  js::SetWindowProxyClass(cx, &ShellWindowProxyClass);
+
+  js::UseInternalJobQueues(cx);
+
+  js::SetPreserveWrapperCallbacks(cx, DummyPreserveWrapperCallback,
+                                  DummyHasReleasedWrapperCallback);
+
+  JS::SetHostCleanupFinalizationRegistryCallback(
+      cx, ShellCleanupFinalizationRegistryCallback, this);
+  JS_AddExtraGCRootsTracer(cx, TraceBlackRoots, nullptr);
+  JS_SetGrayGCRootsTracer(cx, TraceGrayRoots, nullptr);
+
+  return true;
+}
+
+ShellContext::~ShellContext() {
+  markObservers.reset();
+  if (cx_) {
+    JS_SetContextPrivate(cx_, nullptr);
+    JS::SetHostCleanupFinalizationRegistryCallback(cx_, nullptr, nullptr);
+    JS_SetGrayGCRootsTracer(cx_, nullptr, nullptr);
+    JS_RemoveExtraGCRootsTracer(cx_, TraceBlackRoots, nullptr);
+  }
+  MOZ_ASSERT(offThreadJobs.empty());
+}
+
 static int Shell(JSContext* cx, OptionParser* op) {
 #ifdef JS_STRUCTURED_SPEW
   cx->spewer().enableSpewing();
@@ -11405,27 +11477,11 @@ int main(int argc, char** argv) {
 
   auto destroyCx = MakeScopeExit([cx] { JS_DestroyContext(cx); });
 
-  UniquePtr<ShellContext> sc = MakeUnique<ShellContext>(cx);
-  if (!sc) {
+  UniquePtr<ShellContext> sc =
+      MakeUnique<ShellContext>(cx, ShellContext::MainThread);
+  if (!sc || !sc->registerWithCx(cx)) {
     return 1;
   }
-  auto destroyShellContext = MakeScopeExit([cx, &sc] {
-    // Must clear out some of sc's pointer containers before JS_DestroyContext.
-    sc->markObservers.reset();
-
-    JS_SetContextPrivate(cx, nullptr);
-    sc.reset();
-  });
-
-  JS_SetContextPrivate(cx, sc.get());
-  JS_AddExtraGCRootsTracer(cx, TraceBlackRoots, nullptr);
-  JS_SetGrayGCRootsTracer(cx, TraceGrayRoots, nullptr);
-  auto resetGrayGCRootsTracer =
-      MakeScopeExit([cx] { JS_SetGrayGCRootsTracer(cx, nullptr, nullptr); });
-
-  // Waiting is allowed on the shell's main thread, for now.
-  JS_SetFutexCanWait(cx);
-  JS::SetWarningReporter(cx, WarningReporter);
 
   if (!SetContextOptions(cx, op)) {
     return 1;
@@ -11433,10 +11489,6 @@ int main(int argc, char** argv) {
 
   JS_SetTrustedPrincipals(cx, &ShellPrincipals::fullyTrusted);
   JS_SetSecurityCallbacks(cx, &ShellPrincipals::securityCallbacks);
-  JS_InitDestroyPrincipalsCallback(cx, ShellPrincipals::destroy);
-  JS_SetDestroyCompartmentCallback(cx, DestroyShellCompartmentPrivate);
-
-  js::SetWindowProxyClass(cx, &ShellWindowProxyClass);
 
   JS_AddInterruptCallback(cx, ShellInterruptCallback);
 
@@ -11457,11 +11509,6 @@ int main(int argc, char** argv) {
       cx, ForwardingPromiseRejectionTrackerCallback);
 
   JS::dbg::SetDebuggerMallocSizeOf(cx, moz_malloc_size_of);
-
-  js::UseInternalJobQueues(cx);
-
-  JS::SetHostCleanupFinalizationRegistryCallback(
-      cx, ShellCleanupFinalizationRegistryCallback, sc.get());
 
   auto shutdownShellThreads = MakeScopeExit([cx] {
     KillWatchdog(cx);
@@ -11498,9 +11545,6 @@ int main(int argc, char** argv) {
   EnvironmentPreparer environmentPreparer(cx);
 
   JS::SetProcessLargeAllocationFailureCallback(my_LargeAllocFailCallback);
-
-  js::SetPreserveWrapperCallbacks(cx, DummyPreserveWrapperCallback,
-                                  DummyHasReleasedWrapperCallback);
 
   if (op.getBoolOption("wasm-compile-and-serialize")) {
 #ifdef __wasi__
@@ -11652,21 +11696,27 @@ bool InitOptionParser(OptionParser& op) {
       !op.addBoolOption('\0', "enable-iterator-helpers",
                         "Enable iterator helpers") ||
       !op.addBoolOption('\0', "enable-shadow-realms", "Enable ShadowRealms") ||
-      !op.addBoolOption('\0', "enable-array-grouping",
-                        "Enable Array.grouping") ||
+      !op.addBoolOption('\0', "disable-array-grouping",
+                        "Disable Object.groupBy and Map.groupBy") ||
       !op.addBoolOption('\0', "disable-well-formed-unicode-strings",
                         "Disable String.prototype.{is,to}WellFormed() methods"
                         "(Well-Formed Unicode Strings) (default: Enabled)") ||
       !op.addBoolOption('\0', "enable-new-set-methods",
                         "Enable New Set methods") ||
-      !op.addBoolOption('\0', "enable-arraybuffer-transfer",
-                        "Enable ArrayBuffer.prototype.transfer() methods") ||
+      !op.addBoolOption('\0', "disable-arraybuffer-transfer",
+                        "Disable ArrayBuffer.prototype.transfer() methods") ||
+      !op.addBoolOption('\0', "enable-symbols-as-weakmap-keys",
+                        "Enable Symbols As WeakMap keys") ||
       !op.addBoolOption('\0', "enable-top-level-await",
                         "Enable top-level await") ||
       !op.addBoolOption('\0', "enable-class-static-blocks",
                         "(no-op) Enable class static blocks") ||
       !op.addBoolOption('\0', "enable-import-assertions",
-                        "Enable import assertions") ||
+                        "Enable import attributes with old assert syntax") ||
+      !op.addBoolOption('\0', "enable-import-attributes",
+                        "Enable import attributes") ||
+      !op.addBoolOption('\0', "disable-destructuring-fuse",
+                        "Disable Destructuring Fuse") ||
       !op.addStringOption('\0', "shared-memory", "on/off",
                           "SharedArrayBuffer and Atomics "
 #if SHARED_MEMORY_DEFAULT
@@ -11722,6 +11772,9 @@ bool InitOptionParser(OptionParser& op) {
       !op.addStringOption('\0', "ion-iterator-indices", "on/off",
                           "Optimize property access in for-in loops "
                           "(default: on, off to disable)") ||
+      !op.addStringOption('\0', "ion-load-keys", "on/off",
+                          "Atomize property loads used as keys "
+                          "(default: on, off to disable)") ||
       !op.addBoolOption('\0', "ion-check-range-analysis",
                         "Range analysis checking") ||
       !op.addBoolOption('\0', "ion-extra-checks",
@@ -11734,10 +11787,6 @@ bool InitOptionParser(OptionParser& op) {
           "On-Stack Replacement (default: on, off to disable)") ||
       !op.addBoolOption('\0', "disable-bailout-loop-check",
                         "Turn off bailout loop check") ||
-      !op.addBoolOption('\0', "enable-watchtower",
-                        "Enable Watchtower optimizations") ||
-      !op.addBoolOption('\0', "disable-watchtower",
-                        "Disable Watchtower optimizations") ||
       !op.addBoolOption('\0', "enable-ic-frame-pointers",
                         "Use frame pointers in all IC stubs") ||
       !op.addBoolOption('\0', "scalar-replace-arguments",
@@ -11773,6 +11822,14 @@ bool InitOptionParser(OptionParser& op) {
       !op.addBoolOption('\0', "no-baseline", "Disable baseline compiler") ||
       !op.addBoolOption('\0', "baseline-eager",
                         "Always baseline-compile methods") ||
+#ifdef ENABLE_PORTABLE_BASELINE_INTERP
+      !op.addBoolOption('\0', "portable-baseline-eager",
+                        "Always use the porbale baseline interpreter") ||
+      !op.addBoolOption('\0', "portable-baseline",
+                        "Enable Portable Baseline Interpreter (default)") ||
+      !op.addBoolOption('\0', "no-portable-baseline",
+                        "Disable Portable Baseline Interpreter") ||
+#endif
       !op.addIntOption(
           '\0', "baseline-warmup-threshold", "COUNT",
           "Wait for COUNT calls or iterations before baseline-compiling "
@@ -11801,6 +11858,10 @@ bool InitOptionParser(OptionParser& op) {
           "Wait for COUNT calls or iterations before trial-inlining "
           "(default: 500)",
           -1) ||
+      !op.addStringOption(
+          '\0', "monomorphic-inlining", "default/always/never",
+          "Whether monomorphic inlining is used instead of trial inlining "
+          "always, never, or based on heuristics (default)") ||
       !op.addBoolOption(
           '\0', "non-writable-jitcode",
           "(NOP for fuzzers) Allocate JIT code as non-writable memory.") ||
@@ -11861,8 +11922,10 @@ bool InitOptionParser(OptionParser& op) {
       !op.addBoolOption('\0', "no-ggc", "Disable Generational GC") ||
       !op.addBoolOption('\0', "no-cgc", "Disable Compacting GC") ||
       !op.addBoolOption('\0', "no-incremental-gc", "Disable Incremental GC") ||
+      !op.addBoolOption('\0', "no-parallel-marking",
+                        "Disable GC parallel marking") ||
       !op.addBoolOption('\0', "enable-parallel-marking",
-                        "Turn on parallel marking") ||
+                        "Enable GC parallel marking") ||
       !op.addIntOption(
           '\0', "marking-threads", "COUNT",
           "Set the number of threads used for parallel marking to COUNT.", 0) ||
@@ -12168,19 +12231,27 @@ bool SetContextOptions(JSContext* cx, const OptionParser& op) {
   enableShadowRealms = op.getBoolOption("enable-shadow-realms");
   enableWellFormedUnicodeStrings =
       !op.getBoolOption("disable-well-formed-unicode-strings");
+  enableArrayGrouping = !op.getBoolOption("disable-array-grouping");
 #ifdef NIGHTLY_BUILD
-  enableArrayGrouping = op.getBoolOption("enable-array-grouping");
   enableNewSetMethods = op.getBoolOption("enable-new-set-methods");
-  enableArrayBufferTransfer = op.getBoolOption("enable-arraybuffer-transfer");
+  enableSymbolsAsWeakMapKeys =
+      op.getBoolOption("enable-symbols-as-weakmap-keys");
 #endif
-  enableImportAssertions = op.getBoolOption("enable-import-assertions");
+  enableArrayBufferTransfer = !op.getBoolOption("disable-arraybuffer-transfer");
+  enableImportAttributesAssertSyntax =
+      op.getBoolOption("enable-import-assertions");
+  enableImportAttributes = op.getBoolOption("enable-import-attributes") ||
+                           enableImportAttributesAssertSyntax;
+  enableDestructuringFuse = !op.getBoolOption("disable-destructuring-fuse");
   useFdlibmForSinCosTan = op.getBoolOption("use-fdlibm-for-sin-cos-tan");
 
   JS::ContextOptionsRef(cx)
       .setSourcePragmas(enableSourcePragmas)
       .setAsyncStack(enableAsyncStacks)
       .setAsyncStackCaptureDebuggeeOnly(enableAsyncStackCaptureDebuggeeOnly)
-      .setImportAssertions(enableImportAssertions);
+      .setImportAttributes(enableImportAttributes)
+      .setImportAttributesAssertSyntax(enableImportAttributesAssertSyntax)
+      .setEnableDestructuringFuse(enableDestructuringFuse);
 
   JS::SetUseFdlibmForSinCosTan(useFdlibmForSinCosTan);
 
@@ -12405,6 +12476,19 @@ bool SetContextJITOptions(JSContext* cx, const OptionParser& op) {
     }
   }
 
+  if (const char* str = op.getStringOption("monomorphic-inlining")) {
+    if (strcmp(str, "default") == 0) {
+      jit::JitOptions.monomorphicInlining =
+          jit::UseMonomorphicInlining::Default;
+    } else if (strcmp(str, "always") == 0) {
+      jit::JitOptions.monomorphicInlining = jit::UseMonomorphicInlining::Always;
+    } else if (strcmp(str, "never") == 0) {
+      jit::JitOptions.monomorphicInlining = jit::UseMonomorphicInlining::Never;
+    } else {
+      return OptionFailure("monomorphic-inlining", str);
+    }
+  }
+
   if (const char* str = op.getStringOption("ion-scalar-replacement")) {
     if (strcmp(str, "on") == 0) {
       jit::JitOptions.disableScalarReplacement = false;
@@ -12572,6 +12656,18 @@ bool SetContextJITOptions(JSContext* cx, const OptionParser& op) {
     jit::JitOptions.setEagerBaselineCompilation();
   }
 
+#ifdef ENABLE_PORTABLE_BASELINE_INTERP
+  if (op.getBoolOption("portable-baseline-eager")) {
+    jit::JitOptions.setEagerPortableBaselineInterpreter();
+  }
+  if (op.getBoolOption("portable-baseline")) {
+    jit::JitOptions.portableBaselineInterpreter = true;
+  }
+  if (op.getBoolOption("no-portable-baseline")) {
+    jit::JitOptions.portableBaselineInterpreter = false;
+  }
+#endif
+
   if (op.getBoolOption("blinterp")) {
     jit::JitOptions.baselineInterpreter = true;
   }
@@ -12672,12 +12768,6 @@ bool SetContextJITOptions(JSContext* cx, const OptionParser& op) {
     jit::JitOptions.disableBailoutLoopCheck = true;
   }
 
-  if (op.getBoolOption("enable-watchtower")) {
-    jit::JitOptions.enableWatchtowerMegamorphic = true;
-  }
-  if (op.getBoolOption("disable-watchtower")) {
-    jit::JitOptions.enableWatchtowerMegamorphic = false;
-  }
   if (op.getBoolOption("only-inline-selfhosted")) {
     jit::JitOptions.onlyInlineSelfHosted = true;
   }
@@ -12693,6 +12783,16 @@ bool SetContextJITOptions(JSContext* cx, const OptionParser& op) {
       jit::JitOptions.disableIteratorIndices = true;
     } else {
       return OptionFailure("ion-iterator-indices", str);
+    }
+  }
+
+  if (const char* str = op.getStringOption("ion-load-keys")) {
+    if (strcmp(str, "on") == 0) {
+      jit::JitOptions.disableMarkLoadsUsedAsPropertyKeys = false;
+    } else if (strcmp(str, "off") == 0) {
+      jit::JitOptions.disableMarkLoadsUsedAsPropertyKeys = true;
+    } else {
+      return OptionFailure("ion-load-keys", str);
     }
   }
 
@@ -12791,9 +12891,19 @@ bool SetContextGCOptions(JSContext* cx, const OptionParser& op) {
   bool incrementalGC = !op.getBoolOption("no-incremental-gc");
   JS_SetGCParameter(cx, JSGC_INCREMENTAL_GC_ENABLED, incrementalGC);
 
+#ifndef ANDROID
+  bool parallelMarking = true;
+#else
+  bool parallelMarking = false;
+#endif
   if (op.getBoolOption("enable-parallel-marking")) {
-    JS_SetGCParameter(cx, JSGC_PARALLEL_MARKING_ENABLED, true);
+    parallelMarking = true;
   }
+  if (op.getBoolOption("no-parallel-marking")) {
+    parallelMarking = false;
+  }
+  JS_SetGCParameter(cx, JSGC_PARALLEL_MARKING_ENABLED, parallelMarking);
+
   int32_t markingThreads = op.getIntOption("marking-threads");
   if (markingThreads > 0) {
     JS_SetGCParameter(cx, JSGC_MARKING_THREAD_COUNT, markingThreads);

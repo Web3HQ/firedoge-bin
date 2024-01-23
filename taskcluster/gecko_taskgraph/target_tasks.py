@@ -244,11 +244,9 @@ def accept_raptor_android_build(platform):
         return False
     if "shippable" not in platform:
         return False
-    if "p2" in platform and "aarch64" in platform:
-        return False
     if "p5" in platform and "aarch64" in platform:
         return False
-    if "g5" in platform:
+    if "p6" in platform and "aarch64" in platform:
         return False
     if "a51" in platform:
         return True
@@ -534,30 +532,6 @@ def target_tasks_mozilla_release(full_task_graph, parameters, graph_config):
     ]
 
 
-@_target_task("mozilla_esr102_tasks")
-def target_tasks_mozilla_esr102(full_task_graph, parameters, graph_config):
-    """Select the set of tasks required for a promotable beta or release build
-    of desktop, without android CI. The candidates build process involves a pipeline
-    of builds and signing, but does not include beetmover or balrog jobs."""
-
-    def filter(task):
-        if not filter_release_tasks(task, parameters):
-            return False
-
-        if not standard_filter(task, parameters):
-            return False
-
-        platform = task.attributes.get("build_platform")
-
-        # Android is not built on esr102.
-        if platform and "android" in platform:
-            return False
-
-        return True
-
-    return [l for l, t in full_task_graph.tasks.items() if filter(t)]
-
-
 @_target_task("mozilla_esr115_tasks")
 def target_tasks_mozilla_esr115(full_task_graph, parameters, graph_config):
     """Select the set of tasks required for a promotable beta or release build
@@ -768,10 +742,11 @@ def target_tasks_custom_car_perf_testing(full_task_graph, parameters, graph_conf
         if "windows10-32" in platform:
             return False
 
-        # Desktop selection only for CaR
-        if "android" not in platform:
-            if "browsertime" in try_name and "custom-car" in try_name:
-                return True
+        # Desktop and Android selection for CaR
+        if "browsertime" in try_name and (
+            "custom-car" in try_name or "cstm-car-m" in try_name
+        ):
+            return True
         return False
 
     return [l for l, t in full_task_graph.tasks.items() if filter(t)]
@@ -799,13 +774,24 @@ def target_tasks_general_perf_testing(full_task_graph, parameters, graph_config)
         if "windows7" in platform or "windows10-32" in platform:
             return False
 
+        if "tp6-bench" in try_name:
+            return False
+
+        # Bug 1867669 - Temporarily disable all live site tests
+        if "live" in try_name and "sheriffed" not in try_name:
+            return False
+
         # Desktop selection
         if "android" not in platform:
             # Select some browsertime tasks as desktop smoke-tests
             if "browsertime" in try_name:
                 if "chrome" in try_name:
+                    if "tp6" in try_name and "essential" not in try_name:
+                        return False
                     return True
                 if "chromium" in try_name:
+                    if "tp6" in try_name and "essential" not in try_name:
+                        return False
                     return True
                 # chromium-as-release has it's own cron
                 if "custom-car" in try_name:
@@ -822,10 +808,6 @@ def target_tasks_general_perf_testing(full_task_graph, parameters, graph_config)
                     if "speedometer3" in try_name:
                         return False
                     return True
-            else:
-                # Don't run tp6 raptor tests
-                if "tp6" in try_name:
-                    return False
         # Android selection
         elif accept_raptor_android_build(platform):
             if "chrome-m" in try_name and (
@@ -869,6 +851,9 @@ def target_tasks_general_perf_testing(full_task_graph, parameters, graph_config)
                     return "browsertime" in try_name
             # Select browsertime-specific tests
             if "browsertime" in try_name:
+                # Don't run android CaR sp tests as we already have a cron for this.
+                if "m-car" in try_name:
+                    return False
                 if "speedometer" in try_name:
                     return True
         return False
@@ -1064,20 +1049,6 @@ def target_tasks_customv8_update(full_task_graph, parameters, graph_config):
     return ["toolchain-linux64-custom-v8"]
 
 
-@_target_task("chromium_update")
-def target_tasks_chromium_update(full_task_graph, parameters, graph_config):
-    """Select tasks required for building latest chromium versions."""
-    return [
-        "fetch-linux64-chromium",
-        "fetch-win32-chromium",
-        "fetch-win64-chromium",
-        "fetch-mac-chromium",
-        "toolchain-linux64-custom-car",
-        "toolchain-win64-custom-car",
-        "toolchain-macosx64-custom-car",
-    ]
-
-
 @_target_task("file_update")
 def target_tasks_file_update(full_task_graph, parameters, graph_config):
     """Select the set of tasks required to perform nightly in-tree file updates"""
@@ -1168,7 +1139,6 @@ def target_tasks_release_simulation(full_task_graph, parameters, graph_config):
         "nightly": "mozilla-central",
         "beta": "mozilla-beta",
         "release": "mozilla-release",
-        "esr102": "mozilla-esr102",
         "esr115": "mozilla-esr115",
     }
     target_project = project_by_release.get(parameters["release_type"])
@@ -1250,8 +1220,6 @@ def target_tasks_daily_beta_perf(full_task_graph, parameters, graph_config):
         if platform and accept_raptor_android_build(platform):
             # Select browsertime & geckoview specific tests
             if "browsertime" and "geckoview" in try_name:
-                if "g5" in platform:
-                    return False
                 if "power" in try_name:
                     return False
                 if "cpu" in try_name:
@@ -1289,8 +1257,6 @@ def target_tasks_weekly_release_perf(full_task_graph, parameters, graph_config):
         if platform and accept_raptor_android_build(platform):
             # Select browsertime & geckoview specific tests
             if "browsertime" and "geckoview" in try_name:
-                if "g5" in platform:
-                    return False
                 if "power" in try_name:
                     return False
                 if "cpu" in try_name:
@@ -1501,12 +1467,12 @@ def target_tasks_holly(full_task_graph, parameters, graph_config):
     return [l for l, t in full_task_graph.tasks.items() if filter(t)]
 
 
-@_target_task("snap_upstream_build")
-def target_tasks_snap_upstream_build(full_task_graph, parameters, graph_config):
+@_target_task("snap_upstream_tests")
+def target_tasks_snap_upstream_tests(full_task_graph, parameters, graph_config):
     """
-    Select tasks for building snap as upstream. Omit -try because it does not
-    really make sense on m-c
+    Select tasks for testing Snap package built as upstream. Omit -try because
+    it does not really make sense on a m-c cron
     """
     for name, task in full_task_graph.tasks.items():
-        if "snap-upstream-build" in name and not "-try" in name:
+        if "snap-upstream-test" in name and not "-try" in name:
             yield name

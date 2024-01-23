@@ -54,6 +54,7 @@ PER_PROJECT_PARAMETERS = {
     "try": {
         "enable_always_target": True,
         "target_tasks_method": "try_tasks",
+        "release_type": "nightly",
     },
     "kaios-try": {
         "target_tasks_method": "try_tasks",
@@ -91,10 +92,6 @@ PER_PROJECT_PARAMETERS = {
     "mozilla-release": {
         "target_tasks_method": "mozilla_release_tasks",
         "release_type": "release",
-    },
-    "mozilla-esr102": {
-        "target_tasks_method": "mozilla_esr102_tasks",
-        "release_type": "esr102",
     },
     "mozilla-esr115": {
         "target_tasks_method": "mozilla_esr115_tasks",

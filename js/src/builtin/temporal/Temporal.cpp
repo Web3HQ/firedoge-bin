@@ -7,7 +7,6 @@
 #include "builtin/temporal/Temporal.h"
 
 #include "mozilla/CheckedInt.h"
-#include "mozilla/FloatingPoint.h"
 #include "mozilla/Likely.h"
 #include "mozilla/Maybe.h"
 
@@ -17,13 +16,13 @@
 #include <initializer_list>
 #include <iterator>
 #include <stdint.h>
-#include <string>
 #include <string_view>
 #include <utility>
 
 #include "jsfriendapi.h"
 #include "jsnum.h"
 #include "jspubtd.h"
+#include "NamespaceImports.h"
 
 #include "builtin/temporal/Instant.h"
 #include "builtin/temporal/PlainDate.h"
@@ -47,17 +46,16 @@
 #include "js/PropertySpec.h"
 #include "js/RootingAPI.h"
 #include "js/String.h"
-#include "js/Utility.h"
 #include "js/Value.h"
-#include "util/StringBuffer.h"
 #include "vm/BigIntType.h"
 #include "vm/BytecodeUtil.h"
 #include "vm/GlobalObject.h"
 #include "vm/JSAtomState.h"
-#include "vm/JSAtomUtils.h"  // ClassName
+#include "vm/JSAtomUtils.h"
 #include "vm/JSContext.h"
 #include "vm/JSObject.h"
 #include "vm/ObjectOperations.h"
+#include "vm/PIC.h"
 #include "vm/PlainObject.h"
 #include "vm/Realm.h"
 #include "vm/StringType.h"
@@ -1038,7 +1036,7 @@ bool js::temporal::ToCalendarNameOption(JSContext* cx,
  * ToFractionalSecondDigits ( normalizedOptions )
  */
 bool js::temporal::ToFractionalSecondDigits(JSContext* cx,
-                                            JS::Handle<JSObject*> options,
+                                            Handle<JSObject*> options,
                                             Precision* precision) {
   // Step 1.
   Rooted<Value> digitsValue(cx);
@@ -1118,7 +1116,7 @@ SecondsStringPrecision js::temporal::ToSecondsStringPrecision(
     TemporalUnit smallestUnit, Precision fractionalDigitCount) {
   MOZ_ASSERT(smallestUnit == TemporalUnit::Auto ||
              smallestUnit >= TemporalUnit::Minute);
-  MOZ_ASSERT(fractionalDigitCount.isAuto() ||
+  MOZ_ASSERT(fractionalDigitCount == Precision::Auto() ||
              fractionalDigitCount.value() <= 9);
 
   // Steps 1-5.
@@ -1157,7 +1155,7 @@ SecondsStringPrecision js::temporal::ToSecondsStringPrecision(
   // Step 6. (Not applicable in our implementation.)
 
   // Step 7.
-  if (fractionalDigitCount.isAuto()) {
+  if (fractionalDigitCount == Precision::Auto()) {
     return {Precision::Auto(), TemporalUnit::Nanosecond, Increment{1}};
   }
 
@@ -1192,70 +1190,6 @@ SecondsStringPrecision js::temporal::ToSecondsStringPrecision(
   // Step 12.
   return {fractionalDigitCount, TemporalUnit::Nanosecond,
           increments[9 - digitCount]};
-}
-
-/**
- * FormatSecondsStringPart ( second, millisecond, microsecond, nanosecond,
- * precision )
- */
-void js::temporal::FormatSecondsStringPart(JSStringBuilder& result,
-                                           const PlainTime& time,
-                                           Precision precision) {
-  // Note: The caller is responsible for allocating enough space.
-
-  // Step 1. (Not applicable in our implementation.)
-
-  // Step 2.
-  if (precision.isMinute()) {
-    return;
-  }
-
-  // Step 3.
-  int32_t second = time.second;
-  result.infallibleAppend(':');
-  result.infallibleAppend(char('0' + (second / 10)));
-  result.infallibleAppend(char('0' + (second % 10)));
-
-  // Step 4.
-  int32_t fraction =
-      time.millisecond * 1'000'000 + time.microsecond * 1'000 + time.nanosecond;
-  MOZ_ASSERT(0 <= fraction && fraction < 1'000'000'000);
-
-  // Steps 5-6.
-  if (precision.isAuto()) {
-    // Step 5.a.
-    if (fraction == 0) {
-      return;
-    }
-
-    // Step 7. (Reordered)
-    result.infallibleAppend('.');
-
-    // Steps 5.b-c.
-    uint32_t k = 100'000'000;
-    do {
-      result.infallibleAppend(char('0' + (fraction / k)));
-      fraction %= k;
-      k /= 10;
-    } while (fraction);
-  } else {
-    // Step 6.a.
-    uint8_t p = precision.value();
-    if (p == 0) {
-      return;
-    }
-
-    // Step 7. (Reordered)
-    result.infallibleAppend('.');
-
-    // Steps 6.b-c.
-    uint32_t k = 100'000'000;
-    for (uint8_t i = 0; i < p; i++) {
-      result.infallibleAppend(char('0' + (fraction / k)));
-      fraction %= k;
-      k /= 10;
-    }
-  }
 }
 
 /**
@@ -1572,68 +1506,25 @@ bool js::temporal::ToIntegerWithTruncation(JSContext* cx, Handle<Value> value,
 /**
  * GetMethod ( V, P )
  */
-bool js::temporal::GetMethod(JSContext* cx, Handle<JSObject*> object,
-                             Handle<PropertyName*> name,
-                             MutableHandle<Value> result) {
-  // We don't directly invoke |Call|, because |Call| tries to find the function
-  // on the stack (JSDVG_SEARCH_STACK). This leads to confusing error messages
-  // like:
-  //
-  // js> print(new Temporal.ZonedDateTime(0n, {}, {}))
-  // typein:1:6 TypeError: print is not a function
-
+JSObject* js::temporal::GetMethod(JSContext* cx, Handle<JSObject*> object,
+                                  Handle<PropertyName*> name) {
   // Step 1.
-  if (!GetProperty(cx, object, object, name, result)) {
-    return false;
-  }
-
-  // Step 2.
-  if (result.isNullOrUndefined()) {
-    return true;
-  }
-
-  // Step 3.
-  if (!IsCallable(result)) {
-    if (auto chars = StringToNewUTF8CharsZ(cx, *name)) {
-      JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
-                               JSMSG_PROPERTY_NOT_CALLABLE, chars.get());
-    }
-    return false;
-  }
-
-  // Step 4.
-  return true;
-}
-
-/**
- * GetMethod ( V, P )
- */
-bool js::temporal::GetMethodForCall(JSContext* cx, Handle<JSObject*> object,
-                                    Handle<PropertyName*> name,
-                                    MutableHandle<Value> result) {
-  // We don't directly invoke |Call|, because |Call| tries to find the function
-  // on the stack (JSDVG_SEARCH_STACK). This leads to confusing error messages
-  // like:
-  //
-  // js> print(new Temporal.ZonedDateTime(0n, {}, {}))
-  // typein:1:6 TypeError: print is not a function
-
-  // Step 1.
-  if (!GetProperty(cx, object, object, name, result)) {
-    return false;
+  Rooted<Value> value(cx);
+  if (!GetProperty(cx, object, object, name, &value)) {
+    return nullptr;
   }
 
   // Steps 2-3.
-  if (!IsCallable(result)) {
+  if (!IsCallable(value)) {
     if (auto chars = StringToNewUTF8CharsZ(cx, *name)) {
       JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
                                JSMSG_PROPERTY_NOT_CALLABLE, chars.get());
     }
-    return false;
+    return nullptr;
   }
 
   // Step 4.
-  return true;
+  return &value.toObject();
 }
 
 /**
@@ -1804,7 +1695,7 @@ PlainObject* js::temporal::SnapshotOwnPropertiesIgnoreUndefined(
  * fallbackSmallestUnit, smallestLargestDefaultUnit )
  */
 bool js::temporal::GetDifferenceSettings(
-    JSContext* cx, TemporalDifference operation, Handle<JSObject*> options,
+    JSContext* cx, TemporalDifference operation, Handle<PlainObject*> options,
     TemporalUnitGroup unitGroup, TemporalUnit smallestAllowedUnit,
     TemporalUnit fallbackSmallestUnit, TemporalUnit smallestLargestDefaultUnit,
     DifferenceSettings* result) {
@@ -1885,6 +1776,14 @@ bool js::temporal::GetDifferenceSettings(
   // Step 14.
   *result = {smallestUnit, largestUnit, roundingMode, roundingIncrement};
   return true;
+}
+
+bool temporal::IsArrayIterationSane(JSContext* cx, bool* result) {
+  auto* stubChain = ForOfPIC::getOrCreate(cx);
+  if (!stubChain) {
+    return false;
+  }
+  return stubChain->tryOptimizeArray(cx, result);
 }
 
 static JSObject* CreateTemporalObject(JSContext* cx, JSProtoKey key) {

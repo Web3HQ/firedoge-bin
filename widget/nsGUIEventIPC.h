@@ -270,13 +270,15 @@ struct ParamTraits<mozilla::WidgetDragEvent> {
     WriteParam(aWriter, static_cast<const mozilla::WidgetMouseEvent&>(aParam));
     WriteParam(aWriter, aParam.mUserCancelled);
     WriteParam(aWriter, aParam.mDefaultPreventedOnContent);
+    WriteParam(aWriter, aParam.mInHTMLEditorEventListener);
   }
 
   static bool Read(MessageReader* aReader, paramType* aResult) {
     bool rv =
         ReadParam(aReader, static_cast<mozilla::WidgetMouseEvent*>(aResult)) &&
         ReadParam(aReader, &aResult->mUserCancelled) &&
-        ReadParam(aReader, &aResult->mDefaultPreventedOnContent);
+        ReadParam(aReader, &aResult->mDefaultPreventedOnContent) &&
+        ReadParam(aReader, &aResult->mInHTMLEditorEventListener);
     return rv;
   }
 };
@@ -887,11 +889,11 @@ struct ParamTraits<mozilla::WritingMode> {
   using paramType = mozilla::WritingMode;
 
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
-    WriteParam(aWriter, aParam.mWritingMode.bits);
+    WriteParam(aWriter, aParam.mWritingMode._0);
   }
 
   static bool Read(MessageReader* aReader, paramType* aResult) {
-    return ReadParam(aReader, &aResult->mWritingMode.bits);
+    return ReadParam(aReader, &aResult->mWritingMode._0);
   }
 };
 

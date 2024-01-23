@@ -20,6 +20,7 @@
 #include "mozilla/Components.h"
 #include "mozilla/ErrorNames.h"
 #include "mozilla/ResultExtensions.h"
+#include "mozilla/Try.h"
 #include "mozilla/Unused.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/Event.h"
@@ -85,7 +86,7 @@ static const ClassificationStruct classificationArray[] = {
 namespace {
 class ChannelListHolder : public LinkedList<ChannelWrapper> {
  public:
-  ChannelListHolder() : LinkedList<ChannelWrapper>() {}
+  ChannelListHolder() = default;
 
   ~ChannelListHolder();
 };
@@ -113,7 +114,8 @@ NS_IMPL_CYCLE_COLLECTING_RELEASE(ChannelWrapper::ChannelWrapperStub)
 NS_IMPL_CYCLE_COLLECTION(ChannelWrapper::ChannelWrapperStub, mChannelWrapper)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(ChannelWrapper::ChannelWrapperStub)
-  NS_INTERFACE_MAP_ENTRY_TEAROFF(ChannelWrapper, mChannelWrapper)
+  NS_INTERFACE_MAP_ENTRY_TEAROFF_AMBIGUOUS(ChannelWrapper, EventTarget,
+                                           mChannelWrapper)
   NS_INTERFACE_MAP_ENTRY(nsISupports)
 NS_INTERFACE_MAP_END
 
@@ -884,6 +886,7 @@ MozContentPolicyType GetContentPolicyType(ExtContentPolicyType aType) {
     case ExtContentPolicy::TYPE_OTHER:
     case ExtContentPolicy::TYPE_SAVEAS_DOWNLOAD:
     case ExtContentPolicy::TYPE_WEB_TRANSPORT:
+    case ExtContentPolicy::TYPE_WEB_IDENTITY:
       break;
       // Do not add default: so that compilers can catch the missing case.
   }
@@ -1196,6 +1199,18 @@ ChannelWrapper::RequestListener::CheckListenerChain() {
   return rv;
 }
 
+NS_IMETHODIMP
+ChannelWrapper::RequestListener::OnDataFinished(nsresult aStatus) {
+  MOZ_ASSERT(mOrigStreamListener, "Should have mOrigStreamListener");
+  nsCOMPtr<nsIThreadRetargetableStreamListener> retargetableListener =
+      do_QueryInterface(mOrigStreamListener);
+  if (retargetableListener) {
+    return retargetableListener->OnDataFinished(aStatus);
+  }
+
+  return NS_OK;
+}
+
 /*****************************************************************************
  * Event dispatching
  *****************************************************************************/
@@ -1243,7 +1258,7 @@ JSObject* ChannelWrapper::WrapObject(JSContext* aCx,
 NS_IMPL_CYCLE_COLLECTION_CLASS(ChannelWrapper)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(ChannelWrapper)
-  NS_INTERFACE_MAP_ENTRY(ChannelWrapper)
+  NS_INTERFACE_MAP_ENTRY_CONCRETE(ChannelWrapper)
 NS_INTERFACE_MAP_END_INHERITING(DOMEventTargetHelper)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(ChannelWrapper,

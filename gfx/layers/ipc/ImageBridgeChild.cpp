@@ -220,6 +220,9 @@ void ImageBridgeChild::ShutdownStep2(SynchronousTask* aTask) {
 
   MOZ_ASSERT(InImageBridgeChildThread(),
              "Should be in ImageBridgeChild thread.");
+
+  mSectionAllocator = nullptr;
+
   if (!mDestroyed) {
     Close();
   }
@@ -246,7 +249,7 @@ ImageBridgeChild::ImageBridgeChild(uint32_t aNamespace)
     : mNamespace(aNamespace),
       mCanSend(false),
       mDestroyed(false),
-      mFwdTransactionId(0),
+      mFwdTransactionCounter(this),
       mContainerMapLock("ImageBridgeChild.mContainerMapLock") {
   MOZ_ASSERT(mNamespace);
   MOZ_ASSERT(NS_IsMainThread());
@@ -483,12 +486,14 @@ void ImageBridgeChild::Bind(Endpoint<PImageBridgeChild>&& aEndpoint) {
     return;
   }
 
+  mSectionAllocator = MakeUnique<FixedSizeSmallShmemSectionAllocator>(this);
   mCanSend = true;
 }
 
 void ImageBridgeChild::BindSameProcess(RefPtr<ImageBridgeParent> aParent) {
   Open(aParent, aParent->GetThread(), mozilla::ipc::ChildSide);
 
+  mSectionAllocator = MakeUnique<FixedSizeSmallShmemSectionAllocator>(this);
   mCanSend = true;
 }
 
@@ -599,6 +604,10 @@ void ImageBridgeChild::InitWithGPUProcess(
 bool InImageBridgeChildThread() {
   return sImageBridgeChildThread &&
          sImageBridgeChildThread->IsOnCurrentThread();
+}
+
+FixedSizeSmallShmemSectionAllocator* ImageBridgeChild::GetTileLockAllocator() {
+  return mSectionAllocator.get();
 }
 
 nsISerialEventTarget* ImageBridgeChild::GetThread() const {
@@ -826,7 +835,8 @@ mozilla::ipc::IPCResult ImageBridgeChild::RecvReportFramesDropped(
 
 PTextureChild* ImageBridgeChild::CreateTexture(
     const SurfaceDescriptor& aSharedData, ReadLockDescriptor&& aReadLock,
-    LayersBackend aLayersBackend, TextureFlags aFlags, uint64_t aSerial,
+    LayersBackend aLayersBackend, TextureFlags aFlags,
+    const dom::ContentParentId& aContentId, uint64_t aSerial,
     wr::MaybeExternalImageId& aExternalImageId) {
   MOZ_ASSERT(CanSend());
   return SendPTextureConstructor(aSharedData, std::move(aReadLock),

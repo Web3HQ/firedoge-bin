@@ -731,24 +731,21 @@ export var PanelMultiView = class extends AssociatedToNode {
       // The main view of a panel can be a subview in another one. Make sure to
       // reset all the properties that may be set on a subview.
       nextPanelView.mainview = false;
-      // The header may change based on how the subview was opened.
-      let title =
-        viewNode.getAttribute("title") || anchor?.getAttribute("label");
-      if (!title) {
-        const l10nId = viewNode.getAttribute("data-l10n-id");
-        if (l10nId) {
-          // The view's title is not yet set by DOM localization.
-          const [msg] = await viewNode.ownerDocument.l10n.formatMessages([
-            l10nId,
-          ]);
-          for (let { name, value } of msg.attributes) {
-            if (name === "title") {
-              title = value;
-              viewNode.setAttribute("title", value);
-            }
-          }
-        }
+      // The header may be set by a Fluent message with a title attribute
+      // that has changed immediately before showing the panelview,
+      // and so is not reflected in the DOM yet.
+      let title;
+      const l10nId = viewNode.getAttribute("data-l10n-id");
+      if (l10nId) {
+        const l10nArgs = viewNode.getAttribute("data-l10n-args");
+        const args = l10nArgs ? JSON.parse(l10nArgs) : undefined;
+        const [msg] = await viewNode.ownerDocument.l10n.formatMessages([
+          { id: l10nId, args },
+        ]);
+        title = msg.attributes.find(a => a.name === "title")?.value;
       }
+      // If not set by Fluent, the header may change based on how the subview was opened.
+      title ??= viewNode.getAttribute("title") || anchor?.getAttribute("label");
       nextPanelView.headerText = title;
       // The constrained width of subviews may also vary between panels.
       nextPanelView.minMaxWidth = prevPanelView.knownWidth;
@@ -1408,43 +1405,50 @@ export var PanelView = class extends AssociatedToNode {
     };
 
     // If the header already exists, update or remove it as requested.
+    let isMainView = this.node.getAttribute("mainview");
     let header = this.node.querySelector(".panel-header");
     if (header) {
-      let headerInfoButton = header.querySelector(".panel-info-button");
       let headerBackButton = header.querySelector(".subviewbutton-back");
-      if (headerBackButton && this.node.getAttribute("mainview")) {
-        // A back button should not appear in a mainview.
-        // This codepath can be reached if a user enters a panelview in
-        // the overflow panel, and then unpins it back to the toolbar.
-        headerBackButton.remove();
-      }
-      if (!this.node.getAttribute("mainview")) {
-        if (value) {
-          if (headerInfoButton && !headerBackButton) {
-            // If we're not in a mainview and an info button is present,
-            // that means the panel header is a custom one and a back
-            // button should be added, if not already present.
-            header.prepend(this.createHeaderBackButton());
-          }
-          // Set the header title based on the value given.
-          header.querySelector(".panel-header > h1 > span").textContent = value;
-          ensureHeaderSeparator(header);
-        } else {
-          if (header.nextSibling.tagName == "toolbarseparator") {
-            header.nextSibling.remove();
-          }
-          header.remove();
+      if (isMainView) {
+        if (headerBackButton) {
+          // A back button should not appear in a mainview.
+          // This codepath can be reached if a user enters a panelview in
+          // the overflow panel (like the Profiler), and then unpins it back to the toolbar.
+          headerBackButton.remove();
         }
-        return;
-      } else if (!this.node.getAttribute("showheader")) {
+      }
+      if (value) {
+        if (
+          !isMainView &&
+          !headerBackButton &&
+          !this.node.getAttribute("no-back-button")
+        ) {
+          // Add a back button when not in mainview (if it doesn't exist already),
+          // also when a panelview specifies it doesn't want a back button,
+          // like the Report Broken Site (sent) panelview.
+          header.prepend(this.createHeaderBackButton());
+        }
+        // Set the header title based on the value given.
+        header.querySelector(".panel-header > h1 > span").textContent = value;
+        ensureHeaderSeparator(header);
+      } else if (
+        !this.node.getAttribute("has-custom-header") &&
+        !this.node.getAttribute("mainview-with-header")
+      ) {
+        // No value supplied, and the panelview doesn't have a certain requirement
+        // for any kind of header, so remove it and the following toolbarseparator.
         if (header.nextSibling.tagName == "toolbarseparator") {
           header.nextSibling.remove();
         }
         header.remove();
+        return;
       }
+      // Either the header exists and has been adjusted accordingly by now,
+      // or it doesn't (or shouldn't) exist. Bail out to not create a duplicate header.
+      return;
     }
 
-    // The header doesn't exist, only create it if needed.
+    // The header doesn't and shouldn't exist, only create it if needed.
     if (!value) {
       return;
     }
@@ -1452,13 +1456,17 @@ export var PanelView = class extends AssociatedToNode {
     header = this.document.createXULElement("box");
     header.classList.add("panel-header");
 
-    let backButton = this.createHeaderBackButton();
+    if (!isMainView) {
+      let backButton = this.createHeaderBackButton();
+      header.append(backButton);
+    }
+
     let h1 = this.document.createElement("h1");
     let span = this.document.createElement("span");
     span.textContent = value;
     h1.appendChild(span);
 
-    header.append(backButton, h1);
+    header.append(h1);
     this.node.prepend(header);
 
     ensureHeaderSeparator(header);

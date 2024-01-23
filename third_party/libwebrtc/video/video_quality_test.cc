@@ -76,7 +76,7 @@ constexpr int kFramesSentInQuickTest = 1;
 constexpr uint32_t kThumbnailSendSsrcStart = 0xE0000;
 constexpr uint32_t kThumbnailRtxSsrcStart = 0xF0000;
 
-constexpr int kDefaultMaxQp = cricket::WebRtcVideoChannel::kDefaultQpMax;
+constexpr int kDefaultMaxQp = cricket::WebRtcVideoSendChannel::kDefaultQpMax;
 
 const VideoEncoder::Capabilities kCapabilities(false);
 
@@ -246,7 +246,7 @@ class QualityTestVideoEncoder : public VideoEncoder,
       RTC_DCHECK_GE(simulcast_index, 0);
       if (analyzer_) {
         analyzer_->PostEncodeOnFrame(simulcast_index,
-                                     encoded_image.Timestamp());
+                                     encoded_image.RtpTimestamp());
       }
       if (static_cast<size_t>(simulcast_index) < writers_.size()) {
         writers_[simulcast_index]->WriteFrame(encoded_image,

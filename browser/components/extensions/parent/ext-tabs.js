@@ -12,7 +12,6 @@ ChromeUtils.defineESModuleGetters(this, {
   ExtensionControlledPopup:
     "resource:///modules/ExtensionControlledPopup.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
-  PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
   SessionStore: "resource:///modules/sessionstore/SessionStore.sys.mjs",
 });
 
@@ -127,7 +126,7 @@ let tabListener = {
       if (promise) {
         return promise;
       }
-      deferred = PromiseUtils.defer();
+      deferred = Promise.withResolvers();
       if (
         !this.initializingTabs.has(nativeTab) &&
         (nativeTab.linkedBrowser.innerWindowID ||
@@ -397,7 +396,10 @@ this.tabs = class extends ExtensionAPIPersistent {
       let listener = event => {
         // Ignore any events prior to TabOpen
         // and events that are triggered while tabs are swapped between windows.
-        if (event.originalTarget.initializingTab) {
+        if (
+          event.originalTarget.initializingTab ||
+          event.originalTarget.ownerGlobal.gBrowserInit?.isAdoptingTab()
+        ) {
           return;
         }
         if (!extension.canAccessWindow(event.originalTarget.ownerGlobal)) {

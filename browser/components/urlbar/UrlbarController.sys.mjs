@@ -340,6 +340,7 @@ export class UrlbarController {
         }
       // Fall through, we want the SPACE key to activate this element.
       case KeyEvent.DOM_VK_RETURN:
+        this.logger.debug(`Enter pressed${executeAction ? "" : " delayed"}`);
         if (executeAction) {
           this.input.handleCommand(event);
         }
@@ -669,6 +670,15 @@ export class UrlbarController {
   }
 
   /**
+   * Set the query context cache.
+   *
+   * @param {UrlbarQueryContext} queryContext the object to cache.
+   */
+  setLastQueryContextCache(queryContext) {
+    this._lastQueryContextWrapper = { queryContext };
+  }
+
+  /**
    * Clear the previous query context cache.
    */
   clearLastQueryContextCache() {
@@ -720,13 +730,14 @@ class TelemetryEvent {
    * invoking this on every input event as the user is typing, for example.
    *
    * @param {event} event A DOM event.
+   * @param {UrlbarQueryContext} queryContext A queryContext.
    * @param {string} [searchString] Pass a search string related to the event if
    *        you have one.  The event by itself sometimes isn't enough to
    *        determine the telemetry details we should record.
    * @throws This should never throw, or it may break the urlbar.
    * @see {@link https://firefox-source-docs.mozilla.org/browser/urlbar/telemetry.html}
    */
-  start(event, searchString = null) {
+  start(event, queryContext, searchString = null) {
     if (this._startEventInfo) {
       if (this._startEventInfo.interactionType == "topsites") {
         // If the most recent event came from opening the results pane with an
@@ -785,7 +796,6 @@ class TelemetryEvent {
       searchString,
     };
 
-    let { queryContext } = this._controller._lastQueryContextWrapper || {};
     this._controller.manager.notifyEngagementChange(
       "start",
       queryContext,
@@ -994,48 +1004,6 @@ class TelemetryEvent {
       );
       return;
     }
-
-    if (action == "go_button") {
-      // Fall back since the conventional telemetry dones't support "go_button" action.
-      action = "click";
-    }
-
-    let endTime = (event && event.timeStamp) || Cu.now();
-    let startTime = startEventInfo.timeStamp || endTime;
-    // Synthesized events in tests may have a bogus timeStamp, causing a
-    // subtraction between monotonic and non-monotonic timestamps; that's why
-    // abs is necessary here. It should only happen in tests, anyway.
-    let elapsed = Math.abs(Math.round(endTime - startTime));
-
-    // Rather than listening to the pref, just update status when we record an
-    // event, if the pref changed from the last time.
-    let recordingEnabled = lazy.UrlbarPrefs.get("eventTelemetry.enabled");
-    if (this._eventRecordingEnabled != recordingEnabled) {
-      this._eventRecordingEnabled = recordingEnabled;
-      Services.telemetry.setEventRecordingEnabled("urlbar", recordingEnabled);
-    }
-
-    let extra = {
-      elapsed: elapsed.toString(),
-      numChars,
-      numWords,
-    };
-
-    if (method == "engagement") {
-      extra.selIndex = details.selIndex.toString();
-      extra.selType = details.selType;
-      extra.provider = details.provider || "";
-    }
-
-    // We invoke recordEvent regardless, if recording is disabled this won't
-    // report the events remotely, but will count it in the event_counts scalar.
-    Services.telemetry.recordEvent(
-      this._category,
-      method,
-      action,
-      startEventInfo.interactionType,
-      extra
-    );
 
     Services.telemetry.scalarAdd(
       method == "engagement"
@@ -1357,18 +1325,12 @@ class TelemetryEvent {
     if (!element) {
       return "none";
     }
-    if (
-      element.classList.contains("urlbarView-button-help") ||
-      element.dataset.command == "help"
-    ) {
+    if (element.dataset.command == "help") {
       return result?.type == lazy.UrlbarUtils.RESULT_TYPE.TIP
         ? "tiphelp"
         : "help";
     }
-    if (
-      element.classList.contains("urlbarView-button-block") ||
-      element.dataset.command == "dismiss"
-    ) {
+    if (element.dataset.command == "dismiss") {
       return "block";
     }
     // Now handle the result.

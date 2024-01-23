@@ -4,15 +4,18 @@
 
 /* eslint no-shadow: error, mozilla/no-aArgs: error */
 
-import { PromiseUtils } from "resource://gre/modules/PromiseUtils.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   AddonManager: "resource://gre/modules/AddonManager.sys.mjs",
+  AppProvidedSearchEngine:
+    "resource://gre/modules/AppProvidedSearchEngine.sys.mjs",
   AddonSearchEngine: "resource://gre/modules/AddonSearchEngine.sys.mjs",
   IgnoreLists: "resource://gre/modules/IgnoreLists.sys.mjs",
+  loadAndParseOpenSearchEngine:
+    "resource://gre/modules/OpenSearchLoader.sys.mjs",
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   OpenSearchEngine: "resource://gre/modules/OpenSearchEngine.sys.mjs",
   PolicySearchEngine: "resource://gre/modules/PolicySearchEngine.sys.mjs",
@@ -20,6 +23,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
   SearchEngine: "resource://gre/modules/SearchEngine.sys.mjs",
   SearchEngineSelector: "resource://gre/modules/SearchEngineSelector.sys.mjs",
+  SearchEngineSelectorOld:
+    "resource://gre/modules/SearchEngineSelectorOld.sys.mjs",
   SearchSettings: "resource://gre/modules/SearchSettings.sys.mjs",
   SearchStaticData: "resource://gre/modules/SearchStaticData.sys.mjs",
   SearchUtils: "resource://gre/modules/SearchUtils.sys.mjs",
@@ -46,10 +51,6 @@ const QUIT_APPLICATION_TOPIC = "quit-application";
 // The update timer for OpenSearch engines checks in once a day.
 const OPENSEARCH_UPDATE_TIMER_TOPIC = "search-engine-update-timer";
 const OPENSEARCH_UPDATE_TIMER_INTERVAL = 60 * 60 * 24;
-
-// The default engine update interval, in days. This is only used if an engine
-// specifies an updateURL, but not an updateInterval.
-const OPENSEARCH_DEFAULT_UPDATE_INTERVAL = 7;
 
 // This is the amount of time we'll be idle for before applying any configuration
 // changes.
@@ -160,11 +161,12 @@ const gEmptyParseSubmissionResult = Object.freeze(
  */
 export class SearchService {
   constructor() {
-    this.#initObservers = PromiseUtils.defer();
     // this._engines is prefixed with _ rather than # because it is called from
     // a test.
     this._engines = new Map();
     this._settings = new lazy.SearchSettings(this);
+
+    this.#defineLazyPreferenceGetters();
   }
 
   classID = Components.ID("{7319788a-fe93-4db3-9f39-818cf08f4256}");
@@ -277,6 +279,18 @@ export class SearchService {
     return this.#initializationStatus == "success";
   }
 
+  /**
+   * A promise that is resolved when initialization has finished. This does not
+   * trigger initialization to begin.
+   *
+   * @returns {Promise}
+   *   Resolved when initalization has successfully finished, and rejected if it
+   *   has failed.
+   */
+  get promiseInitialized() {
+    return this.#initDeferredPromise.promise;
+  }
+
   getDefaultEngineInfo() {
     let [telemetryId, defaultSearchEngineData] = this.#getEngineInfo(
       this.defaultEngine
@@ -378,54 +392,22 @@ export class SearchService {
     return this.#getEnginesByExtensionID(extensionID);
   }
 
-  // nsISearchService
+  /**
+   * This function calls #init to start initialization when it has not been
+   * started yet. Otherwise, it returns the pending promise.
+   *
+   * @returns {Promise}
+   *   Returns the pending Promise when #init has started but not yet finished.
+   *   | Resolved | when initialization has successfully finished.
+   *   | Rejected | when initialization has failed.
+   *
+   */
   async init() {
-    if (this.#initStarted) {
-      return this.#initObservers.promise;
+    if (["started", "success", "failed"].includes(this.#initializationStatus)) {
+      return this.promiseInitialized;
     }
-    lazy.logConsole.debug("init");
-
-    TelemetryStopwatch.start("SEARCH_SERVICE_INIT_MS");
-    const timerId = Glean.searchService.startupTime.start();
-    this.#initStarted = true;
-    let result;
-    try {
-      // Complete initialization by calling asynchronous initializer.
-      result = await this.#init();
-      TelemetryStopwatch.finish("SEARCH_SERVICE_INIT_MS");
-      Glean.searchService.startupTime.stopAndAccumulate(timerId);
-    } catch (ex) {
-      this.#initializationStatus = "failed";
-      TelemetryStopwatch.cancel("SEARCH_SERVICE_INIT_MS");
-      Glean.searchService.startupTime.cancel(timerId);
-      this.#initObservers.reject(ex.result);
-      throw ex;
-    }
-
-    if (!Components.isSuccessCode(result)) {
-      throw new Error("SearchService failed while it was initializing.");
-    } else if (this.#startupRemovedExtensions.size) {
-      Services.tm.dispatchToMainThread(async () => {
-        // Now that init() has successfully finished, we remove any engines
-        // that have had their add-ons removed by the add-on manager.
-        // We do this after init() has complete, as that allows us to use
-        // removeEngine to look after any default engine changes as well.
-        // This could cause a slight flicker on startup, but it should be
-        // a rare action.
-        lazy.logConsole.debug("Removing delayed extension engines");
-        for (let id of this.#startupRemovedExtensions) {
-          for (let engine of this.#getEnginesByExtensionID(id)) {
-            // Only do this for non-application provided engines. We shouldn't
-            // ever get application provided engines removed here, but just in case.
-            if (!engine.isAppProvided) {
-              await this.removeEngine(engine);
-            }
-          }
-        }
-        this.#startupRemovedExtensions.clear();
-      });
-    }
-    return Cr.NS_OK;
+    this.#initializationStatus = "started";
+    return this.#init();
   }
 
   /**
@@ -445,8 +427,7 @@ export class SearchService {
    */
   reset() {
     this.#initializationStatus = "not initialized";
-    this.#initObservers = PromiseUtils.defer();
-    this.#initStarted = false;
+    this.#initDeferredPromise = Promise.withResolvers();
     this.#startupExtensions = new Set();
     this._engines.clear();
     this._cachedSortedEngines = null;
@@ -467,16 +448,22 @@ export class SearchService {
    * Test only variable to indicate an error should occur during
    * search service initialization.
    *
-   * @type {boolean}
+   * @type {string}
    */
-  willThrowErrorDuringInitInTest = false;
+  errorToThrowInTest = null;
 
   // Test-only function to reset just the engine selector so that it can
   // load a different configuration.
   resetEngineSelector() {
-    this.#engineSelector = new lazy.SearchEngineSelector(
-      this.#handleConfigurationUpdated.bind(this)
-    );
+    if (lazy.SearchUtils.newSearchConfigEnabled) {
+      this.#engineSelector = new lazy.SearchEngineSelector(
+        this.#handleConfigurationUpdated.bind(this)
+      );
+    } else {
+      this.#engineSelector = new lazy.SearchEngineSelectorOld(
+        this.#handleConfigurationUpdated.bind(this)
+      );
+    }
   }
 
   resetToAppDefaultEngine() {
@@ -676,26 +663,22 @@ export class SearchService {
   }
 
   async addOpenSearchEngine(engineURL, iconURL) {
-    lazy.logConsole.debug("addEngine: Adding", engineURL);
+    lazy.logConsole.debug("addOpenSearchEngine: Adding", engineURL);
     await this.init();
-    let errCode;
+    let engine;
     try {
-      var engine = new lazy.OpenSearchEngine();
+      let engineData = await lazy.loadAndParseOpenSearchEngine(
+        Services.io.newURI(engineURL)
+      );
+      engine = new lazy.OpenSearchEngine({ engineData });
       engine._setIcon(iconURL, false);
-      errCode = await new Promise(resolve => {
-        engine.install(engineURL, errorCode => {
-          resolve(errorCode);
-        });
-      });
-      if (errCode) {
-        throw errCode;
-      }
     } catch (ex) {
       throw Components.Exception(
         "addEngine: Error adding engine:\n" + ex,
-        errCode || Cr.NS_ERROR_FAILURE
+        ex.result || Cr.NS_ERROR_FAILURE
       );
     }
+    this.#addEngineToStore(engine);
     this.#maybeStartOpenSearchUpdateTimer();
     return engine;
   }
@@ -793,7 +776,10 @@ export class SearchService {
   async moveEngine(engine, newIndex) {
     await this.init();
     if (newIndex > this.#sortedEngines.length || newIndex < 0) {
-      throw Components.Exception("moveEngine: Index out of bounds!");
+      throw Components.Exception(
+        "moveEngine: Index out of bounds!",
+        Cr.NS_ERROR_INVALID_ARG
+      );
     }
     if (
       !(engine instanceof Ci.nsISearchEngine) &&
@@ -956,61 +942,38 @@ export class SearchService {
    * registered for handling updates to search engines. Only OpenSearch engines
    * have these updates and hence, only those are handled here.
    */
-  notify() {
+  async notify() {
     lazy.logConsole.debug("notify: checking for updates");
 
     // Walk the engine list, looking for engines whose update time has expired.
-    var currentTime = Date.now();
-    lazy.logConsole.debug("currentTime:" + currentTime);
     for (let engine of this._engines.values()) {
-      if (!(engine instanceof lazy.OpenSearchEngine && engine._hasUpdates)) {
+      if (!(engine instanceof lazy.OpenSearchEngine)) {
         continue;
       }
-
-      var expirTime = engine.getAttr("updateexpir");
-      lazy.logConsole.debug(
-        engine.name,
-        "expirTime:",
-        expirTime,
-        "updateURL:",
-        engine._updateURL,
-        "iconUpdateURL:",
-        engine._iconUpdateURL
-      );
-
-      var engineExpired = expirTime <= currentTime;
-
-      if (!expirTime || !engineExpired) {
-        lazy.logConsole.debug("skipping engine");
-        continue;
-      }
-
-      lazy.logConsole.debug(engine.name, "has expired");
-
-      engineUpdateService.update(engine);
-
-      // Schedule the next update
-      engineUpdateService.scheduleNextUpdate(engine);
-    } // end engine iteration
+      await engine.maybeUpdate();
+    }
   }
 
-  #initObservers;
   #currentEngine;
   #currentPrivateEngine;
   #queuedIdle;
 
   /**
-   * Indicates that the initialization has started or not.
+   * A deferred promise that is resolved when initialization has finished.
    *
-   * @type {boolean}
+   * @type {Promise}
+   *   Resolved when initalization has successfully finished, and rejected if it
+   *   has failed.
    */
-  #initStarted = false;
+  #initDeferredPromise = Promise.withResolvers();
 
   /**
-   * Indicates if initialization has failed, succeeded or has not finished yet.
+   * Indicates if initialization has started, failed, succeeded or has not
+   * started yet.
    *
-   * There are 3 possible statuses:
-   *   "not initialized" - The SearchService has not finished initialization.
+   * These are the statuses:
+   *   "not initialized" - The SearchService has not started initialization.
+   *   "started" - The SearchService has started initializaiton.
    *   "success" - The SearchService successfully completed initialization.
    *   "failed" - The SearchService failed during initialization.
    *
@@ -1283,9 +1246,6 @@ export class SearchService {
       throw new Error("SearchService failed while it was initializing.");
     }
 
-    // This Error is thrown when this.#initializationStatus is
-    // "not initialized" because it is in the middle of initialization and
-    // hasn't finished or hasn't started.
     let err = new Error(
       "Something tried to use the search service before it finished " +
         "initializing. Please examine the stack trace to figure out what and " +
@@ -1296,12 +1256,10 @@ export class SearchService {
   }
 
   /**
-   * Asynchronous implementation of the initializer.
-   *
-   * @returns {number}
-   *   A Components.results success code on success, otherwise a failure code.
+   * Define lazy preference getters for separate private default engine in
+   * private browsing mode.
    */
-  async #init() {
+  #defineLazyPreferenceGetters() {
     XPCOMUtils.defineLazyPreferenceGetter(
       this,
       "_separatePrivateDefaultPrefValue",
@@ -1326,61 +1284,103 @@ export class SearchService {
         "separatePrivateDefault.urlbarResult.enabled",
       false
     );
+  }
 
-    // We need to catch the region being updated
-    // during initialisation so we start listening
-    // straight away.
+  /**
+   * This function adds observers, retrieves the search engine ignore list, and
+   * initializes the Search Engine Selector prior to doing the core tasks of
+   * search service initialization.
+   *
+   */
+  #doPreInitWork() {
+    // We need to catch the region being updated during initialization so we
+    // start listening straight away.
     Services.obs.addObserver(this, lazy.Region.REGION_TOPIC);
 
-    let result = Cr.NS_OK;
-    try {
-      if (
-        Services.env.exists("XPCSHELL_TEST_PROFILE_DIR") &&
-        this.willThrowErrorDuringInitInTest
-      ) {
-        throw new Error("Fake error during search service initialization.");
-      }
+    this.#getIgnoreListAndSubscribe().catch(ex =>
+      console.error(ex, "Search Service could not get the ignore list.")
+    );
 
-      // Create the search engine selector.
+    if (lazy.SearchUtils.newSearchConfigEnabled) {
       this.#engineSelector = new lazy.SearchEngineSelector(
         this.#handleConfigurationUpdated.bind(this)
       );
-
-      // See if we have a settings file so we don't have to parse a bunch of XML.
-      let settings = await this._settings.get();
-
-      this.#setupRemoteSettings().catch(console.error);
-
-      await this.#loadEngines(settings);
-
-      // If we've got this far, but the application is now shutting down,
-      // then we need to abandon any further work, especially not writing
-      // the settings. We do this, because the add-on manager has also
-      // started shutting down and as a result, we might have an incomplete
-      // picture of the installed search engines. Writing the settings at
-      // this stage would potentially mean the user would loose their engine
-      // data.
-      // We will however, rebuild the settings on next start up if we detect
-      // it is necessary.
-      if (Services.startup.shuttingDown) {
-        lazy.logConsole.warn("#init: abandoning init due to shutting down");
-        this.#initializationStatus = "failed";
-        this.#initObservers.reject(Cr.NS_ERROR_ABORT);
-        return Cr.NS_ERROR_ABORT;
-      }
-
-      // Make sure the current list of engines is persisted, without the need to wait.
-      lazy.logConsole.debug("#init: engines loaded, writing settings");
-      this.#initializationStatus = "success";
-      this.#addObservers();
-      this.#initObservers.resolve(result);
-    } catch (error) {
-      this.#initializationStatus = "failed";
-      result = error.result || Cr.NS_ERROR_FAILURE;
-
-      lazy.logConsole.error("#init: failure initializing search:", error);
-      this.#initObservers.reject(result);
+    } else {
+      this.#engineSelector = new lazy.SearchEngineSelectorOld(
+        this.#handleConfigurationUpdated.bind(this)
+      );
     }
+  }
+
+  /**
+   * This function fetches information to load search engines and ensures the
+   * search service is in the correct state for external callers to interact
+   * with it.
+   *
+   * This function sets #initDeferredPromise to resolve or reject.
+   *   | Resolved | when initalization has successfully finished.
+   *   | Rejected | when initialization has failed.
+   */
+  async #init() {
+    lazy.logConsole.debug("init");
+
+    const timerId = Glean.searchService.startupTime.start();
+
+    this.#doPreInitWork();
+
+    let initSection;
+    try {
+      initSection = "Settings";
+      this.#maybeThrowErrorInTest(initSection);
+      const settings = await this._settings.get();
+
+      initSection = "FetchEngines";
+      this.#maybeThrowErrorInTest(initSection);
+      const { engines, privateDefault } =
+        await this._fetchEngineSelectorEngines();
+
+      initSection = "LoadEngines";
+      this.#maybeThrowErrorInTest(initSection);
+      await this.#loadEngines(settings, engines, privateDefault);
+    } catch (ex) {
+      Glean.searchService.initializationStatus[`failed${initSection}`].add();
+      Glean.searchService.startupTime.cancel(timerId);
+
+      lazy.logConsole.error("#init: failure initializing search:", ex);
+      this.#initializationStatus = "failed";
+      this.#initDeferredPromise.reject(ex);
+
+      throw ex;
+    }
+
+    // If we've got this far, but the application is now shutting down,
+    // then we need to abandon any further work, especially not writing
+    // the settings. We do this, because the add-on manager has also
+    // started shutting down and as a result, we might have an incomplete
+    // picture of the installed search engines. Writing the settings at
+    // this stage would potentially mean the user would loose their engine
+    // data.
+    // We will however, rebuild the settings on next start up if we detect
+    // it is necessary.
+    if (Services.startup.shuttingDown) {
+      Glean.searchService.startupTime.cancel(timerId);
+
+      let ex = Components.Exception(
+        "#init: abandoning init due to shutting down",
+        Cr.NS_ERROR_ABORT
+      );
+
+      this.#initializationStatus = "failed";
+      this.#initDeferredPromise.reject(ex);
+      throw ex;
+    }
+
+    this.#initializationStatus = "success";
+    Glean.searchService.initializationStatus.success.add();
+    this.#initDeferredPromise.resolve();
+    this.#addObservers();
+
+    Glean.searchService.startupTime.stopAndAccumulate(timerId);
 
     this.#recordTelemetryData();
 
@@ -1391,7 +1391,16 @@ export class SearchService {
     );
 
     lazy.logConsole.debug("Completed #init");
+    this.#doPostInitWork();
+  }
 
+  /**
+   * This function records telemetry, checks experiment updates, sets up a timer
+   * for opensearch, removes any necessary Add-on engines immediately after the
+   * search service has successfully initialized.
+   *
+   */
+  #doPostInitWork() {
     // It is possible that Nimbus could have called onUpdate before
     // we started listening, so do a check on startup.
     Services.tm.dispatchToMainThread(async () => {
@@ -1401,23 +1410,39 @@ export class SearchService {
 
     this.#maybeStartOpenSearchUpdateTimer();
 
-    return result;
+    if (this.#startupRemovedExtensions.size) {
+      Services.tm.dispatchToMainThread(async () => {
+        // Now that init() has successfully finished, we remove any engines
+        // that have had their add-ons removed by the add-on manager.
+        // We do this after init() has complete, as that allows us to use
+        // removeEngine to look after any default engine changes as well.
+        // This could cause a slight flicker on startup, but it should be
+        // a rare action.
+        lazy.logConsole.debug("Removing delayed extension engines");
+        for (let id of this.#startupRemovedExtensions) {
+          for (let engine of this.#getEnginesByExtensionID(id)) {
+            // Only do this for non-application provided engines. We shouldn't
+            // ever get application provided engines removed here, but just in case.
+            if (!engine.isAppProvided) {
+              await this.removeEngine(engine);
+            }
+          }
+        }
+        this.#startupRemovedExtensions.clear();
+      });
+    }
   }
 
   /**
-   * Obtains the remote settings for the search service. This should only be
+   * Obtains the ignore list from remote settings. This should only be
    * called from init(). Any subsequent updates to the remote settings are
    * handled via a sync listener.
    *
-   * Dumps of remote settings should be available locally to avoid waiting
-   * for the network on startup. For desktop, the dumps are located in
-   * `services/settings/dumps/main/`.
    */
-  async #setupRemoteSettings() {
-    // Now we have the values, listen for future updates.
+  async #getIgnoreListAndSubscribe() {
     let listener = this.#handleIgnoreListUpdated.bind(this);
-
     const current = await lazy.IgnoreLists.getAndSubscribe(listener);
+
     // Only save the listener after the subscribe, otherwise for tests it might
     // not be fully set up by the time we remove it again.
     this.ignoreListListener = listener;
@@ -1451,11 +1476,14 @@ export class SearchService {
       }
     }
 
-    // If we have not finished initializing, then we wait for the initialization
-    // to complete.
-    if (!this.isInitialized) {
-      await this.#initObservers;
+    try {
+      await this.promiseInitialized;
+    } catch (ex) {
+      // If there's a problem with initialization return early to allow
+      // search service to continue in a limited mode without engines.
+      return;
     }
+
     // We try to remove engines manually, as this should be more efficient and
     // we don't really want to cause a re-init as this upsets unit tests.
     let engineRemoved = false;
@@ -1563,8 +1591,12 @@ export class SearchService {
    *
    * @param {object} settings
    *   An object representing the search engine settings.
+   * @param {Array} engines
+   *   An array containing the engines objects from remote settings.
+   * @param {object} privateDefault
+   *   An object representing the private default search engine.
    */
-  async #loadEngines(settings) {
+  async #loadEngines(settings, engines, privateDefault) {
     // Get user's current settings and search engine before we load engines from
     // config. These values will be compared after engines are loaded.
     let prevMetaData = { ...settings?.metaData };
@@ -1572,16 +1604,24 @@ export class SearchService {
     let prevAppDefaultEngineId = prevMetaData?.appDefaultEngineId;
 
     lazy.logConsole.debug("#loadEngines: start");
-    let { engines, privateDefault } = await this._fetchEngineSelectorEngines();
     this.#setDefaultAndOrdersFromSelector(engines, privateDefault);
 
     // We've done what we can without the add-on manager, now ensure that
     // it has finished starting before we continue.
-    await lazy.AddonManager.readyPromise;
+    if (!lazy.SearchUtils.newSearchConfigEnabled) {
+      await lazy.AddonManager.readyPromise;
+    }
 
     let newEngines = await this.#loadEnginesFromConfig(engines);
     for (let engine of newEngines) {
       this.#addEngineToStore(engine);
+    }
+
+    if (
+      this.#startupExtensions.size &&
+      lazy.SearchUtils.newSearchConfigEnabled
+    ) {
+      await lazy.AddonManager.readyPromise;
     }
 
     lazy.logConsole.debug(
@@ -2085,77 +2125,28 @@ export class SearchService {
 
     lazy.logConsole.debug("#addEngineToStore: Adding engine:", engine.name);
 
-    // See if there is an existing engine with the same name. However, if this
-    // engine is updating another engine, it's allowed to have the same name.
-    var hasSameNameAsUpdate =
-      engine._engineToUpdate && engine.name == engine._engineToUpdate.name;
-    if (
-      !skipDuplicateCheck &&
-      this.#getEngineByName(engine.name) &&
-      !hasSameNameAsUpdate
-    ) {
+    // See if there is an existing engine with the same name.
+    if (!skipDuplicateCheck && this.#getEngineByName(engine.name)) {
       lazy.logConsole.debug(
         "#addEngineToStore: Duplicate engine found, aborting!"
       );
       return;
     }
 
-    if (engine._engineToUpdate) {
-      // Update the old engine by copying over the properties of the new engine
-      // that is loaded. It is necessary to copy over all the "private"
-      // properties (those without a getter or setter) from one object to the
-      // other. Other callers may hold a reference to the old engine, therefore,
-      // anywhere else that has a reference to the old engine will receive
-      // the properties that are updated because those other callers
-      // are referencing the same nsISearchEngine object in memory.
-      for (let p in engine) {
-        if (
-          !(
-            Object.getOwnPropertyDescriptor(engine, p)?.get ||
-            Object.getOwnPropertyDescriptor(engine, p)?.set
-          )
-        ) {
-          engine._engineToUpdate[p] = engine[p];
-        }
-      }
-
-      // The old engine is now updated
-      engine = engine._engineToUpdate;
-      engine._engineToUpdate = null;
-
-      // Update the engine Map with the updated engine
-      this._engines.set(engine.id, engine);
-
-      lazy.SearchUtils.notifyAction(
-        engine,
-        lazy.SearchUtils.MODIFIED_TYPE.CHANGED
-      );
-    } else {
-      // Not an update, just add the new engine.
-      this._engines.set(engine.id, engine);
-      // Only add the engine to the list of sorted engines if the initial list
-      // has already been built (i.e. if this._cachedSortedEngines is non-null). If
-      // it hasn't, we're loading engines from disk and the sorted engine list
-      // will be built once we need it.
-      if (this._cachedSortedEngines && !this.#dontSetUseSavedOrder) {
-        this._cachedSortedEngines.push(engine);
-        this.#saveSortedEngineList();
-      }
-      lazy.SearchUtils.notifyAction(
-        engine,
-        lazy.SearchUtils.MODIFIED_TYPE.ADDED
-      );
+    // Not an update, just add the new engine.
+    this._engines.set(engine.id, engine);
+    // Only add the engine to the list of sorted engines if the initial list
+    // has already been built (i.e. if this._cachedSortedEngines is non-null). If
+    // it hasn't, we're loading engines from disk and the sorted engine list
+    // will be built once we need it.
+    if (this._cachedSortedEngines && !this.#dontSetUseSavedOrder) {
+      this._cachedSortedEngines.push(engine);
+      this.#saveSortedEngineList();
     }
+    lazy.SearchUtils.notifyAction(engine, lazy.SearchUtils.MODIFIED_TYPE.ADDED);
 
     // Let the engine know it can start notifying new updates.
     engine._engineAddedToStore = true;
-
-    if (engine._hasUpdates) {
-      // Schedule the engine's next update, if it isn't already.
-      if (!engine.getAttr("updateexpir")) {
-        engineUpdateService.scheduleNextUpdate(engine);
-      }
-    }
   }
 
   #loadEnginesMetadataFromSettings(engineSettings) {
@@ -2325,14 +2316,28 @@ export class SearchService {
 
   #setDefaultAndOrdersFromSelector(engines, privateDefault) {
     const defaultEngine = engines[0];
+    if (!lazy.SearchUtils.newSearchConfigEnabled) {
+      this._searchDefault = {
+        id: defaultEngine.webExtension.id,
+        locale: defaultEngine.webExtension.locale,
+      };
+      if (privateDefault) {
+        this.#searchPrivateDefault = {
+          id: privateDefault.webExtension.id,
+          locale: privateDefault.webExtension.locale,
+        };
+      }
+      return;
+    }
+
     this._searchDefault = {
-      id: defaultEngine.webExtension.id,
-      locale: defaultEngine.webExtension.locale,
+      id: defaultEngine.identifier,
+      locale: "default",
     };
     if (privateDefault) {
       this.#searchPrivateDefault = {
-        id: privateDefault.webExtension.id,
-        locale: privateDefault.webExtension.locale,
+        id: privateDefault.identifier,
+        locale: "default",
       };
     }
   }
@@ -2566,7 +2571,7 @@ export class SearchService {
       engine = elem[1];
       if (engine instanceof lazy.OpenSearchEngine) {
         searchURI = engine.searchURLWithNoTerms;
-        updateURI = engine._updateURI;
+        updateURI = engine.updateURI;
 
         if (lazy.SearchUtils.isSecureURIForOpenSearch(searchURI)) {
           totalSecure++;
@@ -2611,7 +2616,7 @@ export class SearchService {
    *   The locale to use within the WebExtension. Defaults to the WebExtension's
    *   default locale.
    * @param {initEngine} [options.initEngine]
-   *   Set to true if this engine is being loaded during initialisation.
+   *   Set to true if this engine is being loaded during initialization.
    */
   async _createAndAddEngine({
     extension,
@@ -3197,6 +3202,26 @@ export class SearchService {
     }
   }
 
+  /**
+   * This function is called at the beginning of search service init.
+   * If the error type set in a test environment matches errorType
+   * passed to this function, we throw an error.
+   *
+   * @param {string} errorType
+   *   The error that can occur during search service init.
+   *
+   */
+  #maybeThrowErrorInTest(errorType) {
+    if (
+      Services.env.exists("XPCSHELL_TEST_PROFILE_DIR") &&
+      this.errorToThrowInTest === errorType
+    ) {
+      throw new Error(
+        `Fake ${errorType} error during search service initialization.`
+      );
+    }
+  }
+
   #buildParseSubmissionMap() {
     this.#parseSubmissionMap = new Map();
 
@@ -3416,16 +3441,6 @@ export class SearchService {
     switch (topic) {
       case lazy.SearchUtils.TOPIC_ENGINE_MODIFIED:
         switch (verb) {
-          case lazy.SearchUtils.MODIFIED_TYPE.LOADED:
-            engine = engine.QueryInterface(Ci.nsISearchEngine);
-            lazy.logConsole.debug(
-              "observe: Done installation of ",
-              engine.name
-            );
-            this.#addEngineToStore(engine.wrappedJSObject);
-            // The addition of the engine to the store always triggers an ADDED
-            // or a CHANGED notification, that will trigger the task below.
-            break;
           case lazy.SearchUtils.MODIFIED_TYPE.ADDED:
           case lazy.SearchUtils.MODIFIED_TYPE.CHANGED:
           case lazy.SearchUtils.MODIFIED_TYPE.REMOVED:
@@ -3493,23 +3508,28 @@ export class SearchService {
    */
   async _makeEngineFromConfig(config) {
     lazy.logConsole.debug("_makeEngineFromConfig:", config);
-    let locale =
-      "locale" in config.webExtension
-        ? config.webExtension.locale
-        : lazy.SearchUtils.DEFAULT_TAG;
 
-    let engine = new lazy.AddonSearchEngine({
-      isAppProvided: true,
-      details: {
-        extensionID: config.webExtension.id,
+    if (!lazy.SearchUtils.newSearchConfigEnabled) {
+      let locale =
+        "locale" in config.webExtension
+          ? config.webExtension.locale
+          : lazy.SearchUtils.DEFAULT_TAG;
+
+      let engine = new lazy.AddonSearchEngine({
+        isAppProvided: true,
+        details: {
+          extensionID: config.webExtension.id,
+          locale,
+        },
+      });
+      await engine.init({
         locale,
-      },
-    });
-    await engine.init({
-      locale,
-      config,
-    });
-    return engine;
+        config,
+      });
+      return engine;
+    }
+
+    return new lazy.AppProvidedSearchEngine(config);
   }
 
   /**
@@ -3573,8 +3593,8 @@ export class SearchService {
       return;
     }
 
-    let engineWithUpdates = [...this._engines.values()].find(
-      engine => engine instanceof lazy.OpenSearchEngine && engine._hasUpdates
+    let engineWithUpdates = [...this._engines.values()].some(
+      engine => engine instanceof lazy.OpenSearchEngine && engine.hasUpdates
     );
 
     if (engineWithUpdates) {
@@ -3589,49 +3609,6 @@ export class SearchService {
     }
   }
 } // end SearchService class
-
-var engineUpdateService = {
-  scheduleNextUpdate(engine) {
-    var interval = engine._updateInterval || OPENSEARCH_DEFAULT_UPDATE_INTERVAL;
-    var milliseconds = interval * 86400000; // |interval| is in days
-    engine.setAttr("updateexpir", Date.now() + milliseconds);
-  },
-
-  update(engine) {
-    engine = engine.wrappedJSObject;
-    lazy.logConsole.debug("update called for", engine._name);
-    if (
-      !Services.prefs.getBoolPref(
-        lazy.SearchUtils.BROWSER_SEARCH_PREF + "update",
-        true
-      ) ||
-      !engine._hasUpdates
-    ) {
-      return;
-    }
-
-    let testEngine = null;
-    let updateURI = engine._updateURI;
-    if (updateURI) {
-      lazy.logConsole.debug("updating", engine.name, updateURI.spec);
-      testEngine = new lazy.OpenSearchEngine();
-      testEngine._engineToUpdate = engine;
-      try {
-        testEngine.install(updateURI);
-      } catch (ex) {
-        lazy.logConsole.error("Failed to update", engine.name, ex);
-      }
-    } else {
-      lazy.logConsole.debug("invalid updateURI");
-    }
-
-    if (engine._iconUpdateURL) {
-      // If we're updating the engine too, use the new engine object,
-      // otherwise use the existing engine object.
-      (testEngine || engine)._setIcon(engine._iconUpdateURL, true);
-    }
-  },
-};
 
 XPCOMUtils.defineLazyServiceGetter(
   SearchService.prototype,

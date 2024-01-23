@@ -867,7 +867,7 @@ void NativeLayerCA::AttachExternalImage(wr::RenderTextureHost* aExternalImage) {
 
   wr::RenderMacIOSurfaceTextureHost* texture =
       aExternalImage->AsRenderMacIOSurfaceTextureHost();
-  MOZ_ASSERT(texture || aExternalImage->IsWrappingAsyncRemoteTexture());
+  MOZ_ASSERT(texture);
   mTextureHost = texture;
   if (!mTextureHost) {
     gfxCriticalNoteOnce << "ExternalImage is not RenderMacIOSurfaceTextureHost";
@@ -1735,7 +1735,6 @@ bool NativeLayerCA::Representation::ApplyChanges(
     mContentCALayer = nil;
     [mOpaquenessTintLayer release];
     mOpaquenessTintLayer = nil;
-    [mWrappingCALayer removeFromSuperlayer];
     [mWrappingCALayer release];
     mWrappingCALayer = nil;
   }

@@ -224,6 +224,25 @@ class MOZ_STACK_CLASS InitExprInterpreter {
     return pushRef(RefType::fromTypeDef(&typeDef, false),
                    AnyRef::fromJSObject(*arrayObj));
   }
+
+  bool evalI31New(JSContext* cx) {
+    uint32_t value = stack.back().i32();
+    stack.popBack();
+    return pushRef(RefType::i31().asNonNullable(),
+                   AnyRef::fromUint32Truncate(value));
+  }
+
+  bool evalAnyConvertExtern(JSContext* cx) {
+    AnyRef ref = stack.back().ref();
+    stack.popBack();
+    return pushRef(RefType::extern_(), ref);
+  }
+
+  bool evalExternConvertAny(JSContext* cx) {
+    AnyRef ref = stack.back().ref();
+    stack.popBack();
+    return pushRef(RefType::any(), ref);
+  }
 #endif  // ENABLE_WASM_GC
 };
 
@@ -380,6 +399,15 @@ bool InitExprInterpreter::evaluate(JSContext* cx, Decoder& d) {
             }
             CHECK(evalArrayNewDefault(cx, typeIndex));
           }
+          case uint32_t(GcOp::RefI31): {
+            CHECK(evalI31New(cx));
+          }
+          case uint32_t(GcOp::AnyConvertExtern): {
+            CHECK(evalAnyConvertExtern(cx));
+          }
+          case uint32_t(GcOp::ExternConvertAny): {
+            CHECK(evalExternConvertAny(cx));
+          }
           default: {
             MOZ_CRASH();
           }
@@ -397,12 +425,10 @@ bool InitExprInterpreter::evaluate(JSContext* cx, Decoder& d) {
 }
 
 bool wasm::DecodeConstantExpression(Decoder& d, ModuleEnvironment* env,
-                                    ValType expected,
-                                    uint32_t maxInitializedGlobalsIndexPlus1,
-                                    Maybe<LitVal>* literal) {
+                                    ValType expected, Maybe<LitVal>* literal) {
   ValidatingOpIter iter(*env, d, ValidatingOpIter::InitExpr);
 
-  if (!iter.startInitExpr(expected, maxInitializedGlobalsIndexPlus1)) {
+  if (!iter.startInitExpr(expected)) {
     return false;
   }
 
@@ -583,6 +609,31 @@ bool wasm::DecodeConstantExpression(Decoder& d, ModuleEnvironment* env,
             }
             break;
           }
+          case uint32_t(GcOp::RefI31): {
+            Nothing value;
+            if (!iter.readConversion(ValType::I32,
+                                     ValType(RefType::i31().asNonNullable()),
+                                     &value)) {
+              return false;
+            }
+            break;
+          }
+          case uint32_t(GcOp::AnyConvertExtern): {
+            Nothing value;
+            if (!iter.readRefConversion(RefType::extern_(), RefType::any(),
+                                        &value)) {
+              return false;
+            }
+            break;
+          }
+          case uint32_t(GcOp::ExternConvertAny): {
+            Nothing value;
+            if (!iter.readRefConversion(RefType::any(), RefType::extern_(),
+                                        &value)) {
+              return false;
+            }
+            break;
+          }
           default: {
             return iter.unrecognizedOpcode(&op);
           }
@@ -599,13 +650,10 @@ bool wasm::DecodeConstantExpression(Decoder& d, ModuleEnvironment* env,
 }
 
 bool InitExpr::decodeAndValidate(Decoder& d, ModuleEnvironment* env,
-                                 ValType expected,
-                                 uint32_t maxInitializedGlobalsIndexPlus1,
-                                 InitExpr* expr) {
+                                 ValType expected, InitExpr* expr) {
   Maybe<LitVal> literal = Nothing();
   const uint8_t* exprStart = d.currentPosition();
-  if (!DecodeConstantExpression(d, env, expected,
-                                maxInitializedGlobalsIndexPlus1, &literal)) {
+  if (!DecodeConstantExpression(d, env, expected, &literal)) {
     return false;
   }
   const uint8_t* exprEnd = d.currentPosition();
@@ -625,15 +673,20 @@ bool InitExpr::decodeAndValidate(Decoder& d, ModuleEnvironment* env,
          expr->bytecode_.append(exprStart, exprEnd);
 }
 
-bool InitExpr::decodeAndEvaluate(JSContext* cx,
-                                 Handle<WasmInstanceObject*> instanceObj,
-                                 Decoder& d, MutableHandleVal result) {
+/* static */ bool InitExpr::decodeAndEvaluate(
+    JSContext* cx, Handle<WasmInstanceObject*> instanceObj, Decoder& d,
+    ValType expectedType, MutableHandleVal result) {
   InitExprInterpreter interp(cx, instanceObj);
   if (!interp.evaluate(cx, d)) {
     return false;
   }
 
-  result.set(interp.result());
+  Val interpResult = interp.result();
+  // The interpreter evaluation stack does not track the precise type of values.
+  // Users of the result expect the precise type though, so we need to overwrite
+  // it with the one we validated with.
+  interpResult.unsafeSetType(expectedType);
+  result.set(interpResult);
   return true;
 }
 
@@ -648,7 +701,7 @@ bool InitExpr::evaluate(JSContext* cx, Handle<WasmInstanceObject*> instanceObj,
 
   UniqueChars error;
   Decoder d(bytecode_.begin(), bytecode_.end(), 0, &error);
-  if (!decodeAndEvaluate(cx, instanceObj, d, result)) {
+  if (!decodeAndEvaluate(cx, instanceObj, d, type_, result)) {
     // This expression should have been validated already. So we should only be
     // able to OOM, which is reported by having no error message.
     MOZ_RELEASE_ASSERT(!error);

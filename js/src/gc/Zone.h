@@ -74,9 +74,12 @@ using StringWrapperMap =
     NurseryAwareHashMap<JSString*, JSString*, ZoneAllocPolicy,
                         DuplicatesPossible>;
 
+// Cache for NewMaybeExternalString. It has cache entries for both the
+// Latin1 JSInlineString path and JSExternalString.
 class MOZ_NON_TEMPORARY_CLASS ExternalStringCache {
   static const size_t NumEntries = 4;
-  mozilla::Array<JSString*, NumEntries> entries_;
+  mozilla::Array<JSExternalString*, NumEntries> externalEntries_;
+  mozilla::Array<JSInlineString*, NumEntries> inlineEntries_;
 
  public:
   ExternalStringCache() { purge(); }
@@ -84,10 +87,30 @@ class MOZ_NON_TEMPORARY_CLASS ExternalStringCache {
   ExternalStringCache(const ExternalStringCache&) = delete;
   void operator=(const ExternalStringCache&) = delete;
 
-  void purge() { mozilla::PodArrayZero(entries_); }
+  void purge() {
+    externalEntries_ = {};
+    inlineEntries_ = {};
+  }
 
-  MOZ_ALWAYS_INLINE JSString* lookup(const char16_t* chars, size_t len) const;
-  MOZ_ALWAYS_INLINE void put(JSString* s);
+  MOZ_ALWAYS_INLINE JSExternalString* lookupExternal(
+      const JS::Latin1Char* chars, size_t len) const;
+  MOZ_ALWAYS_INLINE JSExternalString* lookupExternal(const char16_t* chars,
+                                                     size_t len) const;
+  MOZ_ALWAYS_INLINE void putExternal(JSExternalString* s);
+
+  MOZ_ALWAYS_INLINE JSInlineString* lookupInline(const JS::Latin1Char* chars,
+                                                 size_t len) const;
+  MOZ_ALWAYS_INLINE JSInlineString* lookupInline(const char16_t* chars,
+                                                 size_t len) const;
+  MOZ_ALWAYS_INLINE void putInline(JSInlineString* s);
+
+ private:
+  template <typename CharT>
+  MOZ_ALWAYS_INLINE JSExternalString* lookupExternalImpl(const CharT* chars,
+                                                         size_t len) const;
+  template <typename CharT>
+  MOZ_ALWAYS_INLINE JSInlineString* lookupInlineImpl(const CharT* chars,
+                                                     size_t len) const;
 };
 
 class MOZ_NON_TEMPORARY_CLASS FunctionToStringCache {
@@ -171,12 +194,6 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
   // Per-zone data for use by an embedder.
   js::MainThreadData<void*> data;
 
-  js::MainThreadData<uint32_t> tenuredBigInts;
-
-  // Number of marked/finalized JSStrings/JSFatInlineStrings during major GC.
-  js::MainThreadOrGCTaskData<size_t> markedStrings;
-  js::MainThreadOrGCTaskData<size_t> finalizedStrings;
-
   // When true, skip calling the metadata callback. We use this:
   // - to avoid invoking the callback recursively;
   // - to avoid observing lazy prototype setup (which confuses callbacks that
@@ -247,7 +264,7 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
 
   // List of non-ephemeron weak containers to sweep during
   // beginSweepingSweepGroup.
-  js::MainThreadOrGCTaskData<mozilla::LinkedList<detail::WeakCacheBase>>
+  js::MainThreadOrGCTaskData<mozilla::LinkedList<js::gc::WeakCacheBase>>
       weakCaches_;
 
   // Mapping from not yet marked keys to a vector of all values that the key
@@ -336,7 +353,6 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
 
   struct DiscardOptions {
     DiscardOptions() {}
-    bool discardBaselineCode = true;
     bool discardJitScripts = false;
     bool resetNurseryAllocSites = false;
     bool resetPretenuredAllocSites = false;
@@ -360,7 +376,7 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
 
   void addSizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf,
                               JS::CodeSizes* code, size_t* regexpZone,
-                              size_t* jitZone, size_t* baselineStubsOptimized,
+                              size_t* jitZone, size_t* cacheIRStubs,
                               size_t* uniqueIdMap, size_t* initialPropMapTable,
                               size_t* shapeTables, size_t* atomsMarkBitmaps,
                               size_t* compartmentObjects,
@@ -523,7 +539,11 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
     }
   }
   bool allocNurseryObjects() const { return allocNurseryObjects_; }
+
+  // Note that this covers both allocating JSStrings themselves in the nursery,
+  // as well as (possibly) the character data.
   bool allocNurseryStrings() const { return allocNurseryStrings_; }
+
   bool allocNurseryBigInts() const { return allocNurseryBigInts_; }
 
   js::gc::Heap minHeapToTenure(JS::TraceKind kind) const {
@@ -539,10 +559,10 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
     }
   }
 
-  mozilla::LinkedList<detail::WeakCacheBase>& weakCaches() {
+  mozilla::LinkedList<js::gc::WeakCacheBase>& weakCaches() {
     return weakCaches_.ref();
   }
-  void registerWeakCache(detail::WeakCacheBase* cachep) {
+  void registerWeakCache(js::gc::WeakCacheBase* cachep) {
     weakCaches().insertBack(cachep);
   }
 
@@ -622,8 +642,8 @@ class Zone : public js::ZoneAllocator, public js::gc::GraphNodeBase<JS::Zone> {
   void clearScriptLCov(Realm* realm);
 
   // Add the target of JS WeakRef to a kept-alive set maintained by GC.
-  // See: https://tc39.es/proposal-weakrefs/#sec-keepduringjob
-  bool keepDuringJob(HandleObject target);
+  // https://tc39.es/ecma262/#sec-addtokeptobjects
+  bool addToKeptObjects(HandleObject target);
 
   void traceKeptObjects(JSTracer* trc);
 

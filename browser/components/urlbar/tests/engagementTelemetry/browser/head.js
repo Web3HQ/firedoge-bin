@@ -35,6 +35,12 @@ ChromeUtils.defineESModuleGetters(lazy, {
   sinon: "resource://testing-common/Sinon.sys.mjs",
 });
 
+ChromeUtils.defineLazyGetter(this, "PlacesFrecencyRecalculator", () => {
+  return Cc["@mozilla.org/places/frecency-recalculator;1"].getService(
+    Ci.nsIObserver
+  ).wrappedJSObject;
+});
+
 async function addTopSites(url) {
   for (let i = 0; i < 5; i++) {
     await PlacesTestUtils.addVisits(url);
@@ -84,14 +90,10 @@ function _assertGleanTelemetry(telemetryName, expectedExtraList) {
   }
 }
 
-async function ensureQuickSuggestInit({
-  merinoSuggestions = undefined,
-  config = undefined,
-} = {}) {
+async function ensureQuickSuggestInit({ ...args } = {}) {
   return lazy.QuickSuggestTestUtils.ensureQuickSuggestInit({
-    config,
-    merinoSuggestions,
-    remoteSettingsResults: [
+    ...args,
+    remoteSettingsRecords: [
       {
         type: "data",
         attachment: [
@@ -104,6 +106,7 @@ async function ensureQuickSuggestInit({
             impression_url: "https://example.com/impression",
             advertiser: "TestAdvertiser",
             iab_category: "22 - Shopping",
+            icon: "1234",
           },
           {
             id: 2,
@@ -112,8 +115,9 @@ async function ensureQuickSuggestInit({
             keywords: ["nonsponsored"],
             click_url: "https://example.com/click",
             impression_url: "https://example.com/impression",
-            advertiser: "TestAdvertiser",
+            advertiser: "Wikipedia",
             iab_category: "5 - Education",
+            icon: "1234",
           },
         ],
       },

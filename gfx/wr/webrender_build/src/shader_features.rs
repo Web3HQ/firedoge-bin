@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 bitflags! {
-    #[derive(Default)]
+    #[derive(Default, Debug, Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
     pub struct ShaderFeatureFlags: u32 {
         const GL = 1 << 0;
         const GLES = 1 << 1;
@@ -15,7 +15,8 @@ bitflags! {
         const DITHERING = 1 << 10;
         const TEXTURE_EXTERNAL = 1 << 11;
         const TEXTURE_EXTERNAL_ESSL1 = 1 << 12;
-        const DEBUG = 1 << 13;
+        const TEXTURE_EXTERNAL_BT709 = 1 << 13;
+        const DEBUG = 1 << 14;
     }
 }
 
@@ -137,6 +138,9 @@ pub fn get_shader_features(flags: ShaderFeatureFlags) -> ShaderFeatures {
     }
     if flags.contains(ShaderFeatureFlags::TEXTURE_EXTERNAL) {
         texture_types.push("TEXTURE_EXTERNAL");
+    }
+    if flags.contains(ShaderFeatureFlags::TEXTURE_EXTERNAL_BT709) {
+        texture_types.push("TEXTURE_EXTERNAL_BT709");
     }
     let mut image_features: Vec<String> = Vec::new();
     for texture_type in &texture_types {

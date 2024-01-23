@@ -22,7 +22,9 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPrefs_javascript.h"
+#include "mozilla/TaskController.h"
 #include "mozilla/Telemetry.h"
+#include "mozilla/Try.h"
 #include "mozilla/Unused.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/ContentParent.h"
@@ -30,9 +32,9 @@
 #include "mozilla/scache/StartupCache.h"
 
 #include "crc32c.h"
-#include "js/CompileOptions.h"          // JS::ReadOnlyCompileOptions
-#include "js/experimental/JSStencil.h"  // JS::Stencil, JS::DecodeStencil
-#include "js/experimental/CompileScript.h"  // JS::NewFrontendContext, JS::DestroyFrontendContext
+#include "js/CompileOptions.h"              // JS::ReadOnlyCompileOptions
+#include "js/experimental/JSStencil.h"      // JS::Stencil, JS::DecodeStencil
+#include "js/experimental/CompileScript.h"  // JS::NewFrontendContext, JS::DestroyFrontendContext, JS::SetNativeStackQuota, JS::ThreadStackQuotaForSize
 #include "js/Transcoding.h"
 #include "MainThreadUtils.h"
 #include "nsDebug.h"
@@ -1216,9 +1218,8 @@ NS_IMETHODIMP ScriptPreloader::DecodeTask::Run() {
 
   auto cleanup = MakeScopeExit([&]() { JS::DestroyFrontendContext(fc); });
 
-  const size_t kDefaultStackQuota = 128 * sizeof(size_t) * 1024;
-
-  JS::SetNativeStackQuota(fc, kDefaultStackQuota);
+  size_t stackSize = TaskController::GetThreadStackSize();
+  JS::SetNativeStackQuota(fc, JS::ThreadStackQuotaForSize(stackSize));
 
   size_t remaining = mDecodingSources.length();
   for (auto& source : mDecodingSources) {

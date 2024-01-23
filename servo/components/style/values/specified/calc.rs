@@ -6,27 +6,22 @@
 //!
 //! [calc]: https://drafts.csswg.org/css-values/#calc-notation
 
+use crate::color::parsing::{AngleOrNumber, NumberOrPercentage};
 use crate::parser::ParserContext;
-use crate::values::generics::calc::{self as generic, CalcNodeLeaf, CalcUnits};
-use crate::values::generics::calc::{MinMaxOp, ModRemOp, RoundingStrategy, SortKey};
+use crate::values::generics::calc::{
+    self as generic, CalcNodeLeaf, CalcUnits, MinMaxOp, ModRemOp, PositivePercentageBasis,
+    RoundingStrategy, SortKey,
+};
 use crate::values::specified::length::{AbsoluteLength, FontRelativeLength, NoCalcLength};
 use crate::values::specified::length::{ContainerRelativeLength, ViewportPercentageLength};
 use crate::values::specified::{self, Angle, Resolution, Time};
 use crate::values::{serialize_number, serialize_percentage, CSSFloat, CSSInteger};
-use cssparser::{AngleOrNumber, CowRcStr, NumberOrPercentage, Parser, Token};
+use cssparser::{CowRcStr, Parser, Token};
 use smallvec::SmallVec;
 use std::cmp;
 use std::fmt::{self, Write};
 use style_traits::values::specified::AllowedNumericType;
 use style_traits::{CssWriter, ParseError, SpecifiedValueInfo, StyleParseErrorKind, ToCss};
-
-fn trig_enabled() -> bool {
-    static_prefs::pref!("layout.css.trig.enabled")
-}
-
-fn nan_inf_enabled() -> bool {
-    static_prefs::pref!("layout.css.nan-inf.enabled")
-}
 
 /// The name of the mathematical function that we're parsing.
 #[derive(Clone, Copy, Debug, Parse)]
@@ -151,38 +146,6 @@ impl CalcLengthPercentage {
 
 impl SpecifiedValueInfo for CalcLengthPercentage {}
 
-impl PartialOrd for Leaf {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        use self::Leaf::*;
-
-        if std::mem::discriminant(self) != std::mem::discriminant(other) {
-            return None;
-        }
-
-        match (self, other) {
-            // NOTE: Percentages can't be compared reasonably here because the
-            // percentage basis might be negative, see bug 1709018.
-            // Conveniently, we only use this for <length-percentage> (for raw
-            // percentages, we go through resolve()).
-            (&Percentage(..), &Percentage(..)) => None,
-            (&Length(ref one), &Length(ref other)) => one.partial_cmp(other),
-            (&Angle(ref one), &Angle(ref other)) => one.degrees().partial_cmp(&other.degrees()),
-            (&Time(ref one), &Time(ref other)) => one.seconds().partial_cmp(&other.seconds()),
-            (&Resolution(ref one), &Resolution(ref other)) => one.dppx().partial_cmp(&other.dppx()),
-            (&Number(ref one), &Number(ref other)) => one.partial_cmp(other),
-            _ => {
-                match *self {
-                    Length(..) | Percentage(..) | Angle(..) | Time(..) | Number(..) |
-                    Resolution(..) => {},
-                }
-                unsafe {
-                    debug_unreachable!("Forgot a branch?");
-                }
-            },
-        }
-    }
-}
-
 impl generic::CalcNodeLeaf for Leaf {
     fn unit(&self) -> CalcUnits {
         match self {
@@ -207,6 +170,35 @@ impl generic::CalcNodeLeaf for Leaf {
 
     fn new_number(value: f32) -> Self {
         Self::Number(value)
+    }
+
+    fn compare(&self, other: &Self, basis: PositivePercentageBasis) -> Option<cmp::Ordering> {
+        use self::Leaf::*;
+
+        if std::mem::discriminant(self) != std::mem::discriminant(other) {
+            return None;
+        }
+
+        match (self, other) {
+            (&Percentage(ref one), &Percentage(ref other)) => match basis {
+                PositivePercentageBasis::Yes => one.partial_cmp(other),
+                PositivePercentageBasis::Unknown => None,
+            },
+            (&Length(ref one), &Length(ref other)) => one.partial_cmp(other),
+            (&Angle(ref one), &Angle(ref other)) => one.degrees().partial_cmp(&other.degrees()),
+            (&Time(ref one), &Time(ref other)) => one.seconds().partial_cmp(&other.seconds()),
+            (&Resolution(ref one), &Resolution(ref other)) => one.dppx().partial_cmp(&other.dppx()),
+            (&Number(ref one), &Number(ref other)) => one.partial_cmp(other),
+            _ => {
+                match *self {
+                    Length(..) | Percentage(..) | Angle(..) | Time(..) | Number(..) |
+                    Resolution(..) => {},
+                }
+                unsafe {
+                    debug_unreachable!("Forgot a branch?");
+                }
+            },
+        }
     }
 
     fn as_number(&self) -> Option<f32> {
@@ -236,6 +228,8 @@ impl generic::CalcNodeLeaf for Leaf {
                     FontRelativeLength::Cap(..) => SortKey::Cap,
                     FontRelativeLength::Ic(..) => SortKey::Ic,
                     FontRelativeLength::Rem(..) => SortKey::Rem,
+                    FontRelativeLength::Lh(..) => SortKey::Lh,
+                    FontRelativeLength::Rlh(..) => SortKey::Rlh,
                 },
                 NoCalcLength::ViewportPercentage(ref vp) => match *vp {
                     ViewportPercentageLength::Vh(..) => SortKey::Vh,
@@ -466,11 +460,11 @@ impl CalcNode {
             },
             &Token::Ident(ref ident) => {
                 let number = match_ignore_ascii_case! { &**ident,
-                    "e" if trig_enabled() => std::f32::consts::E,
-                    "pi" if trig_enabled() => std::f32::consts::PI,
-                    "infinity" if nan_inf_enabled() => f32::INFINITY,
-                    "-infinity" if nan_inf_enabled() => f32::NEG_INFINITY,
-                    "nan" if nan_inf_enabled() => f32::NAN,
+                    "e" => std::f32::consts::E,
+                    "pi" => std::f32::consts::PI,
+                    "infinity" => f32::INFINITY,
+                    "-infinity" => f32::NEG_INFINITY,
+                    "nan" => f32::NAN,
                     _ => return Err(location.new_unexpected_token_error(Token::Ident(ident.clone()))),
                 };
                 Ok(CalcNode::Leaf(Leaf::Number(number)))
@@ -676,9 +670,7 @@ impl CalcNode {
                 },
                 MathFunction::Exp => {
                     let a = Self::parse_number_argument(context, input)?;
-
                     let number = a.exp();
-
                     Ok(Self::Leaf(Leaf::Number(number)))
                 },
                 MathFunction::Abs => {
@@ -686,7 +678,11 @@ impl CalcNode {
                     Ok(Self::Abs(Box::new(node)))
                 },
                 MathFunction::Sign => {
-                    let node = Self::parse_argument(context, input, CalcUnits::all())?;
+                    // The sign of a percentage is dependent on the percentage basis, so if
+                    // percentages aren't allowed (so there's no basis) we shouldn't allow them in
+                    // sign(). The rest of the units are safe tho.
+                    let sign_units = allowed_units | (CalcUnits::ALL - CalcUnits::PERCENTAGE);
+                    let node = Self::parse_argument(context, input, sign_units)?;
                     Ok(Self::Sign(Box::new(node)))
                 },
             }
@@ -859,7 +855,7 @@ impl CalcNode {
 
     /// Tries to simplify this expression into a `<length>` or `<percentage>`
     /// value.
-    fn into_length_or_percentage(
+    pub fn into_length_or_percentage(
         mut self,
         clamping_mode: AllowedNumericType,
     ) -> Result<CalcLengthPercentage, ()> {
@@ -887,11 +883,7 @@ impl CalcNode {
         };
 
         Ok(Time::from_seconds_with_calc_clamping_mode(
-            if nan_inf_enabled() {
-                seconds
-            } else {
-                crate::values::normalize(seconds)
-            },
+            seconds,
             clamping_mode,
         ))
     }
@@ -904,11 +896,7 @@ impl CalcNode {
             return Err(());
         };
 
-        Ok(Resolution::from_dppx_calc(if nan_inf_enabled() {
-            dppx
-        } else {
-            crate::values::normalize(dppx)
-        }))
+        Ok(Resolution::from_dppx_calc(dppx))
     }
 
     /// Tries to simplify this expression into an `Angle` value.
@@ -919,11 +907,7 @@ impl CalcNode {
             return Err(());
         };
 
-        let result = Angle::from_calc(if nan_inf_enabled() {
-            degrees
-        } else {
-            crate::values::normalize(degrees)
-        });
+        let result = Angle::from_calc(degrees);
         Ok(result)
     }
 
@@ -935,11 +919,8 @@ impl CalcNode {
             return Err(());
         };
 
-        let result = if nan_inf_enabled() {
-            number
-        } else {
-            crate::values::normalize(number)
-        };
+        let result = number;
+
         Ok(result)
     }
 
@@ -956,38 +937,16 @@ impl CalcNode {
     /// return a mathematical function corresponding to that name or an error.
     #[inline]
     pub fn math_function<'i>(
-        context: &ParserContext,
+        _: &ParserContext,
         name: &CowRcStr<'i>,
         location: cssparser::SourceLocation,
     ) -> Result<MathFunction, ParseError<'i>> {
-        use self::MathFunction::*;
-
         let function = match MathFunction::from_ident(&*name) {
             Ok(f) => f,
             Err(()) => {
                 return Err(location.new_unexpected_token_error(Token::Function(name.clone())))
             },
         };
-
-        let enabled = if context.chrome_rules_enabled() {
-            true
-        } else if matches!(function, Sin | Cos | Tan | Asin | Acos | Atan | Atan2) {
-            trig_enabled()
-        } else if matches!(function, Round) {
-            static_prefs::pref!("layout.css.round.enabled")
-        } else if matches!(function, Mod | Rem) {
-            static_prefs::pref!("layout.css.mod-rem.enabled")
-        } else if matches!(function, Pow | Sqrt | Hypot | Log | Exp) {
-            static_prefs::pref!("layout.css.exp.enabled")
-        } else if matches!(function, Abs | Sign) {
-            static_prefs::pref!("layout.css.abs-sign.enabled")
-        } else {
-            true
-        };
-
-        if !enabled {
-            return Err(location.new_unexpected_token_error(Token::Function(name.clone())));
-        }
 
         Ok(function)
     }

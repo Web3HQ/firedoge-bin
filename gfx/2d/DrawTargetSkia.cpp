@@ -474,7 +474,9 @@ static void SetPaintPattern(SkPaint& aPaint, const Pattern& aPattern,
       const LinearGradientPattern& pat =
           static_cast<const LinearGradientPattern&>(aPattern);
       GradientStopsSkia* stops =
-          static_cast<GradientStopsSkia*>(pat.mStops.get());
+          pat.mStops && pat.mStops->GetBackendType() == BackendType::SKIA
+              ? static_cast<GradientStopsSkia*>(pat.mStops.get())
+              : nullptr;
       if (!stops || stops->mCount < 2 || !pat.mBegin.IsFinite() ||
           !pat.mEnd.IsFinite() || pat.mBegin == pat.mEnd) {
         aPaint.setColor(SK_ColorTRANSPARENT);
@@ -506,7 +508,9 @@ static void SetPaintPattern(SkPaint& aPaint, const Pattern& aPattern,
       const RadialGradientPattern& pat =
           static_cast<const RadialGradientPattern&>(aPattern);
       GradientStopsSkia* stops =
-          static_cast<GradientStopsSkia*>(pat.mStops.get());
+          pat.mStops && pat.mStops->GetBackendType() == BackendType::SKIA
+              ? static_cast<GradientStopsSkia*>(pat.mStops.get())
+              : nullptr;
       if (!stops || stops->mCount < 2 || !pat.mCenter1.IsFinite() ||
           !std::isfinite(pat.mRadius1) || !pat.mCenter2.IsFinite() ||
           !std::isfinite(pat.mRadius2) ||
@@ -541,7 +545,9 @@ static void SetPaintPattern(SkPaint& aPaint, const Pattern& aPattern,
       const ConicGradientPattern& pat =
           static_cast<const ConicGradientPattern&>(aPattern);
       GradientStopsSkia* stops =
-          static_cast<GradientStopsSkia*>(pat.mStops.get());
+          pat.mStops && pat.mStops->GetBackendType() == BackendType::SKIA
+              ? static_cast<GradientStopsSkia*>(pat.mStops.get())
+              : nullptr;
       if (!stops || stops->mCount < 2 || !pat.mCenter.IsFinite() ||
           !std::isfinite(pat.mAngle)) {
         aPaint.setColor(SK_ColorTRANSPARENT);
@@ -747,6 +753,9 @@ DrawTargetType DrawTargetSkia::GetType() const {
 void DrawTargetSkia::DrawFilter(FilterNode* aNode, const Rect& aSourceRect,
                                 const Point& aDestPoint,
                                 const DrawOptions& aOptions) {
+  if (!aNode || aNode->GetBackendType() != FILTER_BACKEND_SOFTWARE) {
+    return;
+  }
   FilterNodeSoftware* filter = static_cast<FilterNodeSoftware*>(aNode);
   filter->Draw(this, aSourceRect, aDestPoint, aOptions);
 }
@@ -1477,6 +1486,9 @@ bool DrawTarget::Draw3DTransformedSurface(SourceSurface* aSurface,
   }
 
   DataSourceSurface::ScopedMap map(dstSurf, DataSourceSurface::READ_WRITE);
+  if (!map.IsMapped()) {
+    return false;
+  }
   std::unique_ptr<SkCanvas> dstCanvas(SkCanvas::MakeRasterDirect(
       SkImageInfo::Make(xformBounds.Width(), xformBounds.Height(),
                         GfxFormatToSkiaColorType(dstSurf->GetFormat()),
@@ -1621,16 +1633,21 @@ DrawTargetSkia::OptimizeSourceSurfaceForUnknownAlpha(
     return surface.forget();
   }
 
-  RefPtr<DataSourceSurface> dataSurface = aSurface->GetDataSurface();
-  DataSourceSurface::ScopedMap map(dataSurface, DataSourceSurface::READ_WRITE);
+  if (RefPtr<DataSourceSurface> dataSurface = aSurface->GetDataSurface()) {
+    DataSourceSurface::ScopedMap map(dataSurface,
+                                     DataSourceSurface::READ_WRITE);
+    if (map.IsMapped()) {
+      // For plugins, GDI can sometimes just write 0 to the alpha channel
+      // even for RGBX formats. In this case, we have to manually write
+      // the alpha channel to make Skia happy with RGBX and in case GDI
+      // writes some bad data. Luckily, this only happens on plugins.
+      WriteRGBXFormat(map.GetData(), dataSurface->GetSize(), map.GetStride(),
+                      dataSurface->GetFormat());
+      return dataSurface.forget();
+    }
+  }
 
-  // For plugins, GDI can sometimes just write 0 to the alpha channel
-  // even for RGBX formats. In this case, we have to manually write
-  // the alpha channel to make Skia happy with RGBX and in case GDI
-  // writes some bad data. Luckily, this only happens on plugins.
-  WriteRGBXFormat(map.GetData(), dataSurface->GetSize(), map.GetStride(),
-                  dataSurface->GetFormat());
-  return dataSurface.forget();
+  return nullptr;
 }
 
 already_AddRefed<SourceSurface> DrawTargetSkia::OptimizeSourceSurface(
@@ -1644,13 +1661,18 @@ already_AddRefed<SourceSurface> DrawTargetSkia::OptimizeSourceSurface(
   // uploading, so any data surface is fine. Call GetDataSurface
   // to trigger any required readback so that it only happens
   // once.
-  RefPtr<DataSourceSurface> dataSurface = aSurface->GetDataSurface();
+  if (RefPtr<DataSourceSurface> dataSurface = aSurface->GetDataSurface()) {
 #ifdef DEBUG
-  DataSourceSurface::ScopedMap map(dataSurface, DataSourceSurface::READ);
-  MOZ_ASSERT(VerifyRGBXFormat(map.GetData(), dataSurface->GetSize(),
-                              map.GetStride(), dataSurface->GetFormat()));
+    DataSourceSurface::ScopedMap map(dataSurface, DataSourceSurface::READ);
+    if (map.IsMapped()) {
+      MOZ_ASSERT(VerifyRGBXFormat(map.GetData(), dataSurface->GetSize(),
+                                  map.GetStride(), dataSurface->GetFormat()));
+    }
 #endif
-  return dataSurface.forget();
+    return dataSurface.forget();
+  }
+
+  return nullptr;
 }
 
 already_AddRefed<SourceSurface>
@@ -1997,9 +2019,10 @@ void DrawTargetSkia::PushLayerWithBlend(bool aOpaque, Float aOpacity,
 }
 
 void DrawTargetSkia::PopLayer() {
+  MOZ_RELEASE_ASSERT(!mPushedLayers.empty());
+
   MarkChanged();
 
-  MOZ_ASSERT(!mPushedLayers.empty());
   const PushedLayer& layer = mPushedLayers.back();
 
   mCanvas->restore();

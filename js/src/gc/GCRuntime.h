@@ -23,6 +23,7 @@
 #include "gc/Scheduling.h"
 #include "gc/Statistics.h"
 #include "gc/StoreBuffer.h"
+#include "gc/SweepingAPI.h"
 #include "js/friend/PerformanceHint.h"
 #include "js/GCAnnotations.h"
 #include "js/UniquePtr.h"
@@ -235,13 +236,11 @@ class ZoneList {
 };
 
 struct WeakCacheToSweep {
-  JS::detail::WeakCacheBase* cache;
+  WeakCacheBase* cache;
   JS::Zone* zone;
 };
 
 class WeakCacheSweepIterator {
-  using WeakCacheBase = JS::detail::WeakCacheBase;
-
   JS::Zone* sweepZone;
   WeakCacheBase* sweepCache;
 
@@ -415,12 +414,17 @@ class GCRuntime {
   bool isWaitingOnBackgroundTask() const;
 
   void lockGC() { lock.lock(); }
-  bool tryLockGC() { return lock.tryLock(); }
   void unlockGC() { lock.unlock(); }
+
+  void lockStoreBuffer() { storeBufferLock.lock(); }
+  void unlockStoreBuffer() { storeBufferLock.unlock(); }
 
 #ifdef DEBUG
   void assertCurrentThreadHasLockedGC() const {
     lock.assertOwnedByCurrentThread();
+  }
+  void assertCurrentThreadHasLockedStoreBuffer() const {
+    storeBufferLock.assertOwnedByCurrentThread();
   }
 #endif  // DEBUG
 
@@ -587,11 +591,12 @@ class GCRuntime {
   void checkHashTablesAfterMovingGC();
 #endif
 
-#ifdef DEBUG
   // Crawl the heap to check whether an arbitary pointer is within a cell of
-  // the given kind.
-  bool isPointerWithinTenuredCell(void* ptr, JS::TraceKind traceKind);
+  // the given kind. (TraceKind::Null means to ignore the kind.)
+  bool isPointerWithinTenuredCell(
+      void* ptr, JS::TraceKind traceKind = JS::TraceKind::Null);
 
+#ifdef DEBUG
   bool hasZone(Zone* target);
 #endif
 
@@ -617,8 +622,11 @@ class GCRuntime {
   void startTask(GCParallelTask& task, AutoLockHelperThreadState& lock);
   void joinTask(GCParallelTask& task, AutoLockHelperThreadState& lock);
   void updateHelperThreadCount();
-  bool updateMarkersVector();
   size_t parallelWorkerCount() const;
+
+  // Parallel marking.
+  bool initOrDisableParallelMarking();
+  [[nodiscard]] bool updateMarkersVector();
   size_t markingWorkerCount() const;
 
   // WeakRefs
@@ -776,6 +784,8 @@ class GCRuntime {
       ParallelMarking allowParallelMarking = SingleThreadedMarking,
       ShouldReportMarkTime reportTime = ReportMarkTime);
   bool canMarkInParallel() const;
+  bool initParallelMarkers();
+  void finishParallelMarkers();
 
   bool hasMarkingWork(MarkColor color) const;
 
@@ -1013,7 +1023,6 @@ class GCRuntime {
   // Arenas used for permanent things created at startup and shared by child
   // runtimes.
   MainThreadData<ArenaList> permanentAtoms;
-  MainThreadData<ArenaList> permanentFatInlineAtoms;
   MainThreadData<ArenaList> permanentWellKnownSymbols;
 
   // When chunks are empty, they reside in the emptyChunks pool and are
@@ -1098,6 +1107,9 @@ class GCRuntime {
 
   /* Whether the heap will be compacted at the end of GC. */
   MainThreadData<bool> isCompacting;
+
+  /* Whether to use parallel marking. */
+  MainThreadData<ParallelMarking> useParallelMarking;
 
   /* The invocation kind of the current GC, set at the start of collection. */
   MainThreadOrGCTaskData<mozilla::Maybe<JS::GCOptions>> maybeGcOptions;
@@ -1193,8 +1205,7 @@ class GCRuntime {
    * used during shutdown GCs. In either case, unmarked objects may need to be
    * discarded.
    */
-  JS::WeakCache<GCVector<HeapPtr<JS::Value>, 0, SystemAllocPolicy>>
-      testMarkQueue;
+  WeakCache<GCVector<HeapPtr<JS::Value>, 0, SystemAllocPolicy>> testMarkQueue;
 
   /* Position within the test mark queue. */
   size_t queuePos = 0;
@@ -1338,10 +1349,16 @@ class GCRuntime {
    */
   friend class js::AutoLockGC;
   friend class js::AutoLockGCBgAlloc;
-  js::Mutex lock MOZ_UNANNOTATED;
+  Mutex lock MOZ_UNANNOTATED;
+
+  /*
+   * Lock used to synchronise access to the store buffer during parallel
+   * sweeping.
+   */
+  Mutex storeBufferLock MOZ_UNANNOTATED;
 
   /* Lock used to synchronise access to delayed marking state. */
-  js::Mutex delayedMarkingLock MOZ_UNANNOTATED;
+  Mutex delayedMarkingLock MOZ_UNANNOTATED;
 
   friend class BackgroundSweepTask;
   friend class BackgroundFreeTask;

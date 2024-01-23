@@ -2,35 +2,31 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
-import { div } from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../utils/connect";
-import fuzzyAldrin from "fuzzaldrin-plus";
+import React, { Component } from "devtools/client/shared/vendor/react";
+import { div } from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 import { basename } from "../utils/path";
 import { createLocation } from "../utils/location";
 
-const { throttle } = require("devtools/shared/throttle");
+const fuzzyAldrin = require("resource://devtools/client/shared/vendor/fuzzaldrin-plus.js");
+const { throttle } = require("resource://devtools/shared/throttle.js");
 
-import actions from "../actions";
+import actions from "../actions/index";
 import {
   getDisplayedSourcesList,
-  getQuickOpenEnabled,
   getQuickOpenQuery,
   getQuickOpenType,
-  getSelectedSource,
   getSelectedLocation,
   getSettledSourceTextContent,
-  getSymbols,
-  getTabs,
+  getSourceTabs,
   getBlackBoxRanges,
   getProjectDirectoryRoot,
-} from "../selectors";
+} from "../selectors/index";
 import { memoizeLast } from "../utils/memoizeLast";
-import { scrollList } from "../utils/result-list";
 import { searchKeys } from "../constants";
 import {
-  formatSymbols,
+  formatSymbol,
   parseLineColumn,
   formatShortcutResults,
   formatSourceForList,
@@ -39,18 +35,16 @@ import Modal from "./shared/Modal";
 import SearchInput from "./shared/SearchInput";
 import ResultList from "./shared/ResultList";
 
-import "./QuickOpenModal.css";
-
 const maxResults = 100;
 
 const SIZE_BIG = { size: "big" };
 const SIZE_DEFAULT = {};
 
-function filter(values, query) {
+function filter(values, query, key = "value") {
   const preparedQuery = fuzzyAldrin.prepareQuery(query);
 
   return fuzzyAldrin.filter(values, query, {
-    key: "value",
+    key,
     maxResults,
     preparedQuery,
   });
@@ -70,7 +64,6 @@ export class QuickOpenModal extends Component {
       closeQuickOpen: PropTypes.func.isRequired,
       displayedSources: PropTypes.array.isRequired,
       blackBoxRanges: PropTypes.object.isRequired,
-      enabled: PropTypes.bool.isRequired,
       highlightLineRange: PropTypes.func.isRequired,
       clearHighlightLineRange: PropTypes.func.isRequired,
       query: PropTypes.string.isRequired,
@@ -85,14 +78,12 @@ export class QuickOpenModal extends Component {
       ]).isRequired,
       selectSpecificLocation: PropTypes.func.isRequired,
       selectedContentLoaded: PropTypes.bool,
-      selectedSource: PropTypes.object,
+      selectedLocation: PropTypes.object,
       setQuickOpenQuery: PropTypes.func.isRequired,
-      shortcutsModalEnabled: PropTypes.bool.isRequired,
-      symbols: PropTypes.object.isRequired,
-      symbolsLoading: PropTypes.bool.isRequired,
-      tabUrls: PropTypes.array.isRequired,
+      openedTabUrls: PropTypes.array.isRequired,
       toggleShortcutsModal: PropTypes.func.isRequired,
       projectDirectoryRoot: PropTypes.string,
+      getFunctionSymbols: PropTypes.func.isRequired,
     };
   }
 
@@ -114,14 +105,9 @@ export class QuickOpenModal extends Component {
   }
 
   componentDidUpdate(prevProps) {
-    const nowEnabled = !prevProps.enabled && this.props.enabled;
     const queryChanged = prevProps.query !== this.props.query;
 
-    if (this.refs.resultList && this.refs.resultList.refs) {
-      scrollList(this.refs.resultList.refs, this.state.selectedIndex);
-    }
-
-    if (nowEnabled || queryChanged) {
+    if (queryChanged) {
       this.updateResults(this.props.query);
     }
   }
@@ -136,12 +122,12 @@ export class QuickOpenModal extends Component {
   };
 
   formatSources = memoizeLast(
-    (displayedSources, tabUrls, blackBoxRanges, projectDirectoryRoot) => {
+    (displayedSources, openedTabUrls, blackBoxRanges, projectDirectoryRoot) => {
       // Note that we should format all displayed sources,
       // the actual filtering will only be done late from `searchSources()`
       return displayedSources.map(source => {
         const isBlackBoxed = !!blackBoxRanges[source.url];
-        const hasTabOpened = tabUrls.includes(source.url);
+        const hasTabOpened = openedTabUrls.includes(source.url);
         return formatSourceForList(
           source,
           hasTabOpened,
@@ -153,12 +139,16 @@ export class QuickOpenModal extends Component {
   );
 
   searchSources = query => {
-    const { displayedSources, tabUrls, blackBoxRanges, projectDirectoryRoot } =
-      this.props;
+    const {
+      displayedSources,
+      openedTabUrls,
+      blackBoxRanges,
+      projectDirectoryRoot,
+    } = this.props;
 
     const sources = this.formatSources(
       displayedSources,
-      tabUrls,
+      openedTabUrls,
       blackBoxRanges,
       projectDirectoryRoot
     );
@@ -167,18 +157,19 @@ export class QuickOpenModal extends Component {
     return this.setResults(results);
   };
 
-  searchSymbols = query => {
-    const {
-      symbols: { functions },
-    } = this.props;
-
-    let results = functions;
-    results = results.filter(result => result.title !== "anonymous");
+  searchSymbols = async query => {
+    const { getFunctionSymbols, selectedLocation } = this.props;
+    if (!selectedLocation) {
+      return this.setResults([]);
+    }
+    let results = await getFunctionSymbols(selectedLocation, maxResults);
 
     if (query === "@" || query === "#") {
+      results = results.map(formatSymbol);
       return this.setResults(results);
     }
-    results = filter(results, query.slice(1));
+    results = filter(results, query.slice(1), "name");
+    results = results.map(formatSymbol);
     return this.setResults(results);
   };
 
@@ -195,22 +186,22 @@ export class QuickOpenModal extends Component {
    * This method is called when we just opened the modal and the query input is empty
    */
   showTopSources = () => {
-    const { tabUrls, blackBoxRanges, projectDirectoryRoot } = this.props;
+    const { openedTabUrls, blackBoxRanges, projectDirectoryRoot } = this.props;
     let { displayedSources } = this.props;
 
     // If there is some tabs opened, only show tab's sources.
     // Otherwise, we display all visible sources (per SourceTree definition),
     // setResults will restrict the number of results to a maximum limit.
-    if (tabUrls.length) {
+    if (openedTabUrls.length) {
       displayedSources = displayedSources.filter(
-        source => !!source.url && tabUrls.includes(source.url)
+        source => !!source.url && openedTabUrls.includes(source.url)
       );
     }
 
     this.setResults(
       this.formatSources(
         displayedSources,
-        tabUrls,
+        openedTabUrls,
         blackBoxRanges,
         projectDirectoryRoot
       )
@@ -274,10 +265,10 @@ export class QuickOpenModal extends Component {
   };
 
   onSelectResultItem = item => {
-    const { selectedSource, highlightLineRange, clearHighlightLineRange } =
+    const { selectedLocation, highlightLineRange, clearHighlightLineRange } =
       this.props;
     if (
-      selectedSource == null ||
+      selectedLocation == null ||
       !this.isSymbolSearch() ||
       !this.isFunctionQuery()
     ) {
@@ -288,7 +279,7 @@ export class QuickOpenModal extends Component {
       highlightLineRange({
         start: item.location.start.line,
         end: item.location.end.line,
-        sourceId: selectedSource.id,
+        sourceId: selectedLocation.source.id,
       });
     } else {
       clearHighlightLineRange();
@@ -310,12 +301,12 @@ export class QuickOpenModal extends Component {
   };
 
   gotoLocation = location => {
-    const { selectSpecificLocation, selectedSource } = this.props;
+    const { selectSpecificLocation, selectedLocation } = this.props;
 
     if (location != null) {
       selectSpecificLocation(
         createLocation({
-          source: location.source || selectedSource,
+          source: location.source || selectedLocation?.source,
           line: location.line,
           column: location.column,
         })
@@ -325,10 +316,10 @@ export class QuickOpenModal extends Component {
   };
 
   onChange = e => {
-    const { selectedSource, selectedContentLoaded, setQuickOpenQuery } =
+    const { selectedLocation, selectedContentLoaded, setQuickOpenQuery } =
       this.props;
     setQuickOpenQuery(e.target.value);
-    const noSource = !selectedSource || !selectedContentLoaded;
+    const noSource = !selectedLocation || !selectedContentLoaded;
     if ((noSource && this.isSymbolSearch()) || this.isGotoQuery()) {
       return;
     }
@@ -339,11 +330,11 @@ export class QuickOpenModal extends Component {
   };
 
   onKeyDown = e => {
-    const { enabled, query } = this.props;
+    const { query } = this.props;
     const { results, selectedIndex } = this.state;
     const isGoToQuery = this.isGotoQuery();
 
-    if ((!enabled || !results) && !isGoToQuery) {
+    if (!results && !isGoToQuery) {
       return;
     }
 
@@ -435,25 +426,21 @@ export class QuickOpenModal extends Component {
     let summaryMsg = "";
     if (this.isGotoQuery()) {
       summaryMsg = L10N.getStr("shortcuts.gotoLine");
-    } else if (this.isFunctionQuery() && this.props.symbolsLoading) {
+    } else if (this.isFunctionQuery() && !this.state.results) {
       summaryMsg = L10N.getStr("loadingText");
     }
     return summaryMsg;
   }
 
   render() {
-    const { enabled, query } = this.props;
+    const { query } = this.props;
     const { selectedIndex, results } = this.state;
 
-    if (!enabled) {
-      return null;
-    }
     const items = this.highlightMatching(query, results || []);
     const expanded = !!items && !!items.length;
     return React.createElement(
       Modal,
       {
-        in: enabled,
         handleClose: this.closeModal,
       },
       React.createElement(SearchInput, {
@@ -492,27 +479,22 @@ export class QuickOpenModal extends Component {
 
 /* istanbul ignore next: ignoring testing of redux connection stuff */
 function mapStateToProps(state) {
-  const selectedSource = getSelectedSource(state);
-  const location = getSelectedLocation(state);
+  const selectedLocation = getSelectedLocation(state);
   const displayedSources = getDisplayedSourcesList(state);
-  const tabs = getTabs(state);
-  const tabUrls = [...new Set(tabs.map(tab => tab.url))];
-  const symbols = getSymbols(state, location);
+  const tabs = getSourceTabs(state);
+  const openedTabUrls = [...new Set(tabs.map(tab => tab.url))];
 
   return {
-    enabled: getQuickOpenEnabled(state),
     displayedSources,
     blackBoxRanges: getBlackBoxRanges(state),
     projectDirectoryRoot: getProjectDirectoryRoot(state),
-    selectedSource,
-    selectedContentLoaded: location
-      ? !!getSettledSourceTextContent(state, location)
+    selectedLocation,
+    selectedContentLoaded: selectedLocation
+      ? !!getSettledSourceTextContent(state, selectedLocation)
       : undefined,
-    symbols: formatSymbols(symbols, maxResults),
-    symbolsLoading: !symbols,
     query: getQuickOpenQuery(state),
     searchType: getQuickOpenType(state),
-    tabUrls,
+    openedTabUrls,
   };
 }
 
@@ -522,4 +504,5 @@ export default connect(mapStateToProps, {
   highlightLineRange: actions.highlightLineRange,
   clearHighlightLineRange: actions.clearHighlightLineRange,
   closeQuickOpen: actions.closeQuickOpen,
+  getFunctionSymbols: actions.getFunctionSymbols,
 })(QuickOpenModal);

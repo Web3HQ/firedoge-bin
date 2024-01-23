@@ -16,6 +16,7 @@
 #include "nsEnumeratorUtils.h"
 #include "mozilla/dom/Directory.h"
 #include "mozilla/dom/File.h"
+#include "mozilla/dom/Promise.h"
 #include "mozilla/Components.h"
 #include "WidgetUtils.h"
 #include "nsSimpleEnumerator.h"
@@ -25,6 +26,7 @@
 
 using namespace mozilla::widget;
 using namespace mozilla::dom;
+using mozilla::ErrorResult;
 
 #define FILEPICKER_TITLES "chrome://global/locale/filepicker.properties"
 #define FILEPICKER_FILTERS "chrome://global/content/filepicker.properties"
@@ -61,9 +63,12 @@ nsresult LocalFileToDirectoryOrBlob(nsPIDOMWindowInner* aWindow,
 
 }  // anonymous namespace
 
+#ifndef XP_WIN
 /**
  * A runnable to dispatch from the main thread to the main thread to display
  * the file picker while letting the showAsync method return right away.
+ *
+ * Not needed on Windows, where nsFilePicker::Open() is fully async.
  */
 class nsBaseFilePicker::AsyncShowFilePicker : public mozilla::Runnable {
  public:
@@ -96,6 +101,7 @@ class nsBaseFilePicker::AsyncShowFilePicker : public mozilla::Runnable {
   RefPtr<nsBaseFilePicker> mFilePicker;
   RefPtr<nsIFilePickerShownCallback> mCallback;
 };
+#endif
 
 class nsBaseFilePickerEnumerator : public nsSimpleEnumerator {
  public:
@@ -147,9 +153,10 @@ nsBaseFilePicker::nsBaseFilePicker()
 
 nsBaseFilePicker::~nsBaseFilePicker() = default;
 
-NS_IMETHODIMP nsBaseFilePicker::Init(mozIDOMWindowProxy* aParent,
-                                     const nsAString& aTitle,
-                                     nsIFilePicker::Mode aMode) {
+NS_IMETHODIMP nsBaseFilePicker::Init(
+    mozIDOMWindowProxy* aParent, const nsAString& aTitle,
+    nsIFilePicker::Mode aMode,
+    mozilla::dom::BrowsingContext* aBrowsingContext) {
   MOZ_ASSERT(aParent,
              "Null parent passed to filepicker, no file "
              "picker for you!");
@@ -159,6 +166,7 @@ NS_IMETHODIMP nsBaseFilePicker::Init(mozIDOMWindowProxy* aParent,
   nsCOMPtr<nsIWidget> widget = WidgetUtils::DOMWindowToWidget(mParent);
   NS_ENSURE_TRUE(widget, NS_ERROR_FAILURE);
 
+  mBrowsingContext = aBrowsingContext;
   mMode = aMode;
   InitNative(widget, aTitle);
 
@@ -166,10 +174,41 @@ NS_IMETHODIMP nsBaseFilePicker::Init(mozIDOMWindowProxy* aParent,
 }
 
 NS_IMETHODIMP
+nsBaseFilePicker::IsModeSupported(nsIFilePicker::Mode aMode, JSContext* aCx,
+                                  Promise** aPromise) {
+  MOZ_ASSERT(aCx);
+  MOZ_ASSERT(aPromise);
+
+  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
+  if (NS_WARN_IF(!globalObject)) {
+    return NS_ERROR_FAILURE;
+  }
+
+  ErrorResult result;
+  RefPtr<Promise> promise = Promise::Create(globalObject, result);
+  if (NS_WARN_IF(result.Failed())) {
+    return result.StealNSResult();
+  }
+
+  promise->MaybeResolve(true);
+  promise.forget(aPromise);
+
+  return NS_OK;
+}
+
+#ifndef XP_WIN
+NS_IMETHODIMP
 nsBaseFilePicker::Open(nsIFilePickerShownCallback* aCallback) {
   nsCOMPtr<nsIRunnable> filePickerEvent =
       new AsyncShowFilePicker(this, aCallback);
   return NS_DispatchToMainThread(filePickerEvent);
+}
+#endif
+
+NS_IMETHODIMP
+nsBaseFilePicker::Close() {
+  NS_WARNING("Unimplemented nsFilePicker::Close");
+  return NS_OK;
 }
 
 NS_IMETHODIMP

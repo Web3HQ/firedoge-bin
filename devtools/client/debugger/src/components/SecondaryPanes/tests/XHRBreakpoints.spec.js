@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React from "react";
+import React from "devtools/client/shared/vendor/react";
 import { mount } from "enzyme";
 import XHRBreakpoints from "../XHRBreakpoints";
 
@@ -170,9 +170,7 @@ describe("XHR Breakpoints", function () {
     );
     expect(xhrInputContainer.hasClass("focused")).toBeTruthy();
 
-    xhrBreakpointsComponent
-      .find(".breakpoints-exceptions-options")
-      .simulate("mousedown");
+    xhrBreakpointsComponent.find(".breakpoints-options").simulate("mousedown");
     expect(xhrBreakpointsComponent.state("focused")).toBe(true);
     expect(xhrBreakpointsComponent.state("editing")).toBe(true);
     expect(xhrBreakpointsComponent.state("clickedOnFormElement")).toBe(false);
@@ -182,9 +180,7 @@ describe("XHR Breakpoints", function () {
     expect(xhrBreakpointsComponent.state("editing")).toBe(false);
     expect(xhrBreakpointsComponent.state("clickedOnFormElement")).toBe(false);
 
-    xhrBreakpointsComponent
-      .find(".breakpoints-exceptions-options")
-      .simulate("click");
+    xhrBreakpointsComponent.find(".breakpoints-options").simulate("click");
 
     xhrInputContainer = xhrBreakpointsComponent.find(".xhr-input-container");
     expect(xhrInputContainer.hasClass("focused")).not.toBeTruthy();

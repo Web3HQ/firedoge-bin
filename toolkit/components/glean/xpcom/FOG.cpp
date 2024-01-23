@@ -24,6 +24,7 @@
 #include "nsIFOG.h"
 #include "nsIUserIdleService.h"
 #include "nsServiceManagerUtils.h"
+#include "xpcpublic.h"
 
 namespace mozilla {
 
@@ -121,6 +122,16 @@ extern "C" uint32_t FOG_MaxPingLimit(void) {
   return NimbusFeatures::GetInt("gleanInternalSdk"_ns,
                                 "gleanMaxPingsPerMinute"_ns, 15);
 }
+
+// This allows us to pass whether to enable precise event timestamps to Rust.
+// Default is false.
+extern "C" bool FOG_EventTimestampsEnabled(void) {
+  return NimbusFeatures::GetBool("gleanInternalSdk"_ns,
+                                 "enableEventTimestamps"_ns, false);
+}
+
+// Called when knowing if we're in automation is necessary.
+extern "C" bool FOG_IPCIsInAutomation(void) { return xpc::IsInAutomation(); }
 
 NS_IMETHODIMP
 FOG::InitializeFOG(const nsACString& aDataPathOverride,
@@ -407,11 +418,13 @@ NS_IMETHODIMP
 FOG::TestRegisterRuntimePing(const nsACString& aName,
                              const bool aIncludeClientId,
                              const bool aSendIfEmpty,
+                             const bool aPreciseTimestamps,
                              const nsTArray<nsCString>& aReasonCodes,
                              uint32_t* aPingIdOut) {
   *aPingIdOut = 0;
-  *aPingIdOut = glean::jog::jog_test_register_ping(&aName, aIncludeClientId,
-                                                   aSendIfEmpty, &aReasonCodes);
+  *aPingIdOut =
+      glean::jog::jog_test_register_ping(&aName, aIncludeClientId, aSendIfEmpty,
+                                         aPreciseTimestamps, &aReasonCodes);
   return NS_OK;
 }
 

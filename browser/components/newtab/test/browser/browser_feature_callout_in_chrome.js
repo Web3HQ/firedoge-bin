@@ -1,14 +1,19 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
-"use strict";
+const { CustomizableUITestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/CustomizableUITestUtils.sys.mjs"
+);
+const { DefaultBrowserCheck } = ChromeUtils.importESModule(
+  "resource:///modules/BrowserGlue.sys.mjs"
+);
 
 const PDF_TEST_URL =
   "https://example.com/browser/browser/components/newtab/test/browser/file_pdf.PDF";
 
 async function openURLInWindow(window, url) {
   const { selectedBrowser } = window.gBrowser;
-  BrowserTestUtils.loadURIString(selectedBrowser, url);
+  BrowserTestUtils.startLoadingURIString(selectedBrowser, url);
   await BrowserTestUtils.browserLoaded(selectedBrowser, false, url);
   return selectedBrowser;
 }
@@ -457,6 +462,44 @@ add_task(async function triggered_feature_tour_with_custom_pref() {
   );
 });
 
+add_task(async function callout_not_shown_if_dialog_open() {
+  const win = await BrowserTestUtils.openNewBrowserWindow();
+  let dialogPromise = BrowserTestUtils.promiseAlertDialog(null, undefined, {
+    callback: async dialogWin => {
+      let rv = await FeatureCalloutBroker.showFeatureCallout(
+        win.gBrowser.selectedBrowser,
+        testMessage.message
+      );
+      ok(
+        !rv,
+        "Feature callout not shown when a dialog is open in the same window"
+      );
+      dialogWin.document.querySelector("dialog").getButton("cancel").click();
+    },
+    isSubDialog: true,
+  });
+  DefaultBrowserCheck.prompt(win);
+  await dialogPromise;
+
+  await BrowserTestUtils.closeWindow(win);
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function callout_not_shown_if_panel_open() {
+  const win = await BrowserTestUtils.openNewBrowserWindow();
+  const gCUITestUtils = new CustomizableUITestUtils(win);
+  await gCUITestUtils.openMainMenu();
+
+  let rv = await FeatureCalloutBroker.showFeatureCallout(
+    win.gBrowser.selectedBrowser,
+    testMessage.message
+  );
+  ok(!rv, "Feature callout not shown when a panel is open in the same window");
+
+  await gCUITestUtils.hideMainMenu();
+  await BrowserTestUtils.closeWindow(win);
+});
+
 add_task(async function feature_callout_renders_in_browser_chrome_for_pdf() {
   const sandbox = sinon.createSandbox();
   const sendTriggerStub = sandbox.stub(ASRouter, "sendTriggerMessage");
@@ -560,7 +603,7 @@ add_task(
       "Feature callout rendered when opening a new tab with PDF url"
     );
 
-    BrowserTestUtils.loadURIString(win.gBrowser, "about:preferences");
+    BrowserTestUtils.startLoadingURIString(win.gBrowser, "about:preferences");
     await BrowserTestUtils.waitForLocationChange(
       win.gBrowser,
       "about:preferences"
@@ -775,7 +818,7 @@ add_task(
       "Feature callout rendered when opening a newtab"
     );
 
-    BrowserTestUtils.loadURIString(win.gBrowser, PDF_TEST_URL);
+    BrowserTestUtils.startLoadingURIString(win.gBrowser, PDF_TEST_URL);
     await BrowserTestUtils.waitForLocationChange(win.gBrowser, PDF_TEST_URL);
     await waitForCalloutRemoved(doc);
 

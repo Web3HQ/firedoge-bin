@@ -41,7 +41,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   HomePage: "resource:///modules/HomePage.sys.mjs",
   Integration: "resource://gre/modules/Integration.sys.mjs",
   Interactions: "resource:///modules/Interactions.sys.mjs",
-  Log: "resource://gre/modules/Log.sys.mjs",
   LoginBreaches: "resource:///modules/LoginBreaches.sys.mjs",
   MigrationUtils: "resource:///modules/MigrationUtils.sys.mjs",
   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
@@ -61,7 +60,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   PluginManager: "resource:///actors/PluginParent.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
   ProcessHangMonitor: "resource:///modules/ProcessHangMonitor.sys.mjs",
-  ProvenanceData: "resource:///modules/ProvenanceData.sys.mjs",
   PublicSuffixList:
     "resource://gre/modules/netwerk-dns/PublicSuffixList.sys.mjs",
   QuickSuggest: "resource:///modules/QuickSuggest.sys.mjs",
@@ -69,10 +67,13 @@ ChromeUtils.defineESModuleGetters(lazy, {
   RemoteSecuritySettings:
     "resource://gre/modules/psm/RemoteSecuritySettings.sys.mjs",
   RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
+  ResetPBMPanel: "resource:///modules/ResetPBMPanel.sys.mjs",
   SafeBrowsing: "resource://gre/modules/SafeBrowsing.sys.mjs",
   Sanitizer: "resource:///modules/Sanitizer.sys.mjs",
   SaveToPocket: "chrome://pocket/content/SaveToPocket.sys.mjs",
   ScreenshotsUtils: "resource:///modules/ScreenshotsUtils.sys.mjs",
+  SearchSERPDomainToCategoriesMap:
+    "resource:///modules/SearchSERPTelemetry.sys.mjs",
   SearchSERPTelemetry: "resource:///modules/SearchSERPTelemetry.sys.mjs",
   SessionStartup: "resource:///modules/sessionstore/SessionStartup.sys.mjs",
   SessionStore: "resource:///modules/sessionstore/SessionStore.sys.mjs",
@@ -88,6 +89,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   UIState: "resource://services-sync/UIState.sys.mjs",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   WebChannel: "resource://gre/modules/WebChannel.sys.mjs",
+  WindowsLaunchOnLogin: "resource://gre/modules/WindowsLaunchOnLogin.sys.mjs",
   WindowsRegistry: "resource://gre/modules/WindowsRegistry.sys.mjs",
   WindowsGPOParser: "resource://gre/modules/policies/WindowsGPOParser.sys.mjs",
   clearTimeout: "resource://gre/modules/Timer.sys.mjs",
@@ -156,6 +158,12 @@ const PRIVATE_BROWSING_BINARY = "private_browsing.exe";
 const PRIVATE_BROWSING_EXE_ICON_INDEX = 1;
 const PREF_PRIVATE_BROWSING_SHORTCUT_CREATED =
   "browser.privacySegmentation.createdShortcut";
+// Whether this launch was initiated by the OS.  A launch-on-login will contain
+// the "os-autostart" flag in the initial launch command line.
+let gThisInstanceIsLaunchOnLogin = false;
+// Whether this launch was initiated by a taskbar tab shortcut. A launch from
+// a taskbar tab shortcut will contain the "taskbar-tab" flag.
+let gThisInstanceIsTaskbarTab = false;
 
 /**
  * Fission-compatible JSProcess implementations.
@@ -276,8 +284,8 @@ let JSWINDOWACTORS = {
         visibilitychange: {},
       },
     },
-    // The wildcard on about:newtab is for the ?endpoint query parameter
-    // that is used for snippets debugging. The wildcard for about:home
+    // The wildcard on about:newtab is for the # parameter
+    // that is used for the newtab devtools. The wildcard for about:home
     // is similar, and also allows for falling back to loading the
     // about:home document dynamically if an attempt is made to load
     // about:home?jscache from the AboutHomeStartupCache as a top-level
@@ -286,20 +294,6 @@ let JSWINDOWACTORS = {
     remoteTypes: ["privilegedabout"],
   },
 
-  AboutPlugins: {
-    parent: {
-      esModuleURI: "resource:///actors/AboutPluginsParent.sys.mjs",
-    },
-    child: {
-      esModuleURI: "resource:///actors/AboutPluginsChild.sys.mjs",
-
-      events: {
-        DOMDocElementInserted: { capture: true },
-      },
-    },
-
-    matches: ["about:plugins"],
-  },
   AboutPocket: {
     parent: {
       esModuleURI: "resource:///actors/AboutPocketParent.sys.mjs",
@@ -384,10 +378,10 @@ let JSWINDOWACTORS = {
 
   AboutWelcomeShopping: {
     parent: {
-      moduleURI: "resource:///actors/AboutWelcomeParent.jsm",
+      esModuleURI: "resource:///actors/AboutWelcomeParent.sys.mjs",
     },
     child: {
-      moduleURI: "resource:///actors/AboutWelcomeChild.jsm",
+      esModuleURI: "resource:///actors/AboutWelcomeChild.sys.mjs",
       events: {
         Update: {},
       },
@@ -398,10 +392,10 @@ let JSWINDOWACTORS = {
 
   AboutWelcome: {
     parent: {
-      moduleURI: "resource:///actors/AboutWelcomeParent.jsm",
+      esModuleURI: "resource:///actors/AboutWelcomeParent.sys.mjs",
     },
     child: {
-      moduleURI: "resource:///actors/AboutWelcomeChild.jsm",
+      esModuleURI: "resource:///actors/AboutWelcomeChild.sys.mjs",
       events: {
         // This is added so the actor instantiates immediately and makes
         // methods available to the page js on load.
@@ -586,6 +580,7 @@ let JSWINDOWACTORS = {
     includeChrome: true,
     allFrames: true,
     matches: [
+      "about:asrouter",
       "about:home",
       "about:newtab",
       "about:welcome",
@@ -593,7 +588,6 @@ let JSWINDOWACTORS = {
       "chrome://browser/content/places/historySidebar.xhtml",
       "chrome://browser/content/places/bookmarksSidebar.xhtml",
       "about:firefoxview",
-      "about:firefoxview-next",
     ],
   },
 
@@ -712,8 +706,9 @@ let JSWINDOWACTORS = {
         "Screenshots:Copy": { wantUntrusted: true },
         "Screenshots:Download": { wantUntrusted: true },
         "Screenshots:HidePanel": { wantUntrusted: true },
-        "Screenshots:ShowPanel": { wantUntrusted: true },
+        "Screenshots:OverlaySelection": { wantUntrusted: true },
         "Screenshots:RecordEvent": { wantUntrusted: true },
+        "Screenshots:ShowPanel": { wantUntrusted: true },
       },
     },
     enablePreference: "screenshots.browser.component.enabled",
@@ -764,8 +759,9 @@ let JSWINDOWACTORS = {
         // This is added so the actor instantiates immediately and makes
         // methods available to the page js on load.
         DOMDocElementInserted: {},
-        ShoppingTelemetryEvent: { wantUntrusted: true },
         ReportProductAvailable: { wantUntrusted: true },
+        AdClicked: { wantUntrusted: true },
+        AdImpression: { wantUntrusted: true },
       },
     },
     matches: ["about:shoppingsidebar"],
@@ -799,6 +795,7 @@ let JSWINDOWACTORS = {
       },
     },
     matches: [
+      "about:asrouter*",
       "about:home*",
       "about:newtab*",
       "about:welcome*",
@@ -1229,6 +1226,37 @@ BrowserGlue.prototype = {
         break;
       case "app-startup":
         this._earlyBlankFirstPaint(subject);
+        gThisInstanceIsTaskbarTab = subject.handleFlag("taskbar-tab", false);
+        gThisInstanceIsLaunchOnLogin = subject.handleFlag(
+          "os-autostart",
+          false
+        );
+        let launchOnLoginPref = "browser.startup.windowsLaunchOnLogin.enabled";
+        let profileSvc = Cc[
+          "@mozilla.org/toolkit/profile-service;1"
+        ].getService(Ci.nsIToolkitProfileService);
+        if (
+          AppConstants.platform == "win" &&
+          !profileSvc.startWithLastProfile
+        ) {
+          // If we don't start with last profile, the user
+          // likely sees the profile selector on launch.
+          if (Services.prefs.getBoolPref(launchOnLoginPref)) {
+            Services.telemetry.setEventRecordingEnabled(
+              "launch_on_login",
+              true
+            );
+            Services.telemetry.recordEvent(
+              "launch_on_login",
+              "last_profile_disable",
+              "startup"
+            );
+          }
+          Services.prefs.setBoolPref(launchOnLoginPref, false);
+          // Only remove registry key, not shortcut here as we can assume
+          // if a user manually created a shortcut they want this behavior.
+          await lazy.WindowsLaunchOnLogin.removeLaunchOnLoginRegistryKey();
+        }
         break;
     }
   },
@@ -1390,6 +1418,8 @@ BrowserGlue.prototype = {
     }
 
     lazy.SaveToPocket.init();
+
+    lazy.ResetPBMPanel.init();
 
     AboutHomeStartupCache.init();
 
@@ -2573,18 +2603,144 @@ BrowserGlue.prototype = {
           }
 
           if (!classification) {
-            if (shortcut) {
+            if (gThisInstanceIsLaunchOnLogin) {
+              classification = "Autostart";
+            } else if (shortcut) {
               classification = "OtherShortcut";
             } else {
               classification = "Other";
             }
           }
-
+          // Because of how taskbar tabs work, it may be classifed as a taskbar
+          // shortcut, in which case we want to overwrite it.
+          if (gThisInstanceIsTaskbarTab) {
+            classification = "TaskbarTab";
+          }
           Services.telemetry.scalarSet(
             "os.environment.launch_method",
             classification
           );
         },
+      },
+
+      {
+        name: "dualBrowserProtocolHandler",
+        condition:
+          AppConstants.platform == "win" &&
+          !Services.prefs.getBoolPref(
+            "browser.shell.customProtocolsRegistered"
+          ),
+        task: async () => {
+          Services.prefs.setBoolPref(
+            "browser.shell.customProtocolsRegistered",
+            true
+          );
+          const FIREFOX_HANDLER_NAME = "firefox";
+          const FIREFOX_PRIVATE_HANDLER_NAME = "firefox-private";
+          const path = Services.dirsvc.get("XREExeF", Ci.nsIFile).path;
+          let wrk = Cc["@mozilla.org/windows-registry-key;1"].createInstance(
+            Ci.nsIWindowsRegKey
+          );
+          try {
+            wrk.open(wrk.ROOT_KEY_CLASSES_ROOT, "", wrk.ACCESS_READ);
+            let FxSet = wrk.hasChild(FIREFOX_HANDLER_NAME);
+            let FxPrivateSet = wrk.hasChild(FIREFOX_PRIVATE_HANDLER_NAME);
+            wrk.close();
+            if (FxSet && FxPrivateSet) {
+              return;
+            }
+            wrk.open(
+              wrk.ROOT_KEY_CURRENT_USER,
+              "Software\\Classes",
+              wrk.ACCESS_ALL
+            );
+            const maybeUpdateRegistry = (
+              isSetAlready,
+              handler,
+              protocolName
+            ) => {
+              if (isSetAlready) {
+                return;
+              }
+              let FxKey = wrk.createChild(handler, wrk.ACCESS_ALL);
+              try {
+                // Write URL protocol key
+                FxKey.writeStringValue("", protocolName);
+                FxKey.writeStringValue("URL Protocol", "");
+                FxKey.close();
+                // Write defaultIcon key
+                FxKey.create(
+                  FxKey.ROOT_KEY_CURRENT_USER,
+                  "Software\\Classes\\" + handler + "\\DefaultIcon",
+                  FxKey.ACCESS_ALL
+                );
+                FxKey.open(
+                  FxKey.ROOT_KEY_CURRENT_USER,
+                  "Software\\Classes\\" + handler + "\\DefaultIcon",
+                  FxKey.ACCESS_ALL
+                );
+                FxKey.writeStringValue("", `\"${path}\",1`);
+                FxKey.close();
+                // Write shell\\open\\command key
+                FxKey.create(
+                  FxKey.ROOT_KEY_CURRENT_USER,
+                  "Software\\Classes\\" + handler + "\\shell",
+                  FxKey.ACCESS_ALL
+                );
+                FxKey.create(
+                  FxKey.ROOT_KEY_CURRENT_USER,
+                  "Software\\Classes\\" + handler + "\\shell\\open",
+                  FxKey.ACCESS_ALL
+                );
+                FxKey.create(
+                  FxKey.ROOT_KEY_CURRENT_USER,
+                  "Software\\Classes\\" + handler + "\\shell\\open\\command",
+                  FxKey.ACCESS_ALL
+                );
+                FxKey.open(
+                  FxKey.ROOT_KEY_CURRENT_USER,
+                  "Software\\Classes\\" + handler + "\\shell\\open\\command",
+                  FxKey.ACCESS_ALL
+                );
+                if (handler == FIREFOX_PRIVATE_HANDLER_NAME) {
+                  FxKey.writeStringValue(
+                    "",
+                    `\"${path}\" -osint -private-window \"%1\"`
+                  );
+                } else {
+                  FxKey.writeStringValue("", `\"${path}\" -osint -url \"%1\"`);
+                }
+              } catch (ex) {
+                console.log(ex);
+              } finally {
+                FxKey.close();
+              }
+            };
+            try {
+              maybeUpdateRegistry(
+                FxSet,
+                FIREFOX_HANDLER_NAME,
+                "URL:Firefox Protocol"
+              );
+            } catch (ex) {
+              console.log(ex);
+            }
+            try {
+              maybeUpdateRegistry(
+                FxPrivateSet,
+                FIREFOX_PRIVATE_HANDLER_NAME,
+                "URL:Firefox Private Browsing Protocol"
+              );
+            } catch (ex) {
+              console.log(ex);
+            }
+          } catch (ex) {
+            console.log(ex);
+          } finally {
+            wrk.close();
+          }
+        },
+        timeout: 5000,
       },
 
       // Ensure a Private Browsing Shortcut exists. This is needed in case
@@ -2991,10 +3147,9 @@ BrowserGlue.prototype = {
       },
 
       {
-        name: "report-attribution-provenance-telemetry",
-        condition: lazy.TelemetryUtils.isTelemetryEnabled,
-        task: async () => {
-          await lazy.ProvenanceData.submitProvenanceTelemetry();
+        name: "SearchSERPDomainToCategoriesMap.init",
+        task: () => {
+          lazy.SearchSERPDomainToCategoriesMap.init().catch(console.error);
         },
       },
 
@@ -3116,6 +3271,8 @@ BrowserGlue.prototype = {
       function reportInstallationTelemetry() {
         lazy.BrowserUsageTelemetry.reportInstallationTelemetry();
       },
+
+      RunOSKeyStoreSelfTest,
     ];
 
     for (let task of idleTasks) {
@@ -3479,7 +3636,19 @@ BrowserGlue.prototype = {
         if (bookmarksUrl) {
           // Import from bookmarks.html file.
           try {
-            if (Services.policies.isAllowed("defaultBookmarks")) {
+            if (
+              Services.policies.isAllowed("defaultBookmarks") &&
+              // Default bookmarks are imported after startup, and they may
+              // influence the outcome of tests, thus it's possible to use
+              // this test-only pref to skip the import.
+              !(
+                Cu.isInAutomation &&
+                Services.prefs.getBoolPref(
+                  "browser.bookmarks.testing.skipDefaultBookmarksImport",
+                  false
+                )
+              )
+            ) {
               await lazy.BookmarkHTMLUtils.importFromURL(bookmarksUrl, {
                 replace: true,
                 source: lazy.PlacesUtils.bookmarks.SOURCES.RESTORE_ON_STARTUP,
@@ -3567,12 +3736,12 @@ BrowserGlue.prototype = {
    * Show the notificationBox for a locked places database.
    */
   _showPlacesLockedNotificationBox:
-    function BG__showPlacesLockedNotificationBox() {
+    async function BG__showPlacesLockedNotificationBox() {
       var win = lazy.BrowserWindowTracker.getTopWindow();
       var buttons = [{ supportPage: "places-locked" }];
 
       var notifyBox = win.gBrowser.getNotificationBox();
-      var notification = notifyBox.appendNotification(
+      var notification = await notifyBox.appendNotification(
         "places-locked",
         {
           label: { "l10n-id": "places-locked-prompt" },
@@ -3630,7 +3799,7 @@ BrowserGlue.prototype = {
   _migrateUI() {
     // Use an increasing number to keep track of the current migration state.
     // Completely unrelated to the current Firefox release number.
-    const UI_VERSION = 140;
+    const UI_VERSION = 142;
     const BROWSER_DOCURL = AppConstants.BROWSER_CHROME_URL;
 
     if (!Services.prefs.prefHasUserValue("browser.migration.version")) {
@@ -4174,15 +4343,11 @@ BrowserGlue.prototype = {
       // originInfo in the format [origin, type]
       [
         ["https://www.mozilla.org", "uitour"],
-        ["https://monitor.firefox.com", "uitour"],
-        ["https://screenshots.firefox.com", "uitour"],
         ["https://support.mozilla.org", "uitour"],
-        ["https://truecolors.firefox.com", "uitour"],
         ["about:home", "uitour"],
         ["about:newtab", "uitour"],
         ["https://addons.mozilla.org", "install"],
         ["https://support.mozilla.org", "remote-troubleshooting"],
-        ["https://fpn.firefox.com", "install"],
         ["about:welcome", "autoplay-media"],
       ].forEach(originInfo => {
         // Reset permission on the condition that it is set to
@@ -4214,6 +4379,30 @@ BrowserGlue.prototype = {
     if (currentUIVersion < 140) {
       // Remove browser.fixup.alternate.enabled pref in Bug 1850902.
       Services.prefs.clearUserPref("browser.fixup.alternate.enabled");
+    }
+
+    if (currentUIVersion < 141) {
+      for (const filename of ["signons.sqlite", "signons.sqlite.corrupt"]) {
+        const filePath = PathUtils.join(PathUtils.profileDir, filename);
+        IOUtils.remove(filePath, { ignoreAbsent: true }).catch(console.error);
+      }
+    }
+
+    if (currentUIVersion < 142) {
+      // Bug 1860392 - Remove incorrectly persisted theming values from sidebar style.
+      try {
+        let value = xulStore.getValue(BROWSER_DOCURL, "sidebar-box", "style");
+        if (value) {
+          // Remove custom properties.
+          value = value
+            .split(";")
+            .filter(v => !v.trim().startsWith("--"))
+            .join(";");
+          xulStore.setValue(BROWSER_DOCURL, "sidebar-box", "style", value);
+        }
+      } catch (ex) {
+        console.error(ex);
+      }
     }
 
     // Update the migration version.
@@ -4427,7 +4616,7 @@ BrowserGlue.prototype = {
     ];
 
     const notifyBox = win.gBrowser.getNotificationBox();
-    const notification = notifyBox.appendNotification(
+    const notification = await notifyBox.appendNotification(
       "startup-restore-session-suggestion",
       {
         label: messageFragment,
@@ -5305,7 +5494,12 @@ export var DefaultBrowserCheck = {
     let buttonNumClicked = rv.get("buttonNumClicked");
     let checkboxState = rv.get("checked");
     if (buttonNumClicked == 0) {
-      shellService.setAsDefault();
+      try {
+        await shellService.setAsDefault();
+      } catch (e) {
+        this.log.error("Failed to set the default browser", e);
+      }
+
       shellService.pinToTaskbar();
     }
     if (checkboxState) {
@@ -5538,12 +5732,10 @@ export var AboutHomeStartupCache = {
       return;
     }
 
-    this.log = lazy.Log.repository.getLogger(this.LOG_NAME);
-    this.log.manageLevelFromPref(this.LOG_LEVEL_PREF);
-    this._appender = new lazy.Log.ConsoleAppender(
-      new lazy.Log.BasicFormatter()
-    );
-    this.log.addAppender(this._appender);
+    this.log = console.createInstance({
+      prefix: this.LOG_NAME,
+      maxLogLevelPref: this.LOG_LEVEL_PREF,
+    });
 
     this.log.trace("Initting.");
 
@@ -5645,7 +5837,6 @@ export var AboutHomeStartupCache = {
 
     if (this.log) {
       this.log.trace("Uninitialized.");
-      this.log.removeAppender(this._appender);
       this.log = null;
     }
 
@@ -6327,3 +6518,70 @@ export var AboutHomeStartupCache = {
     this._cacheEntryResolver(this._cacheEntry);
   },
 };
+
+async function RunOSKeyStoreSelfTest() {
+  // The linux implementation always causes an OS dialog, in contrast to
+  // Windows and macOS (the latter of which causes an OS dialog to appear on
+  // local developer builds), so only run on Windows and macOS and only if this
+  // has been built and signed by Mozilla's infrastructure. Similarly, don't
+  // run this code in automation.
+  if (
+    (AppConstants.platform != "win" && AppConstants.platform != "macosx") ||
+    !AppConstants.MOZILLA_OFFICIAL ||
+    Services.env.get("MOZ_AUTOMATION")
+  ) {
+    return;
+  }
+  let osKeyStore = Cc["@mozilla.org/security/oskeystore;1"].getService(
+    Ci.nsIOSKeyStore
+  );
+  let label = Services.prefs.getCharPref("security.oskeystore.test.label", "");
+  if (!label) {
+    label = Services.uuid.generateUUID().toString().slice(1, -1);
+    Services.prefs.setCharPref("security.oskeystore.test.label", label);
+    try {
+      await osKeyStore.asyncGenerateSecret(label);
+      Glean.oskeystore.selfTest.generate.set(true);
+    } catch (_) {
+      Glean.oskeystore.selfTest.generate.set(false);
+      return;
+    }
+  }
+  let secretAvailable = await osKeyStore.asyncSecretAvailable(label);
+  Glean.oskeystore.selfTest.available.set(secretAvailable);
+  if (!secretAvailable) {
+    return;
+  }
+  let encrypted = Services.prefs.getCharPref(
+    "security.oskeystore.test.encrypted",
+    ""
+  );
+  if (!encrypted) {
+    try {
+      encrypted = await osKeyStore.asyncEncryptBytes(label, [1, 1, 3, 8]);
+      Services.prefs.setCharPref(
+        "security.oskeystore.test.encrypted",
+        encrypted
+      );
+      Glean.oskeystore.selfTest.encrypt.set(true);
+    } catch (_) {
+      Glean.oskeystore.selfTest.encrypt.set(false);
+      return;
+    }
+  }
+  try {
+    let decrypted = await osKeyStore.asyncDecryptBytes(label, encrypted);
+    if (
+      decrypted.length != 4 ||
+      decrypted[0] != 1 ||
+      decrypted[1] != 1 ||
+      decrypted[2] != 3 ||
+      decrypted[3] != 8
+    ) {
+      throw new Error("decrypted value not as expected?");
+    }
+    Glean.oskeystore.selfTest.decrypt.set(true);
+  } catch (_) {
+    Glean.oskeystore.selfTest.decrypt.set(false);
+  }
+}

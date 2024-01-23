@@ -38,7 +38,35 @@ dictionary ElementCreationOptions {
 };
 
 /* https://dom.spec.whatwg.org/#interface-document */
-[Exposed=Window]
+[Exposed=Window,
+ InstrumentedProps=(caretRangeFromPoint,
+                    exitPictureInPicture,
+                    featurePolicy,
+                    onbeforecopy,
+                    onbeforecut,
+                    onbeforepaste,
+                    oncancel,
+                    onfreeze,
+                    onmousewheel,
+                    onresume,
+                    onsearch,
+                    onwebkitfullscreenchange,
+                    onwebkitfullscreenerror,
+                    pictureInPictureElement,
+                    pictureInPictureEnabled,
+                    registerElement,
+                    wasDiscarded,
+                    webkitCancelFullScreen,
+                    webkitCurrentFullScreenElement,
+                    webkitExitFullscreen,
+                    webkitFullscreenElement,
+                    webkitFullscreenEnabled,
+                    webkitHidden,
+                    webkitIsFullScreen,
+                    webkitVisibilityState,
+                    xmlEncoding,
+                    xmlStandalone,
+                    xmlVersion)]
 interface Document : Node {
   [Throws]
   constructor();
@@ -123,6 +151,9 @@ interface Document : Node {
 
 // https://html.spec.whatwg.org/multipage/dom.html#the-document-object
 partial interface Document {
+  [Pref="dom.webcomponents.shadowdom.declarative.enabled"]
+  static Document parseHTMLUnsafe(DOMString html);
+
   [PutForwards=href, LegacyUnforgeable] readonly attribute Location? location;
   [SetterThrows]                           attribute DOMString domain;
   readonly attribute DOMString referrer;
@@ -440,7 +471,7 @@ partial interface Document {
   [ChromeOnly]
   attribute boolean devToolsAnonymousAndShadowEventsEnabled;
 
-  [ChromeOnly] readonly attribute DOMString contentLanguage;
+  [ChromeOnly, BinaryName="contentLanguageForBindings"] readonly attribute DOMString contentLanguage;
 
   [ChromeOnly] readonly attribute nsILoadGroup? documentLoadGroup;
 

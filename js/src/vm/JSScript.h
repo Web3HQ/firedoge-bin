@@ -27,7 +27,7 @@
 
 #include "frontend/ScriptIndex.h"  // ScriptIndex
 #include "gc/Barrier.h"
-#include "js/ColumnNumber.h"  // JS::LimitedColumnNumberZeroOrigin
+#include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin, JS::LimitedColumnNumberOneOrigin
 #include "js/CompileOptions.h"
 #include "js/Transcoding.h"
 #include "js/UbiNode.h"
@@ -623,7 +623,7 @@ class ScriptSource {
   uint32_t startLine_ = 0;
   // Column number within the file where this source starts,
   // in UTF-16 code units.
-  JS::LimitedColumnNumberZeroOrigin startColumn_;
+  JS::LimitedColumnNumberOneOrigin startColumn_;
 
   // See: CompileOptions::mutedErrors.
   bool mutedErrors_ = false;
@@ -1030,6 +1030,9 @@ class ScriptSource {
   [[nodiscard]] bool setFilename(FrontendContext* fc, const char* filename);
   [[nodiscard]] bool setFilename(FrontendContext* fc, UniqueChars&& filename);
 
+  bool hasIntroducerFilename() const {
+    return introducerFilename_ ? true : false;
+  }
   const char* introducerFilename() const {
     return introducerFilename_ ? introducerFilename_.chars() : filename();
   }
@@ -1063,7 +1066,7 @@ class ScriptSource {
   bool mutedErrors() const { return mutedErrors_; }
 
   uint32_t startLine() const { return startLine_; }
-  JS::LimitedColumnNumberZeroOrigin startColumn() const { return startColumn_; }
+  JS::LimitedColumnNumberOneOrigin startColumn() const { return startColumn_; }
 
   JS::DelazificationOption delazificationMode() const {
     return delazificationMode_;
@@ -1545,7 +1548,7 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
   // Line number (1-origin)
   uint32_t lineno() const { return extent_.lineno; }
   // Column number in UTF-16 code units
-  JS::LimitedColumnNumberZeroOrigin column() const { return extent_.column; }
+  JS::LimitedColumnNumberOneOrigin column() const { return extent_.column; }
 
   JS::DelazificationOption delazificationMode() const {
     return scriptSource()->delazificationMode();
@@ -1932,6 +1935,9 @@ class JSScript : public js::BaseScript {
   inline void incWarmUpCounter();
   inline void resetWarmUpCounterForGC();
 
+  inline void updateLastICStubCounter();
+  inline uint32_t warmUpCountAtLastICStub() const;
+
   void resetWarmUpCounterToDelayIonCompilation();
 
   unsigned getWarmUpResetCount() const {
@@ -1980,7 +1986,7 @@ class JSScript : public js::BaseScript {
 
   void addSizeOfJitScript(mozilla::MallocSizeOf mallocSizeOf,
                           size_t* sizeOfJitScript,
-                          size_t* sizeOfBaselineFallbackStubs) const;
+                          size_t* sizeOfAllocSites) const;
 
   mozilla::Span<const js::TryNote> trynotes() const {
     return immutableScriptData()->tryNotes();
@@ -2013,6 +2019,10 @@ class JSScript : public js::BaseScript {
   js::SrcNote* notes() const {
     MOZ_ASSERT(sharedData_);
     return immutableScriptData()->notes();
+  }
+  js::SrcNote* notesEnd() const {
+    MOZ_ASSERT(sharedData_);
+    return immutableScriptData()->notes() + numNotes();
   }
 
   JSString* getString(js::GCThingIndex index) const {
@@ -2126,10 +2136,6 @@ class JSScript : public js::BaseScript {
   // invariants of debuggee compartments, scripts, and frames.
   inline bool isDebuggee() const;
 
-  // Create an allocation site associated with this script/JitScript to track
-  // nursery allocations.
-  js::gc::AllocSite* createAllocSite();
-
   // A helper class to prevent relazification of the given function's script
   // while it's holding on to it.  This class automatically roots the script.
   class AutoDelazify;
@@ -2172,15 +2178,15 @@ class JSScript : public js::BaseScript {
   void dumpRecursive(JSContext* cx);
 
   static bool dump(JSContext* cx, JS::Handle<JSScript*> script,
-                   DumpOptions& options, js::Sprinter* sp);
+                   DumpOptions& options, js::StringPrinter* sp);
   static bool dumpSrcNotes(JSContext* cx, JS::Handle<JSScript*> script,
-                           js::Sprinter* sp);
+                           js::GenericPrinter* sp);
   static bool dumpTryNotes(JSContext* cx, JS::Handle<JSScript*> script,
-                           js::Sprinter* sp);
+                           js::GenericPrinter* sp);
   static bool dumpScopeNotes(JSContext* cx, JS::Handle<JSScript*> script,
-                             js::Sprinter* sp);
+                             js::GenericPrinter* sp);
   static bool dumpGCThings(JSContext* cx, JS::Handle<JSScript*> script,
-                           js::Sprinter* sp);
+                           js::GenericPrinter* sp);
 #endif
 };
 
@@ -2212,14 +2218,6 @@ extern JS::UniqueChars FormatIntroducedFilename(const char* filename,
                                                 uint32_t lineno,
                                                 const char* introducer);
 
-struct GSNCache;
-
-const js::SrcNote* GetSrcNote(GSNCache& cache, JSScript* script,
-                              jsbytecode* pc);
-
-extern const js::SrcNote* GetSrcNote(JSContext* cx, JSScript* script,
-                                     jsbytecode* pc);
-
 extern jsbytecode* LineNumberToPC(JSScript* script, unsigned lineno);
 
 extern JS_PUBLIC_API unsigned GetScriptLineExtent(JSScript* script);
@@ -2235,12 +2233,12 @@ namespace js {
 
 extern unsigned PCToLineNumber(
     JSScript* script, jsbytecode* pc,
-    JS::LimitedColumnNumberZeroOrigin* columnp = nullptr);
+    JS::LimitedColumnNumberOneOrigin* columnp = nullptr);
 
 extern unsigned PCToLineNumber(
-    unsigned startLine, JS::LimitedColumnNumberZeroOrigin startCol,
-    SrcNote* notes, jsbytecode* code, jsbytecode* pc,
-    JS::LimitedColumnNumberZeroOrigin* columnp = nullptr);
+    unsigned startLine, JS::LimitedColumnNumberOneOrigin startCol,
+    SrcNote* notes, SrcNote* notesEnd, jsbytecode* code, jsbytecode* pc,
+    JS::LimitedColumnNumberOneOrigin* columnp = nullptr);
 
 /*
  * This function returns the file and line number of the script currently

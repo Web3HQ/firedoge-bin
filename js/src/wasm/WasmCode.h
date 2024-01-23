@@ -45,6 +45,7 @@
 #include "threading/ExclusiveData.h"
 #include "util/Memory.h"
 #include "vm/MutexIDs.h"
+#include "wasm/WasmBuiltinModule.h"
 #include "wasm/WasmBuiltins.h"
 #include "wasm/WasmCodegenConstants.h"
 #include "wasm/WasmCodegenTypes.h"
@@ -360,6 +361,7 @@ struct MetadataCacheablePod {
   uint32_t instanceDataLength;
   Maybe<uint32_t> startFuncIndex;
   Maybe<uint32_t> nameCustomSectionIndex;
+  BuiltinModuleIds builtinModules;
   bool filenameIsURL;
   uint32_t typeDefsOffsetStart;
   uint32_t memoriesOffsetStart;
@@ -368,9 +370,10 @@ struct MetadataCacheablePod {
   uint32_t padding;
 
   WASM_CHECK_CACHEABLE_POD(kind, instanceDataLength, startFuncIndex,
-                           nameCustomSectionIndex, filenameIsURL,
-                           typeDefsOffsetStart, memoriesOffsetStart,
-                           tablesOffsetStart, tagsOffsetStart)
+                           nameCustomSectionIndex, builtinModules,
+                           filenameIsURL, typeDefsOffsetStart,
+                           memoriesOffsetStart, tablesOffsetStart,
+                           tagsOffsetStart)
 
   explicit MetadataCacheablePod(ModuleKind kind)
       : kind(kind),
@@ -417,6 +420,9 @@ struct Metadata : public ShareableBase<Metadata>, public MetadataCacheablePod {
   MetadataCacheablePod& pod() { return *this; }
   const MetadataCacheablePod& pod() const { return *this; }
 
+  const TypeDef& getFuncImportTypeDef(const FuncImport& funcImport) const {
+    return types->type(funcImport.typeIndex());
+  }
   const FuncType& getFuncImportType(const FuncImport& funcImport) const {
     return types->type(funcImport.typeIndex()).funcType();
   }
@@ -485,6 +491,7 @@ struct MetadataTier {
   FuncExportVector funcExports;
   StackMaps stackMaps;
   TryNoteVector tryNotes;
+  CodeRangeUnwindInfoVector codeRangeUnwindInfos;
 
   // Debug information, not serialized.
   uint32_t debugTrapOffset;
@@ -760,6 +767,8 @@ class JumpTables {
 
 using SharedCode = RefPtr<const Code>;
 using MutableCode = RefPtr<Code>;
+using MetadataAnalysisHashMap =
+    HashMap<const char*, uint32_t, mozilla::CStringHasher, SystemAllocPolicy>;
 
 class Code : public ShareableBase<Code> {
   UniqueCodeTier tier1_;
@@ -845,6 +854,7 @@ class Code : public ShareableBase<Code> {
   const TryNote* lookupTryNote(void* pc, Tier* tier) const;
   bool containsCodePC(const void* pc) const;
   bool lookupTrap(void* pc, Trap* trap, BytecodeOffset* bytecode) const;
+  const CodeRangeUnwindInfo* lookupUnwindInfo(void* pc) const;
 
   // To save memory, profilingLabels_ are generated lazily when profiling mode
   // is enabled.
@@ -856,6 +866,9 @@ class Code : public ShareableBase<Code> {
 
   void disassemble(JSContext* cx, Tier tier, int kindSelection,
                    PrintCallback printString) const;
+
+  // Wasm metadata size analysis
+  MetadataAnalysisHashMap metadataAnalysis(JSContext* cx) const;
 
   // about:memory reporting:
 

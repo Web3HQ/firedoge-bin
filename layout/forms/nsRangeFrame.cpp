@@ -13,24 +13,20 @@
 
 #include "gfxContext.h"
 #include "nsContentCreatorFunctions.h"
-#include "nsCSSPseudoElements.h"
 #include "nsCSSRendering.h"
 #include "nsDisplayList.h"
 #include "nsIContent.h"
 #include "nsLayoutUtils.h"
 #include "mozilla/dom/Document.h"
-#include "nsNameSpaceManager.h"
 #include "nsGkAtoms.h"
 #include "mozilla/dom/HTMLDataListElement.h"
 #include "mozilla/dom/HTMLInputElement.h"
 #include "mozilla/dom/HTMLOptionElement.h"
 #include "mozilla/dom/MutationEventBinding.h"
 #include "nsPresContext.h"
-#include "nsPresContextInlines.h"
 #include "nsNodeInfoManager.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/ServoStyleSet.h"
-#include "nsStyleConsts.h"
 #include "nsTArray.h"
 
 #ifdef ACCESSIBILITY
@@ -83,41 +79,39 @@ void nsRangeFrame::Destroy(DestroyContext& aContext) {
   nsContainerFrame::Destroy(aContext);
 }
 
-nsresult nsRangeFrame::MakeAnonymousDiv(Element** aResult,
-                                        PseudoStyleType aPseudoType,
-                                        nsTArray<ContentInfo>& aElements) {
-  nsCOMPtr<Document> doc = mContent->GetComposedDoc();
-  RefPtr<Element> resultElement = doc->CreateHTMLElement(nsGkAtoms::div);
+static already_AddRefed<Element> MakeAnonymousDiv(
+    Document& aDoc, PseudoStyleType aOldPseudoType,
+    PseudoStyleType aModernPseudoType,
+    nsTArray<nsIAnonymousContentCreator::ContentInfo>& aElements) {
+  RefPtr<Element> result = aDoc.CreateHTMLElement(nsGkAtoms::div);
 
   // Associate the pseudo-element with the anonymous child.
-  resultElement->SetPseudoElementType(aPseudoType);
+  if (StaticPrefs::layout_css_modern_range_pseudos_enabled()) {
+    result->SetPseudoElementType(aModernPseudoType);
+  } else {
+    result->SetPseudoElementType(aOldPseudoType);
+  }
 
   // XXX(Bug 1631371) Check if this should use a fallible operation as it
   // pretended earlier, or change the return type to void.
-  aElements.AppendElement(resultElement);
+  aElements.AppendElement(result);
 
-  resultElement.forget(aResult);
-  return NS_OK;
+  return result.forget();
 }
 
 nsresult nsRangeFrame::CreateAnonymousContent(
     nsTArray<ContentInfo>& aElements) {
-  nsresult rv;
-
+  Document* doc = mContent->OwnerDoc();
   // Create the ::-moz-range-track pseudo-element (a div):
-  rv = MakeAnonymousDiv(getter_AddRefs(mTrackDiv),
-                        PseudoStyleType::mozRangeTrack, aElements);
-  NS_ENSURE_SUCCESS(rv, rv);
-
+  mTrackDiv = MakeAnonymousDiv(*doc, PseudoStyleType::mozRangeTrack,
+                               PseudoStyleType::sliderTrack, aElements);
   // Create the ::-moz-range-progress pseudo-element (a div):
-  rv = MakeAnonymousDiv(getter_AddRefs(mProgressDiv),
-                        PseudoStyleType::mozRangeProgress, aElements);
-  NS_ENSURE_SUCCESS(rv, rv);
-
+  mProgressDiv = MakeAnonymousDiv(*doc, PseudoStyleType::mozRangeProgress,
+                                  PseudoStyleType::sliderFill, aElements);
   // Create the ::-moz-range-thumb pseudo-element (a div):
-  rv = MakeAnonymousDiv(getter_AddRefs(mThumbDiv),
-                        PseudoStyleType::mozRangeThumb, aElements);
-  return rv;
+  mThumbDiv = MakeAnonymousDiv(*doc, PseudoStyleType::mozRangeThumb,
+                               PseudoStyleType::sliderThumb, aElements);
+  return NS_OK;
 }
 
 void nsRangeFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
@@ -140,15 +134,13 @@ void nsRangeFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
   const nsStyleDisplay* disp = StyleDisplay();
   if (IsThemed(disp)) {
     DisplayBorderBackgroundOutline(aBuilder, aLists);
-    // Only create items for the thumb. Specifically, we do not want
-    // the track to paint, since *our* background is used to paint
-    // the track, and we don't want the unthemed track painting over
-    // the top of the themed track.
+    // Only create items for the thumb. Specifically, we do not want the track
+    // to paint, since *our* background is used to paint the track, and we don't
+    // want the unthemed track painting over the top of the themed track.
     // This logic is copied from
     // nsContainerFrame::BuildDisplayListForNonBlockChildren as
     // called by BuildDisplayListForInline.
-    nsIFrame* thumb = mThumbDiv->GetPrimaryFrame();
-    if (thumb) {
+    if (nsIFrame* thumb = mThumbDiv->GetPrimaryFrame()) {
       nsDisplayListSet set(aLists, aLists.Content());
       BuildDisplayListForChild(aBuilder, thumb, set, DisplayChildFlag::Inline);
     }
@@ -323,7 +315,18 @@ a11y::AccType nsRangeFrame::AccessibleType() { return a11y::eHTMLRangeType; }
 #endif
 
 double nsRangeFrame::GetValueAsFractionOfRange() {
-  return GetDoubleAsFractionOfRange(InputElement().GetValueAsDecimal());
+  const auto& input = InputElement();
+  if (MOZ_UNLIKELY(!input.IsDoneCreating())) {
+    // Our element isn't done being created, so its values haven't yet been
+    // sanitized! (It's rare that we'd be reflowed when our element is in this
+    // state, but it can happen if the parser decides to yield while processing
+    // its tasks to build the element.)  We can't trust that any of our numeric
+    // values will make sense until they've been sanitized; so for now, just
+    // use 0.0 as a fallback fraction-of-range value here (i.e. behave as if
+    // we're at our minimum, which is how the spec handles some edge cases).
+    return 0.0;
+  }
+  return GetDoubleAsFractionOfRange(input.GetValueAsDecimal());
 }
 
 double nsRangeFrame::GetDoubleAsFractionOfRange(const Decimal& aValue) {
@@ -713,7 +716,7 @@ LogicalSize nsRangeFrame::ComputeAutoSize(
 }
 
 nscoord nsRangeFrame::GetMinISize(gfxContext* aRenderingContext) {
-  auto pos = StylePosition();
+  const auto* pos = StylePosition();
   auto wm = GetWritingMode();
   if (pos->ISize(wm).HasPercent()) {
     // https://drafts.csswg.org/css-sizing-3/#percentage-sizing

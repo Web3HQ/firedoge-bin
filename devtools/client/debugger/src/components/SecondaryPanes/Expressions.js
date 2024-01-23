@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
+import React, { Component } from "devtools/client/shared/vendor/react";
 import {
   div,
   input,
@@ -11,27 +11,33 @@ import {
   form,
   datalist,
   option,
-} from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../../utils/connect";
+  span,
+} from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 import { features } from "../../utils/prefs";
+import AccessibleImage from "../shared/AccessibleImage";
 
 import { objectInspector } from "devtools/client/shared/components/reps/index";
 
-import actions from "../../actions";
+import actions from "../../actions/index";
 import {
   getExpressions,
   getExpressionError,
   getAutocompleteMatchset,
-} from "../../selectors";
+  getSelectedSource,
+  isMapScopesEnabled,
+  getIsCurrentThreadPaused,
+  getSelectedFrame,
+  getOriginalFrameScope,
+  getCurrentThread,
+} from "../../selectors/index";
 import { getExpressionResultGripAndFront } from "../../utils/expressions";
 
-import { CloseButton } from "../shared/Button";
+import { CloseButton } from "../shared/Button/index";
 
-import "./Expressions.css";
-
-const { debounce } = require("devtools/shared/debounce");
-const classnames = require("devtools/client/shared/classnames.js");
+const { debounce } = require("resource://devtools/shared/debounce.js");
+const classnames = require("resource://devtools/client/shared/classnames.js");
 
 const { ObjectInspector } = objectInspector;
 
@@ -64,6 +70,8 @@ class Expressions extends Component {
       showInput: PropTypes.bool.isRequired,
       unHighlightDomElement: PropTypes.func.isRequired,
       updateExpression: PropTypes.func.isRequired,
+      isOriginalVariableMappingDisabled: PropTypes.bool,
+      isLoadingOriginalVariables: PropTypes.bool,
     };
   }
 
@@ -99,13 +107,22 @@ class Expressions extends Component {
 
   shouldComponentUpdate(nextProps, nextState) {
     const { editing, inputValue, focused } = this.state;
-    const { expressions, expressionError, showInput, autocompleteMatches } =
-      this.props;
+    const {
+      expressions,
+      expressionError,
+      showInput,
+      autocompleteMatches,
+      isLoadingOriginalVariables,
+      isOriginalVariableMappingDisabled,
+    } = this.props;
 
     return (
       autocompleteMatches !== nextProps.autocompleteMatches ||
       expressions !== nextProps.expressions ||
       expressionError !== nextProps.expressionError ||
+      isLoadingOriginalVariables !== nextProps.isLoadingOriginalVariables ||
+      isOriginalVariableMappingDisabled !==
+        nextProps.isOriginalVariableMappingDisabled ||
       editing !== nextState.editing ||
       inputValue !== nextState.inputValue ||
       nextProps.showInput !== showInput ||
@@ -202,6 +219,43 @@ class Expressions extends Component {
 
     this.props.clearAutocomplete();
   };
+
+  renderExpressionsNotification() {
+    const { isOriginalVariableMappingDisabled, isLoadingOriginalVariables } =
+      this.props;
+
+    if (isOriginalVariableMappingDisabled) {
+      return div(
+        {
+          className: "pane-info no-original-scopes-info",
+          "aria-role": "status",
+        },
+        span(
+          { className: "info icon" },
+          React.createElement(AccessibleImage, { className: "sourcemap" })
+        ),
+        span(
+          { className: "message" },
+          L10N.getStr("expressions.noOriginalScopes")
+        )
+      );
+    }
+
+    if (isLoadingOriginalVariables) {
+      return div(
+        { className: "pane-info" },
+        span(
+          { className: "info icon" },
+          React.createElement(AccessibleImage, { className: "loader" })
+        ),
+        span(
+          { className: "message" },
+          L10N.getStr("scopes.loadingOriginalScopes")
+        )
+      );
+    }
+    return null;
+  }
 
   renderExpression = (expression, index) => {
     const {
@@ -400,19 +454,45 @@ class Expressions extends Component {
   render() {
     const { expressions } = this.props;
 
-    if (expressions.length === 0) {
-      return this.renderNewExpressionInput();
-    }
-
-    return this.renderExpressions();
+    return div(
+      { className: "pane" },
+      this.renderExpressionsNotification(),
+      expressions.length === 0
+        ? this.renderNewExpressionInput()
+        : this.renderExpressions()
+    );
   }
 }
 
-const mapStateToProps = state => ({
-  autocompleteMatches: getAutocompleteMatchset(state),
-  expressions: getExpressions(state),
-  expressionError: getExpressionError(state),
-});
+const mapStateToProps = state => {
+  const selectedFrame = getSelectedFrame(state, getCurrentThread(state));
+  const selectedSource = getSelectedSource(state);
+  const isPaused = getIsCurrentThreadPaused(state);
+  const mapScopesEnabled = isMapScopesEnabled(state);
+  const expressions = getExpressions(state);
+
+  const selectedSourceIsNonPrettyPrintedOriginal =
+    selectedSource?.isOriginal && !selectedSource?.isPrettyPrinted;
+
+  let isOriginalVariableMappingDisabled, isLoadingOriginalVariables;
+
+  if (selectedSourceIsNonPrettyPrintedOriginal) {
+    isOriginalVariableMappingDisabled = isPaused && !mapScopesEnabled;
+    isLoadingOriginalVariables =
+      isPaused &&
+      mapScopesEnabled &&
+      !expressions.length &&
+      !getOriginalFrameScope(state, selectedFrame)?.scope;
+  }
+
+  return {
+    isOriginalVariableMappingDisabled,
+    isLoadingOriginalVariables,
+    autocompleteMatches: getAutocompleteMatchset(state),
+    expressions,
+    expressionError: getExpressionError(state),
+  };
+};
 
 export default connect(mapStateToProps, {
   autocomplete: actions.autocomplete,

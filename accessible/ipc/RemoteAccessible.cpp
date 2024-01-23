@@ -22,7 +22,7 @@
 #include "nsTextEquivUtils.h"
 #include "Pivot.h"
 #include "Relation.h"
-#include "RelationType.h"
+#include "mozilla/a11y/RelationType.h"
 #include "xpcAccessibleDocument.h"
 
 #ifdef A11Y_LOG
@@ -377,7 +377,29 @@ bool RemoteAccessible::ContainsPoint(int32_t aX, int32_t aY) {
     return false;
   }
   if (!IsTextLeaf()) {
-    return true;
+    if (IsImage() || IsImageMap() || !HasChildren() ||
+        RefPtr{DisplayStyle()} != nsGkAtoms::inlinevalue) {
+      // This isn't an inline element that might contain text, so we don't need
+      // to walk lines. It's enough that our rect contains the point.
+      return true;
+    }
+    // Non-image inline elements with children can wrap across lines just like
+    // text leaves; see below.
+    // Walk the children, which will walk the lines of text in any text leaves.
+    uint32_t count = ChildCount();
+    for (uint32_t c = 0; c < count; ++c) {
+      RemoteAccessible* child = RemoteChildAt(c);
+      if (child->Role() == roles::TEXT_CONTAINER && child->IsClipped()) {
+        // There is a clipped child. This is a candidate for fuzzy hit testing.
+        // See RemoteAccessible::DoFuzzyHittesting.
+        return true;
+      }
+      if (child->ContainsPoint(aX, aY)) {
+        return true;
+      }
+    }
+    // None of our descendants contain the point, so nor do we.
+    return false;
   }
   // This is a text leaf. The text might wrap across lines, which means our
   // rect might cover a wider area than the actual text. For example, if the
@@ -1157,7 +1179,7 @@ nsTArray<bool> RemoteAccessible::PreProcessRelations(AccAttributes* aFields) {
         newRelationTargets && newRelationTargets->Length();
 
     // Remove existing implicit relations if we need to perform an update, or
-    // if we've recieved a DeleteEntry(). Only do this if mCachedFields is
+    // if we've received a DeleteEntry(). Only do this if mCachedFields is
     // initialized. If mCachedFields is not initialized, we still need to
     // construct the update array so we correctly handle reverse rels in
     // PostProcessRelations.

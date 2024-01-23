@@ -13,6 +13,7 @@
 
 // Local Includes
 // Helper Classes
+#include "mozilla/WeakPtr.h"
 #include "nsCOMPtr.h"
 #include "nsWeakReference.h"
 #include "nsTHashMap.h"
@@ -217,7 +218,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
       mozilla::dom::WindowGlobalChild* aActor);
 
   // nsISupports
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_ISUPPORTS_INHERITED
+  NS_IMETHOD_(void) DeleteCycleCollectable() override;
 
   // nsWrapperCache
   virtual JSObject* WrapObject(JSContext* cx,
@@ -362,6 +364,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   // Inner windows only.
   void RefreshRealmPrincipal();
+  void RefreshReduceTimerPrecisionCallerType();
 
   // For accessing protected field mFullscreen
   friend class FullscreenTransitionTask;
@@ -639,7 +642,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // https://w3c.github.io/webappsec-secure-contexts/#dom-window-issecurecontext
   bool IsSecureContext() const;
 
-  void GetSidebar(mozilla::dom::OwningExternalOrWindowProxy& aResult);
   mozilla::dom::External* External();
 
   mozilla::dom::Worklet* GetPaintWorklet(mozilla::ErrorResult& aRv);
@@ -735,7 +737,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   already_AddRefed<mozilla::dom::MediaQueryList> MatchMedia(
       const nsACString& aQuery, mozilla::dom::CallerType aCallerType,
       mozilla::ErrorResult& aError);
-  nsScreen* GetScreen(mozilla::ErrorResult& aError);
+  nsScreen* Screen();
   void MoveTo(int32_t aXPos, int32_t aYPos,
               mozilla::dom::CallerType aCallerType,
               mozilla::ErrorResult& aError);
@@ -1097,10 +1099,14 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // available.
   nsIPrincipal* GetClientPrincipal();
 
+  // Whether the chrome window is currently in a full screen transition. This
+  // flag is updated from FullscreenTransitionTask.
+  bool IsInFullScreenTransition();
+
   // This method is called if this window loads a 3rd party tracking resource
-  // and the storage is just been granted. The window can reset the partitioned
+  // and the storage is just been changed. The window can reset the partitioned
   // storage objects and switch to the first party cookie jar.
-  void StorageAccessPermissionGranted();
+  void StorageAccessPermissionChanged();
 
  protected:
   static void NotifyDOMWindowDestroyed(nsGlobalWindowInner* aWindow);
@@ -1186,14 +1192,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   static uint32_t GetShortcutsPermission(nsIPrincipal* aPrincipal);
 
   // Dispatch a runnable related to the global.
-  virtual nsresult Dispatch(mozilla::TaskCategory aCategory,
-                            already_AddRefed<nsIRunnable>&& aRunnable) override;
-
-  virtual nsISerialEventTarget* EventTargetFor(
-      mozilla::TaskCategory aCategory) const override;
-
-  virtual mozilla::AbstractThread* AbstractMainThreadFor(
-      mozilla::TaskCategory aCategory) override;
+  nsresult Dispatch(already_AddRefed<nsIRunnable>&& aRunnable) const final;
+  nsISerialEventTarget* SerialEventTarget() const final;
 
   void DisableIdleCallbackRequests();
   uint32_t LastIdleRequestHandle() const {
@@ -1447,7 +1447,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   nsTArray<uint32_t> mScrollMarks;
 
-  nsTArray<nsWeakPtr> mDataDocumentsForMemoryReporting;
+  nsTArray<mozilla::WeakPtr<Document>> mDataDocumentsForMemoryReporting;
 
   static InnerWindowByIdTable* sInnerWindowsById;
 

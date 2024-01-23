@@ -7,10 +7,10 @@
  * @module utils/test-head
  */
 
-import { combineReducers } from "redux";
-import reducers from "../reducers";
-import actions from "../actions";
-import * as selectors from "../selectors";
+import { combineReducers } from "devtools/client/shared/vendor/redux";
+import reducers from "../reducers/index";
+import actions from "../actions/index";
+import * as selectors from "../selectors/index";
 import {
   searchWorker,
   prettyPrintWorker,
@@ -108,16 +108,8 @@ function createSourceObject(filename, props = {}) {
     isPrettyPrinted: false,
     isExtension: false,
     isOriginal: filename.includes("originalSource"),
+    displayURL: makeSourceURL(filename),
   };
-}
-
-function createOriginalSourceObject(generated) {
-  const rv = {
-    ...generated,
-    id: `${generated.id}/originalSource`,
-  };
-
-  return rv;
 }
 
 function makeSourceURL(filename) {
@@ -280,7 +272,6 @@ export {
   getTelemetryEvents,
   makeFrame,
   createSourceObject,
-  createOriginalSourceObject,
   createMakeSource,
   makeSourceURL,
   makeSource,

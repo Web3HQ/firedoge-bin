@@ -327,6 +327,12 @@ class nsDocShellLoadState final {
     mRemoteTypeOverride = mozilla::Some(aRemoteTypeOverride);
   }
 
+  void SetWasSchemelessInput(bool aWasSchemelessInput) {
+    mWasSchemelessInput = aWasSchemelessInput;
+  }
+
+  bool GetWasSchemelessInput() { return mWasSchemelessInput; }
+
   // Determine the remote type of the process which should be considered
   // responsible for this load for the purposes of security checks.
   //
@@ -357,10 +363,12 @@ class nsDocShellLoadState final {
   void CalculateLoadURIFlags();
 
   // Compute the load flags to be used by creating channel.  aUriModified and
-  // aIsXFOError are expected to be Nothing when called from Parent process.
+  // aIsEmbeddingBlockedError are expected to be Nothing when called from parent
+  // process.
   nsLoadFlags CalculateChannelLoadFlags(
       mozilla::dom::BrowsingContext* aBrowsingContext,
-      mozilla::Maybe<bool> aUriModified, mozilla::Maybe<bool> aIsXFOError);
+      mozilla::Maybe<bool> aUriModified,
+      mozilla::Maybe<bool> aIsEmbeddingBlockedError);
 
   mozilla::dom::DocShellLoadStateInit Serialize(
       mozilla::ipc::IProtocol* aActor);
@@ -483,8 +491,7 @@ class nsDocShellLoadState final {
   bool mOriginalFrameSrc;
 
   // If this attribute is true, then the load was initiated by a
-  // form submission. This is important to know for the CSP directive
-  // navigate-to.
+  // form submission.
   bool mIsFormSubmission;
 
   // Contains a load type as specified by the nsDocShellLoadTypes::load*
@@ -594,6 +601,9 @@ class nsDocShellLoadState final {
 
   // Remote type of the process which originally requested the load.
   nsCString mTriggeringRemoteType;
+
+  // if the to-be-loaded address had it protocol added through a fixup
+  bool mWasSchemelessInput = false;
 };
 
 #endif /* nsDocShellLoadState_h__ */

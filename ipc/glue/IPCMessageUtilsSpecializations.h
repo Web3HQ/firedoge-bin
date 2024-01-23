@@ -34,6 +34,7 @@
 #include "mozilla/Unused.h"
 #include "mozilla/Vector.h"
 #include "mozilla/dom/ipc/StructuredCloneData.h"
+#include "mozilla/dom/UserActivation.h"
 #include "nsCSSPropertyID.h"
 #include "nsDebug.h"
 #include "nsIContentPolicy.h"
@@ -755,7 +756,16 @@ struct ParamTraits<std::tuple<Ts...>> {
 template <>
 struct ParamTraits<mozilla::net::LinkHeader> {
   typedef mozilla::net::LinkHeader paramType;
+  constexpr static int kNumberOfMembers = 14;
+  constexpr static int kSizeOfEachMember = sizeof(nsString);
+  constexpr static int kExpectedSizeOfParamType =
+      kNumberOfMembers * kSizeOfEachMember;
+
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    static_assert(sizeof(paramType) == kExpectedSizeOfParamType,
+                  "All members of should be written below.");
+    // Bug 1860565: `aParam.mAnchor` is not written.
+
     WriteParam(aWriter, aParam.mHref);
     WriteParam(aWriter, aParam.mRel);
     WriteParam(aWriter, aParam.mTitle);
@@ -768,8 +778,13 @@ struct ParamTraits<mozilla::net::LinkHeader> {
     WriteParam(aWriter, aParam.mCrossOrigin);
     WriteParam(aWriter, aParam.mReferrerPolicy);
     WriteParam(aWriter, aParam.mAs);
+    WriteParam(aWriter, aParam.mFetchPriority);
   }
   static bool Read(MessageReader* aReader, paramType* aResult) {
+    static_assert(sizeof(paramType) == kExpectedSizeOfParamType,
+                  "All members of should be handled below.");
+    // Bug 1860565: `aParam.mAnchor` is not handled.
+
     if (!ReadParam(aReader, &aResult->mHref)) {
       return false;
     }
@@ -803,7 +818,21 @@ struct ParamTraits<mozilla::net::LinkHeader> {
     if (!ReadParam(aReader, &aResult->mReferrerPolicy)) {
       return false;
     }
-    return ReadParam(aReader, &aResult->mAs);
+    if (!ReadParam(aReader, &aResult->mAs)) {
+      return false;
+    }
+    return ReadParam(aReader, &aResult->mFetchPriority);
+  };
+};
+
+template <>
+struct ParamTraits<mozilla::dom::UserActivation::Modifiers> {
+  typedef mozilla::dom::UserActivation::Modifiers paramType;
+  static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    WriteParam(aWriter, aParam.mModifiers);
+  }
+  static bool Read(MessageReader* aReader, paramType* aResult) {
+    return ReadParam(aReader, &aResult->mModifiers);
   };
 };
 

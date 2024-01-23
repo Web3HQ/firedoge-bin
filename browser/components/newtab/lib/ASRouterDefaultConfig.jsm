@@ -10,8 +10,8 @@ const EXPORTED_SYMBOLS = ["ASRouterDefaultConfig"];
 const { ASRouter } = ChromeUtils.import(
   "resource://activity-stream/lib/ASRouter.jsm"
 );
-const { TelemetryFeed } = ChromeUtils.import(
-  "resource://activity-stream/lib/TelemetryFeed.jsm"
+const { TelemetryFeed } = ChromeUtils.importESModule(
+  "resource://activity-stream/lib/TelemetryFeed.sys.mjs"
 );
 const { ASRouterParentProcessMessageHandler } = ChromeUtils.import(
   "resource://activity-stream/lib/ASRouterParentProcessMessageHandler.jsm"
@@ -30,6 +30,12 @@ const { ActivityStreamStorage } = ChromeUtils.import(
 );
 
 const createStorage = async telemetryFeed => {
+  // "snippets" is the name of one storage space, but these days it is used
+  // not for snippet-related data (snippets were removed in bug 1715158),
+  // but storage for impression or session data for all ASRouter messages.
+  //
+  // We keep the name "snippets" to avoid having to do an IndexedDB database
+  // migration.
   const dbStore = new ActivityStreamStorage({
     storeNames: ["sectionPrefs", "snippets"],
     telemetry: {

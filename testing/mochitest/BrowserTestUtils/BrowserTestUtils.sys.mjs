@@ -292,7 +292,14 @@ export var BrowserTestUtils = {
    *
    * @return {boolean}
    */
-  is_hidden(element) {
+  isHidden(element) {
+    if (
+      element.nodeType == Node.DOCUMENT_FRAGMENT_NODE &&
+      element.containingShadowRoot == element
+    ) {
+      return BrowserTestUtils.isHidden(element.getRootNode().host);
+    }
+
     let win = element.ownerGlobal;
     let style = win.getComputedStyle(element);
     if (style.display == "none") {
@@ -307,7 +314,7 @@ export var BrowserTestUtils = {
 
     // Hiding a parent element will hide all its children
     if (element.parentNode != element.ownerDocument) {
-      return BrowserTestUtils.is_hidden(element.parentNode);
+      return BrowserTestUtils.isHidden(element.parentNode);
     }
 
     return false;
@@ -321,7 +328,14 @@ export var BrowserTestUtils = {
    *
    * @return {boolean}
    */
-  is_visible(element) {
+  isVisible(element) {
+    if (
+      element.nodeType == Node.DOCUMENT_FRAGMENT_NODE &&
+      element.containingShadowRoot == element
+    ) {
+      return BrowserTestUtils.isVisible(element.getRootNode().host);
+    }
+
     let win = element.ownerGlobal;
     let style = win.getComputedStyle(element);
     if (style.display == "none") {
@@ -336,7 +350,7 @@ export var BrowserTestUtils = {
 
     // Hiding a parent element will hide all its children
     if (element.parentNode != element.ownerDocument) {
-      return BrowserTestUtils.is_visible(element.parentNode);
+      return BrowserTestUtils.isVisible(element.parentNode);
     }
 
     return true;
@@ -438,6 +452,11 @@ export var BrowserTestUtils = {
       throw new Error(
         "The second argument to browserLoaded should be a boolean."
       );
+    }
+
+    // Consumers may pass gBrowser instead of a browser, so adjust for that.
+    if ("selectedBrowser" in browser) {
+      browser = browser.selectedBrowser;
     }
 
     // If browser belongs to tabbrowser-tab, ensure it has been
@@ -719,6 +738,8 @@ export var BrowserTestUtils = {
    * @param {boolean} [waitForAnyTab = false]
    *        True to wait for the url to be loaded in any new tab, not just the next
    *        one opened.
+   * @param {boolean} [maybeErrorPage = false]
+   *        See ``browserLoaded`` function.
    *
    * @return {Promise}
    * @resolves With the {xul:tab} when a tab is opened and its location changes
@@ -731,7 +752,8 @@ export var BrowserTestUtils = {
     tabbrowser,
     wantLoad = null,
     waitForLoad = false,
-    waitForAnyTab = false
+    waitForAnyTab = false,
+    maybeErrorPage = false
   ) {
     let urlMatches;
     if (wantLoad && typeof wantLoad == "function") {
@@ -760,7 +782,8 @@ export var BrowserTestUtils = {
             result = BrowserTestUtils.browserLoaded(
               newBrowser,
               false,
-              urlMatches
+              urlMatches,
+              maybeErrorPage
             ).then(() => newTab);
           } else {
             // If not waiting for load, just resolve with the new tab.
@@ -835,13 +858,14 @@ export var BrowserTestUtils = {
    *
    * @param {Object} aParams
    * @param {string} [aParams.url]
-   *        If set, we will wait until the initial browser in the new window
-   *        has loaded a particular page.
-   *        If unset, the initial browser may or may not have finished
-   *        loading its first page when the resulting Promise resolves.
+   *        The url to await being loaded. If unset this may or may not wait for
+   *        any page to be loaded, according to the waitForAnyURLLoaded param.
+   * @param {bool} [aParams.waitForAnyURLLoaded] When `url` is unset, this
+   *        controls whether to wait for any initial URL to be loaded.
+   *        Defaults to false, that means the initial browser may or may not
+   *        have finished loading its first page when this resolves.
+   *        When `url` is set, this is ignored, thus the load is always awaited for.
    * @param {bool} [aParams.anyWindow]
-   *        True to wait for the url to be loaded in any new
-   *        window, not just the next one opened.
    * @param {bool} [aParams.maybeErrorPage]
    *        See ``browserLoaded`` function.
    * @return {Promise}
@@ -849,7 +873,12 @@ export var BrowserTestUtils = {
    *         opens and the delayed startup observer notification fires.
    */
   waitForNewWindow(aParams = {}) {
-    let { url = null, anyWindow = false, maybeErrorPage = false } = aParams;
+    let {
+      url = null,
+      anyWindow = false,
+      maybeErrorPage = false,
+      waitForAnyURLLoaded = false,
+    } = aParams;
 
     if (anyWindow && !url) {
       throw new Error("url should be specified if anyWindow is true");
@@ -873,7 +902,7 @@ export var BrowserTestUtils = {
             this.waitForEvent(win, "activate"),
           ];
 
-          if (url) {
+          if (url || waitForAnyURLLoaded) {
             await this.waitForEvent(win, "DOMContentLoaded");
 
             if (win.document.documentURI != AppConstants.BROWSER_CHROME_URL) {
@@ -888,11 +917,11 @@ export var BrowserTestUtils = {
             )
           );
 
-          if (url) {
+          if (url || waitForAnyURLLoaded) {
             let loadPromise = this.browserLoaded(
               win.gBrowser.selectedBrowser,
               false,
-              url,
+              waitForAnyURLLoaded ? null : url,
               maybeErrorPage
             );
             promises.push(loadPromise);
@@ -918,14 +947,18 @@ export var BrowserTestUtils = {
   },
 
   /**
-   * Loads a new URI in the given browser, triggered by the system principal.
+   * Starts the load of a new URI in the given browser, triggered by the system
+   * principal.
+   * Note this won't want for the load to be complete. For that you may either
+   * use BrowserTestUtils.browserLoaded(), BrowserTestUtils.waitForErrorPage(),
+   * or make your own handler.
    *
    * @param {xul:browser} browser
    *        A xul:browser.
    * @param {string} uri
    *        The URI to load.
    */
-  loadURIString(browser, uri) {
+  startLoadingURIString(browser, uri) {
     browser.fixupAndLoadURIString(uri, {
       triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
     });
@@ -1030,19 +1063,6 @@ export var BrowserTestUtils = {
       }
       Services.ww.registerNotification(observer);
     });
-  },
-
-  /**
-   * Clear the stylesheet cache and open a new window to ensure
-   * CSS @supports -moz-bool-pref(...) {} rules are correctly
-   * applied to the browser chrome.
-   *
-   * @param {Object} options See BrowserTestUtils.openNewBrowserWindow
-   * @returns {Promise} Resolves with the new window once it is loaded.
-   */
-  async openNewWindowWithFlushedCacheForMozSupports(options) {
-    ChromeUtils.clearStyleSheetCache();
-    return BrowserTestUtils.openNewBrowserWindow(options);
   },
 
   /**
@@ -2546,7 +2566,15 @@ export var BrowserTestUtils = {
     if (uri == "chrome://global/content/commonDialog.xhtml") {
       [win] = await TestUtils.topicObserved("common-dialog-loaded");
     } else if (options.isSubDialog) {
-      [win] = await TestUtils.topicObserved("subdialog-loaded");
+      for (let attempts = 0; attempts < 3; attempts++) {
+        [win] = await TestUtils.topicObserved("subdialog-loaded");
+        if (uri === undefined || uri === null || uri === "") {
+          break;
+        }
+        if (win.document.documentURI === uri) {
+          break;
+        }
+      }
     } else {
       // The test listens for the "load" event which guarantees that the alert
       // class has already been added (it is added when "DOMContentLoaded" is
@@ -2794,29 +2822,16 @@ export var BrowserTestUtils = {
 
   /**
    * A helper function for this test that returns a Promise that resolves
-   * once either the legacy or new migration wizard appears.
+   * once the migration wizard appears.
    *
    * @param {DOMWindow} window
    *   The top-level window that the about:preferences tab is likely to open
    *   in if the new migration wizard is enabled.
-   * @param {boolean} forceLegacy
-   *   True if, despite the browser.migrate.content-modal.enabled pref value,
-   *   the legacy XUL migration wizard is expected.
    * @returns {Promise<Element>}
-   *   Resolves to the dialog window in the legacy case, and the
-   *   about:preferences tab otherwise.
+   *   Resolves to the opened about:preferences tab with the migration wizard
+   *   running and loaded in it.
    */
-  async waitForMigrationWizard(window, forceLegacy = false) {
-    if (!this._usingNewMigrationWizard || forceLegacy) {
-      return this.waitForCondition(() => {
-        let win = Services.wm.getMostRecentWindow("Browser:MigrationWizard");
-        if (win?.document?.readyState == "complete") {
-          return win;
-        }
-        return false;
-      }, "Wait for migration wizard to open");
-    }
-
+  async waitForMigrationWizard(window) {
     let wizardReady = this.waitForEvent(window, "MigrationWizard:Ready");
     let wizardTab = await this.waitForNewTab(window.gBrowser, url => {
       return url.startsWith("about:preferences");
@@ -2825,40 +2840,12 @@ export var BrowserTestUtils = {
 
     return wizardTab;
   },
-
-  /**
-   * Closes the migration wizard.
-   *
-   * @param {Element} wizardWindowOrTab
-   *   The XUL dialog window for the migration wizard in the legacy case, and
-   *   the about:preferences tab otherwise. In general, it's probably best to
-   *   just pass whatever BrowserTestUtils.waitForMigrationWizard resolved to
-   *   into this in order to handle both the old and new migration wizard.
-   * @param {boolean} forceLegacy
-   *   True if, despite the browser.migrate.content-modal.enabled pref value,
-   *   the legacy XUL migration wizard is expected.
-   * @returns {Promise<undefined>}
-   */
-  closeMigrationWizard(wizardWindowOrTab, forceLegacy = false) {
-    if (!this._usingNewMigrationWizard || forceLegacy) {
-      return BrowserTestUtils.closeWindow(wizardWindowOrTab);
-    }
-
-    return BrowserTestUtils.removeTab(wizardWindowOrTab);
-  },
 };
 
 XPCOMUtils.defineLazyPreferenceGetter(
   BrowserTestUtils,
   "_httpsFirstEnabled",
   "dom.security.https_first",
-  false
-);
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  BrowserTestUtils,
-  "_usingNewMigrationWizard",
-  "browser.migrate.content-modal.enabled",
   false
 );
 

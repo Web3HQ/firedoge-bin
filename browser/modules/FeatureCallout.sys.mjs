@@ -7,12 +7,12 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  AboutWelcomeParent: "resource:///actors/AboutWelcomeParent.sys.mjs",
   CustomizableUI: "resource:///modules/CustomizableUI.sys.mjs",
   PageEventManager: "resource://activity-stream/lib/PageEventManager.sys.mjs",
 });
 
 XPCOMUtils.defineLazyModuleGetters(lazy, {
-  AboutWelcomeParent: "resource:///actors/AboutWelcomeParent.jsm",
   ASRouter: "resource://activity-stream/lib/ASRouter.jsm",
 });
 
@@ -20,9 +20,9 @@ const TRANSITION_MS = 500;
 const CONTAINER_ID = "feature-callout";
 const CONTENT_BOX_ID = "multi-stage-message-root";
 const BUNDLE_SRC =
-  "resource://activity-stream/aboutwelcome/aboutwelcome.bundle.js";
+  "chrome://browser/content/aboutwelcome/aboutwelcome.bundle.js";
 
-XPCOMUtils.defineLazyGetter(lazy, "log", () => {
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
   const { Logger } = ChromeUtils.importESModule(
     "resource://messaging-system/lib/Logger.sys.mjs"
   );
@@ -435,7 +435,7 @@ export class FeatureCallout {
     };
     // Update styling to be compatible with about:welcome bundle
     await addStylesheet(
-      "chrome://activity-stream/content/aboutwelcome/aboutwelcome.css"
+      "chrome://browser/content/aboutwelcome/aboutwelcome.css"
     );
   }
 
@@ -530,6 +530,8 @@ export class FeatureCallout {
    *   the anchor element when the callout is shown. False to set it, true to
    *   not set it. This only works for panel callouts. Not all elements have an
    *   [open] style. Buttons do, for example. It's usually similar to :active.
+   * @property {Number} [arrow_width] The desired width of the arrow in a number
+   *   of pixels. 33.94113 by default (this corresponds to 24px edges).
    */
 
   /**
@@ -540,6 +542,7 @@ export class FeatureCallout {
    * @property {PositionOverride} [absolute_position]
    * @property {Boolean} [hide_arrow]
    * @property {Boolean} [no_open_on_anchor]
+   * @property {Number} [arrow_width]
    * @property {Element} element The anchor node resolved from the selector.
    * @property {String} [panel_position_string] The panel_position joined into a
    *   string, e.g. "bottomleft topright". Passed to XULPopupElement::openPopup.
@@ -696,8 +699,15 @@ export class FeatureCallout {
       }
       // Hide the arrow if the `flip` behavior has caused the panel to
       // offset relative to its anchor, since the arrow would no longer
-      // point at the true anchor.
-      this.classList.toggle("hidden-arrow", !!alignmentOffset);
+      // point at the true anchor. This differs from an arrow that is
+      // intentionally hidden by the user in message.
+      if (this.getAttribute("hide-arrow") !== "permanent") {
+        if (alignmentOffset) {
+          this.setAttribute("hide-arrow", "temporary");
+        } else {
+          this.removeAttribute("hide-arrow");
+        }
+      }
       let arrowPosition = "top";
       switch (positionParts[1]) {
         case "start":
@@ -743,8 +753,13 @@ export class FeatureCallout {
       return false;
     }
 
-    const { autohide } = this.currentScreen.content;
-    const { panel_position_string, hide_arrow, no_open_on_anchor } = anchor;
+    const { autohide, padding } = this.currentScreen.content;
+    const {
+      panel_position_string,
+      hide_arrow,
+      no_open_on_anchor,
+      arrow_width,
+    } = anchor;
     const needsPanel = "MozXULElement" in this.win && !!panel_position_string;
 
     if (this._container) {
@@ -774,13 +789,27 @@ export class FeatureCallout {
         this._container?.classList.add("hidden");
       }
       this._container.classList.add("featureCallout", "callout-arrow");
-      this._container.classList.toggle("hidden-arrow", !!hide_arrow);
+      if (hide_arrow) {
+        this._container.setAttribute("hide-arrow", "permanent");
+      } else {
+        this._container.removeAttribute("hide-arrow");
+      }
       this._container.id = CONTAINER_ID;
       this._container.setAttribute(
         "aria-describedby",
         `#${CONTAINER_ID} .welcome-text`
       );
       this._container.tabIndex = 0;
+      if (arrow_width) {
+        this._container.style.setProperty("--arrow-width", `${arrow_width}px`);
+      } else {
+        this._container.style.removeProperty("--arrow-width");
+      }
+      if (padding) {
+        this._container.style.setProperty("--callout-padding", `${padding}px`);
+      } else {
+        this._container.style.removeProperty("--callout-padding");
+      }
       let contentBox = this.doc.createElement("div");
       contentBox.id = CONTENT_BOX_ID;
       contentBox.classList.add("onboardingContainer");
@@ -832,12 +861,8 @@ export class FeatureCallout {
     const parentEl = anchor.element;
     const doc = this.doc;
     const arrowPosition = anchor.arrow_position || "top";
-    // Callout arrow should overlap the parent element by 5px
-    const squareWidth = 24;
-    const arrowWidth = Math.hypot(squareWidth, squareWidth);
+    const arrowWidth = anchor.arrow_width || 33.94113;
     const arrowHeight = arrowWidth / 2;
-    // If the message specifies no overlap, we move the callout away so the
-    // arrow doesn't overlap at all.
     const overlapAmount = 5;
     let overlap = overlapAmount - arrowHeight;
     // Is the document layout right to left?
@@ -1223,8 +1248,12 @@ export class FeatureCallout {
           const containerWidth = container.getBoundingClientRect().width;
           const containerSide =
             RTL ^ position.endsWith("end")
-              ? parentRect.left + parentRect.width / 2 + 30 - containerWidth
-              : parentRect.left + parentRect.width / 2 - 30;
+              ? parentRect.left +
+                parentRect.width / 2 +
+                12 +
+                arrowWidth / 2 -
+                containerWidth
+              : parentRect.left + parentRect.width / 2 - 12 - arrowWidth / 2;
           const maxContainerSide =
             doc.documentElement.clientWidth - containerWidth;
           container.style.left = `${Math.min(
@@ -1636,13 +1665,13 @@ export class FeatureCallout {
     }
     return (
       this._container.querySelector(
-        ".primary:not(:disabled, [hidden], .text-link, .cta-link)"
+        ".primary:not(:disabled, [hidden], .text-link, .cta-link, .split-button)"
       ) ||
       this._container.querySelector(
-        ".secondary:not(:disabled, [hidden], .text-link, .cta-link)"
+        ".secondary:not(:disabled, [hidden], .text-link, .cta-link, .split-button)"
       ) ||
       this._container.querySelector(
-        "button:not(:disabled, [hidden], .text-link, .cta-link, .dismiss-button)"
+        "button:not(:disabled, [hidden], .text-link, .cta-link, .dismiss-button, .split-button)"
       ) ||
       this._container.querySelector("input:not(:disabled, [hidden])") ||
       this._container.querySelector(

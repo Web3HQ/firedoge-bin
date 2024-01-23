@@ -42,6 +42,12 @@ JS_PUBLIC_API void DestroyFrontendContext(JS::FrontendContext* fc);
 JS_PUBLIC_API void SetNativeStackQuota(JS::FrontendContext* fc,
                                        JS::NativeStackSize stackSize);
 
+// Return the stack quota that can be passed to SetNativeStackQuota, for given
+// stack size.
+// This subtracts a margin from given stack size, to make sure the stack quota
+// check performed internally is sufficient.
+JS_PUBLIC_API JS::NativeStackSize ThreadStackQuotaForSize(size_t stackSize);
+
 // Returns true if there was any error reported to given FrontendContext.
 JS_PUBLIC_API bool HadFrontendErrors(JS::FrontendContext* fc);
 
@@ -98,15 +104,6 @@ JS_PUBLIC_API size_t GetFrontendWarningCount(JS::FrontendContext* fc);
 JS_PUBLIC_API const JSErrorReport* GetFrontendWarningAt(
     JS::FrontendContext* fc, size_t index,
     const JS::ReadOnlyCompileOptions& options);
-
-/*
- * Set supported import assertions on a FrontendContext to be used with
- * CompileModuleScriptToStencil. May only be set once for each FrontendContext.
- * The default list of supported import assertions is empty.
- */
-JS_PUBLIC_API bool SetSupportedImportAssertions(
-    JS::FrontendContext* fc,
-    const JS::ImportAssertionVector& supportedImportAssertions);
 
 // Temporary storage used during compiling and preparing to instantiate a
 // Stencil.

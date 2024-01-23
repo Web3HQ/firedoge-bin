@@ -101,7 +101,13 @@ static bool IsX11EGLEnvvarEnabled() {
 
 gfxPlatformGtk::gfxPlatformGtk() {
   if (!gfxPlatform::IsHeadless()) {
-    gtk_init(nullptr, nullptr);
+    if (!gtk_init_check(nullptr, nullptr)) {
+      gfxCriticalNote << "Failed to init Gtk, missing display? DISPLAY="
+                      << getenv("DISPLAY")
+                      << " WAYLAND_DISPLAY=" << getenv("WAYLAND_DISPLAY")
+                      << "\n";
+      abort();
+    }
   }
 
   mIsX11Display = gfxPlatform::IsHeadless() ? false : GdkIsX11Display();
@@ -136,6 +142,14 @@ gfxPlatformGtk::gfxPlatformGtk() {
 gfxPlatformGtk::~gfxPlatformGtk() {
   Factory::ReleaseFTLibrary(gPlatformFTLibrary);
   gPlatformFTLibrary = nullptr;
+}
+
+void gfxPlatformGtk::InitAcceleration() {
+  gfxPlatform::InitAcceleration();
+
+  if (XRE_IsContentProcess()) {
+    ImportCachedContentDeviceData();
+  }
 }
 
 void gfxPlatformGtk::InitX11EGLConfig() {
@@ -211,11 +225,16 @@ void gfxPlatformGtk::InitDmabufConfig() {
                          "FEATURE_FAILURE_REQUIRES_EGL"_ns);
   }
 
-  if (feature.IsEnabled()) {
-    nsAutoCString drmRenderDevice;
-    gfxInfo->GetDrmRenderDevice(drmRenderDevice);
-    gfxVars::SetDrmRenderDevice(drmRenderDevice);
+  if (!gfxVars::WebglUseHardware()) {
+    feature.Disable(FeatureStatus::Blocklisted,
+                    "DMABuf disabled with software rendering", failureId);
+  }
 
+  nsAutoCString drmRenderDevice;
+  gfxInfo->GetDrmRenderDevice(drmRenderDevice);
+  gfxVars::SetDrmRenderDevice(drmRenderDevice);
+
+  if (feature.IsEnabled()) {
     if (!GetDMABufDevice()->IsEnabled(failureId)) {
       feature.ForceDisable(FeatureStatus::Failed, "Failed to configure",
                            failureId);
@@ -232,6 +251,10 @@ bool gfxPlatformGtk::InitVAAPIConfig(bool aForceEnabledByUser) {
   }
   feature.EnableByDefault();
 
+  if (aForceEnabledByUser) {
+    feature.UserForceEnable("Force enabled by pref");
+  }
+
   int32_t status = nsIGfxInfo::FEATURE_STATUS_UNKNOWN;
   nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
   nsCString failureId;
@@ -245,9 +268,6 @@ bool gfxPlatformGtk::InitVAAPIConfig(bool aForceEnabledByUser) {
   } else if (status != nsIGfxInfo::FEATURE_STATUS_OK) {
     feature.Disable(FeatureStatus::Blocklisted, "Blocklisted by gfxInfo",
                     failureId);
-  }
-  if (aForceEnabledByUser) {
-    feature.UserForceEnable("Force enabled by pref");
   }
   if (!gfxVars::UseEGL()) {
     feature.ForceDisable(FeatureStatus::Unavailable, "Requires EGL",
@@ -545,23 +565,16 @@ nsTArray<uint8_t> gfxPlatformGtk::GetPlatformCMSOutputProfileData() {
   }
 
   if (XRE_IsContentProcess()) {
-    MOZ_ASSERT(NS_IsMainThread());
-    // This will be passed in during InitChild so we can avoid sending a
-    // sync message back to the parent during init.
-    const mozilla::gfx::ContentDeviceData* contentDeviceData =
-        GetInitContentDeviceData();
-    if (contentDeviceData) {
-      // On Windows, we assert that the profile isn't empty, but on
-      // Linux it can legitimately be empty if the display isn't
-      // calibrated.  Thus, no assertion here.
-      return contentDeviceData->cmsOutputProfileData().Clone();
+    auto& cmsOutputProfileData = GetCMSOutputProfileData();
+    // We should have set our profile data when we received our initial
+    // ContentDeviceData.
+    MOZ_ASSERT(cmsOutputProfileData.isSome(),
+               "Should have created output profile data when we received "
+               "initial content device data.");
+    if (cmsOutputProfileData.isSome()) {
+      return cmsOutputProfileData.ref().Clone();
     }
-
-    // Otherwise we need to ask the parent for the updated color profile
-    mozilla::dom::ContentChild* cc = mozilla::dom::ContentChild::GetSingleton();
-    nsTArray<uint8_t> result;
-    Unused << cc->SendGetOutputColorProfileData(&result);
-    return result;
+    return nsTArray<uint8_t>();
   }
 
   if (!mIsX11Display) {

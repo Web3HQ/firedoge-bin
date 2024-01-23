@@ -8,6 +8,8 @@ use crate::{
     QueueWriteAction, RawString, TextureAction,
 };
 
+use crate::SwapChainId;
+
 use wgc::{id, identity::IdentityManager};
 use wgt::{Backend, TextureFormat};
 
@@ -260,31 +262,52 @@ pub struct RenderBundleEncoderDescriptor<'a> {
     sample_count: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct IdentityHub {
-    adapters: IdentityManager,
-    devices: IdentityManager,
-    buffers: IdentityManager,
-    command_buffers: IdentityManager,
-    render_bundles: IdentityManager,
-    bind_group_layouts: IdentityManager,
-    pipeline_layouts: IdentityManager,
-    bind_groups: IdentityManager,
-    shader_modules: IdentityManager,
-    compute_pipelines: IdentityManager,
-    render_pipelines: IdentityManager,
-    textures: IdentityManager,
-    texture_views: IdentityManager,
-    samplers: IdentityManager,
+    adapters: IdentityManager<wgc::id::AdapterId>,
+    devices: IdentityManager<wgc::id::DeviceId>,
+    buffers: IdentityManager<wgc::id::BufferId>,
+    command_buffers: IdentityManager<wgc::id::CommandBufferId>,
+    render_bundles: IdentityManager<wgc::id::RenderBundleId>,
+    bind_group_layouts: IdentityManager<wgc::id::BindGroupLayoutId>,
+    pipeline_layouts: IdentityManager<wgc::id::PipelineLayoutId>,
+    bind_groups: IdentityManager<wgc::id::BindGroupId>,
+    shader_modules: IdentityManager<wgc::id::ShaderModuleId>,
+    compute_pipelines: IdentityManager<wgc::id::ComputePipelineId>,
+    render_pipelines: IdentityManager<wgc::id::RenderPipelineId>,
+    textures: IdentityManager<wgc::id::TextureId>,
+    texture_views: IdentityManager<wgc::id::TextureViewId>,
+    samplers: IdentityManager<wgc::id::SamplerId>,
+}
+
+impl Default for IdentityHub {
+    fn default() -> Self {
+        IdentityHub {
+            adapters: IdentityManager::new(),
+            devices: IdentityManager::new(),
+            buffers: IdentityManager::new(),
+            command_buffers: IdentityManager::new(),
+            render_bundles: IdentityManager::new(),
+            bind_group_layouts: IdentityManager::new(),
+            pipeline_layouts: IdentityManager::new(),
+            bind_groups: IdentityManager::new(),
+            shader_modules: IdentityManager::new(),
+            compute_pipelines: IdentityManager::new(),
+            render_pipelines: IdentityManager::new(),
+            textures: IdentityManager::new(),
+            texture_views: IdentityManager::new(),
+            samplers: IdentityManager::new(),
+        }
+    }
 }
 
 impl ImplicitLayout<'_> {
     fn new(identities: &mut IdentityHub, backend: Backend) -> Self {
         ImplicitLayout {
-            pipeline: identities.pipeline_layouts.alloc(backend),
+            pipeline: identities.pipeline_layouts.process(backend),
             bind_groups: Cow::Owned(
                 (0..8) // hal::MAX_BIND_GROUPS
-                    .map(|_| identities.bind_group_layouts.alloc(backend))
+                    .map(|_| identities.bind_group_layouts.process(backend))
                     .collect(),
             ),
         }
@@ -402,19 +425,19 @@ pub unsafe extern "C" fn wgpu_client_make_adapter_ids(
     ids: *mut id::AdapterId,
     id_length: usize,
 ) -> usize {
-    let mut identities = client.identities.lock();
+    let identities = client.identities.lock();
     assert_ne!(id_length, 0);
     let mut ids = std::slice::from_raw_parts_mut(ids, id_length).iter_mut();
 
-    *ids.next().unwrap() = identities.vulkan.adapters.alloc(Backend::Vulkan);
+    *ids.next().unwrap() = identities.vulkan.adapters.process(Backend::Vulkan);
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        *ids.next().unwrap() = identities.metal.adapters.alloc(Backend::Metal);
+        *ids.next().unwrap() = identities.metal.adapters.process(Backend::Metal);
     }
     #[cfg(windows)]
     {
-        *ids.next().unwrap() = identities.dx12.adapters.alloc(Backend::Dx12);
+        *ids.next().unwrap() = identities.dx12.adapters.process(Backend::Dx12);
     }
 
     id_length - ids.len()
@@ -482,7 +505,7 @@ pub extern "C" fn wgpu_client_make_device_id(
         .lock()
         .select(backend)
         .devices
-        .alloc(backend)
+        .process(backend)
 }
 
 #[no_mangle]
@@ -496,7 +519,7 @@ pub extern "C" fn wgpu_client_make_buffer_id(
         .lock()
         .select(backend)
         .buffers
-        .alloc(backend)
+        .process(backend)
 }
 
 #[no_mangle]
@@ -504,6 +527,7 @@ pub extern "C" fn wgpu_client_create_texture(
     client: &Client,
     device_id: id::DeviceId,
     desc: &wgt::TextureDescriptor<Option<&nsACString>, crate::FfiSlice<TextureFormat>>,
+    swap_chain_id: Option<&SwapChainId>,
     bb: &mut ByteBuf,
 ) -> id::TextureId {
     let label = wgpu_string(desc.label);
@@ -514,13 +538,14 @@ pub extern "C" fn wgpu_client_create_texture(
         .lock()
         .select(backend)
         .textures
-        .alloc(backend);
+        .process(backend);
 
     let view_formats = unsafe { desc.view_formats.as_slice() }.to_vec();
 
     let action = DeviceAction::CreateTexture(
         id,
         desc.map_label_and_view_formats(|_| label, |_| view_formats),
+        swap_chain_id.copied(),
     );
     *bb = make_byte_buf(&action);
 
@@ -542,7 +567,7 @@ pub extern "C" fn wgpu_client_create_texture_view(
         .lock()
         .select(backend)
         .texture_views
-        .alloc(backend);
+        .process(backend);
 
     let wgpu_desc = wgc::resource::TextureViewDescriptor {
         label,
@@ -577,7 +602,7 @@ pub extern "C" fn wgpu_client_create_sampler(
         .lock()
         .select(backend)
         .samplers
-        .alloc(backend);
+        .process(backend);
 
     let wgpu_desc = wgc::resource::SamplerDescriptor {
         label,
@@ -607,7 +632,7 @@ pub extern "C" fn wgpu_client_make_encoder_id(
         .lock()
         .select(backend)
         .command_buffers
-        .alloc(backend)
+        .process(backend)
 }
 
 #[no_mangle]
@@ -625,7 +650,7 @@ pub extern "C" fn wgpu_client_create_command_encoder(
         .lock()
         .select(backend)
         .command_buffers
-        .alloc(backend);
+        .process(backend);
 
     let action = DeviceAction::CreateCommandEncoder(id, desc.map_label(|_| label));
     *bb = make_byte_buf(&action);
@@ -696,7 +721,7 @@ pub unsafe extern "C" fn wgpu_client_create_render_bundle(
         .lock()
         .select(backend)
         .render_bundles
-        .alloc(backend);
+        .process(backend);
 
     let action =
         DeviceAction::CreateRenderBundle(id, *Box::from_raw(encoder), desc.map_label(|_| label));
@@ -719,7 +744,7 @@ pub unsafe extern "C" fn wgpu_client_create_render_bundle_error(
         .lock()
         .select(backend)
         .render_bundles
-        .alloc(backend);
+        .process(backend);
 
     let action = DeviceAction::CreateRenderBundleError(id, label);
     *bb = make_byte_buf(&action);
@@ -887,7 +912,7 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group_layout(
         .lock()
         .select(backend)
         .bind_group_layouts
-        .alloc(backend);
+        .process(backend);
 
     let mut entries = Vec::with_capacity(desc.entries_length);
     for entry in make_slice(desc.entries, desc.entries_length) {
@@ -960,6 +985,48 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group_layout(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn wgpu_client_render_pipeline_get_bind_group_layout(
+    client: &Client,
+    pipeline_id: id::RenderPipelineId,
+    index: u32,
+    bb: &mut ByteBuf,
+) -> id::BindGroupLayoutId {
+    let backend = pipeline_id.backend();
+    let bgl_id = client
+        .identities
+        .lock()
+        .select(backend)
+        .bind_group_layouts
+        .process(backend);
+
+    let action = DeviceAction::RenderPipelineGetBindGroupLayout(pipeline_id, index, bgl_id);
+    *bb = make_byte_buf(&action);
+
+    bgl_id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_client_compute_pipeline_get_bind_group_layout(
+    client: &Client,
+    pipeline_id: id::ComputePipelineId,
+    index: u32,
+    bb: &mut ByteBuf,
+) -> id::BindGroupLayoutId {
+    let backend = pipeline_id.backend();
+    let bgl_id = client
+        .identities
+        .lock()
+        .select(backend)
+        .bind_group_layouts
+        .process(backend);
+
+    let action = DeviceAction::ComputePipelineGetBindGroupLayout(pipeline_id, index, bgl_id);
+    *bb = make_byte_buf(&action);
+
+    bgl_id
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn wgpu_client_create_pipeline_layout(
     client: &Client,
     device_id: id::DeviceId,
@@ -974,7 +1041,7 @@ pub unsafe extern "C" fn wgpu_client_create_pipeline_layout(
         .lock()
         .select(backend)
         .pipeline_layouts
-        .alloc(backend);
+        .process(backend);
 
     let wgpu_desc = wgc::binding_model::PipelineLayoutDescriptor {
         label,
@@ -1005,7 +1072,7 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group(
         .lock()
         .select(backend)
         .bind_groups
-        .alloc(backend);
+        .process(backend);
 
     let mut entries = Vec::with_capacity(desc.entries_length);
     for entry in make_slice(desc.entries, desc.entries_length) {
@@ -1048,7 +1115,7 @@ pub extern "C" fn wgpu_client_make_shader_module_id(
         .lock()
         .select(backend)
         .shader_modules
-        .alloc(backend)
+        .process(backend)
 }
 
 #[no_mangle]
@@ -1064,7 +1131,10 @@ pub unsafe extern "C" fn wgpu_client_create_compute_pipeline(
 
     let backend = device_id.backend();
     let mut identities = client.identities.lock();
-    let id = identities.select(backend).compute_pipelines.alloc(backend);
+    let id = identities
+        .select(backend)
+        .compute_pipelines
+        .process(backend);
 
     let wgpu_desc = wgc::pipeline::ComputePipelineDescriptor {
         label,
@@ -1102,7 +1172,7 @@ pub unsafe extern "C" fn wgpu_client_create_render_pipeline(
 
     let backend = device_id.backend();
     let mut identities = client.identities.lock();
-    let id = identities.select(backend).render_pipelines.alloc(backend);
+    let id = identities.select(backend).render_pipelines.process(backend);
 
     let wgpu_desc = wgc::pipeline::RenderPipelineDescriptor {
         label,
@@ -1201,6 +1271,21 @@ pub unsafe extern "C" fn wgpu_command_encoder_copy_texture_to_texture(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn wgpu_command_encoder_clear_buffer(
+    dst: wgc::id::BufferId,
+    offset: u64,
+    size: Option<&u64>,
+    bb: &mut ByteBuf,
+) {
+    let action = CommandEncoderAction::ClearBuffer {
+        dst,
+        offset,
+        size: size.cloned(),
+    };
+    *bb = make_byte_buf(&action);
+}
+
+#[no_mangle]
 pub extern "C" fn wgpu_command_encoder_push_debug_group(marker: &nsACString, bb: &mut ByteBuf) {
     let string = marker.to_string();
     let action = CommandEncoderAction::PushDebugGroup(string);
@@ -1248,5 +1333,26 @@ pub unsafe extern "C" fn wgpu_queue_write_texture(
 /// Returns the block size or zero if the format has multiple aspects (for example depth+stencil).
 #[no_mangle]
 pub extern "C" fn wgpu_texture_format_block_size_single_aspect(format: wgt::TextureFormat) -> u32 {
-    format.block_size(None).unwrap_or(0)
+    format.block_copy_size(None).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_client_use_external_texture_in_swapChain(
+    device_id: id::DeviceId,
+    format: wgt::TextureFormat,
+) -> bool {
+    if device_id.backend() != wgt::Backend::Dx12 {
+        return false;
+    }
+
+    if !static_prefs::pref!("dom.webgpu.swap-chain.external-texture-dx12") {
+        return false;
+    }
+
+    let supported = match format {
+        wgt::TextureFormat::Bgra8Unorm => true,
+        _ => false,
+    };
+
+    supported
 }

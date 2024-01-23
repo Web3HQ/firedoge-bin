@@ -3,10 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
 
-const { XPCOMUtils } = ChromeUtils.importESModule(
-  "resource://gre/modules/XPCOMUtils.sys.mjs"
-);
-
 const { actionCreators: ac, actionTypes: at } = ChromeUtils.importESModule(
   "resource://activity-stream/common/Actions.sys.mjs"
 );
@@ -60,7 +56,7 @@ ChromeUtils.defineModuleGetter(
   "resource://activity-stream/lib/Screenshots.jsm"
 );
 
-XPCOMUtils.defineLazyGetter(lazy, "log", () => {
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
   const { Logger } = ChromeUtils.importESModule(
     "resource://messaging-system/lib/Logger.sys.mjs"
   );
@@ -69,7 +65,7 @@ XPCOMUtils.defineLazyGetter(lazy, "log", () => {
 
 // `contextId` is a unique identifier used by Contextual Services
 const CONTEXT_ID_PREF = "browser.contextual-services.contextId";
-XPCOMUtils.defineLazyGetter(lazy, "contextId", () => {
+ChromeUtils.defineLazyGetter(lazy, "contextId", () => {
   let _contextId = Services.prefs.getStringPref(CONTEXT_ID_PREF, null);
   if (!_contextId) {
     _contextId = String(Services.uuid.generateUUID());
@@ -129,6 +125,7 @@ const DEFAULT_SITES_EXPERIMENTS_PREF_BRANCH = "browser.topsites.experiment.";
 // Nimbus variable for the Contile integration. It falls back to the pref:
 // `browser.topsites.contile.enabled`.
 const NIMBUS_VARIABLE_CONTILE_ENABLED = "topSitesContileEnabled";
+const NIMBUS_VARIABLE_CONTILE_POSITIONS = "contileTopsitesPositions";
 const CONTILE_ENDPOINT_PREF = "browser.topsites.contile.endpoint";
 const CONTILE_UPDATE_INTERVAL = 15 * 60 * 1000; // 15 minutes
 // The maximum number of sponsored top sites to fetch from Contile.
@@ -146,9 +143,142 @@ const SPONSORED_TILE_PARTNERS = new Set([
   SPONSORED_TILE_PARTNER_MOZ_SALES,
 ]);
 
+const DISPLAY_FAIL_REASON_OVERSOLD = "oversold";
+const DISPLAY_FAIL_REASON_DISMISSED = "dismissed";
+
 function getShortURLForCurrentSearch() {
   const url = shortURL({ url: Services.search.defaultEngine.searchForm });
   return url;
+}
+
+class TopSitesTelemetry {
+  constructor() {
+    this.allSponsoredTiles = {};
+  }
+
+  _tileProviderForTiles(tiles) {
+    // Assumption: the list of tiles is from a single provider
+    return tiles && tiles.length ? this._tileProvider(tiles[0]) : null;
+  }
+
+  _tileProvider(tile) {
+    return tile.partner || SPONSORED_TILE_PARTNER_AMP;
+  }
+
+  _buildPropertyKey(tile) {
+    let provider = this._tileProvider(tile);
+    return provider + shortURL(tile);
+  }
+
+  // Returns an array of strings indicating the property name (based on the
+  // provider and brand) of tiles that have been filtered e.g. ["moz-salesbrand1"]
+  // currentTiles: The list of tiles remaining and may be displayed in new tab.
+  // this.allSponsoredTiles: The original list of tiles set via setTiles prior to any filtering
+  // The returned list indicated the difference between these two lists (excluding any previously filtered tiles).
+  _getFilteredTiles(currentTiles) {
+    let notPreviouslyFilteredTiles = Object.assign(
+      {},
+      ...Object.entries(this.allSponsoredTiles)
+        .filter(
+          ([k, v]) =>
+            v.display_fail_reason === null ||
+            v.display_fail_reason === undefined
+        )
+        .map(([k, v]) => ({ [k]: v }))
+    );
+
+    // Get the property names of the newly filtered list.
+    let remainingTiles = currentTiles.map(el => {
+      return this._buildPropertyKey(el);
+    });
+
+    // Get the property names of the tiles that were filtered.
+    let tilesToUpdate = Object.keys(notPreviouslyFilteredTiles).filter(
+      element => !remainingTiles.includes(element)
+    );
+    return tilesToUpdate;
+  }
+
+  setSponsoredTilesConfigured() {
+    const maxSponsored =
+      lazy.NimbusFeatures.pocketNewtab.getVariable(
+        NIMBUS_VARIABLE_MAX_SPONSORED
+      ) ?? MAX_NUM_SPONSORED;
+
+    Glean.topsites.sponsoredTilesConfigured.set(maxSponsored);
+  }
+
+  clearTilesForProvider(provider) {
+    Object.entries(this.allSponsoredTiles)
+      .filter(([k, v]) => k.startsWith(provider))
+      .map(([k, v]) => delete this.allSponsoredTiles[k]);
+  }
+
+  _getAdvertiser(tile) {
+    let label = tile.label || null;
+    let title = tile.title || null;
+
+    return label ?? title ?? shortURL(tile);
+  }
+
+  setTiles(tiles) {
+    // Assumption: the list of tiles is from a single provider,
+    // should be called once per tile source.
+    if (tiles && tiles.length) {
+      let tile_provider = this._tileProviderForTiles(tiles);
+      this.clearTilesForProvider(tile_provider);
+
+      for (let sponsoredTile of tiles) {
+        this.allSponsoredTiles[this._buildPropertyKey(sponsoredTile)] = {
+          advertiser: this._getAdvertiser(sponsoredTile).toLowerCase(),
+          provider: tile_provider,
+          display_position: null,
+          display_fail_reason: null,
+        };
+      }
+    }
+  }
+
+  _setDisplayFailReason(filteredTiles, reason) {
+    for (let tile of filteredTiles) {
+      if (tile in this.allSponsoredTiles) {
+        let tileToUpdate = this.allSponsoredTiles[tile];
+        tileToUpdate.display_position = null;
+        tileToUpdate.display_fail_reason = reason;
+      }
+    }
+  }
+
+  determineFilteredTilesAndSetToOversold(nonOversoldTiles) {
+    let filteredTiles = this._getFilteredTiles(nonOversoldTiles);
+    this._setDisplayFailReason(filteredTiles, DISPLAY_FAIL_REASON_OVERSOLD);
+  }
+
+  determineFilteredTilesAndSetToDismissed(nonDismissedTiles) {
+    let filteredTiles = this._getFilteredTiles(nonDismissedTiles);
+    this._setDisplayFailReason(filteredTiles, DISPLAY_FAIL_REASON_DISMISSED);
+  }
+
+  _setTilePositions(currentTiles) {
+    if (this.allSponsoredTiles) {
+      currentTiles.forEach(item => {
+        if (this._buildPropertyKey(item) in this.allSponsoredTiles) {
+          this.allSponsoredTiles[
+            this._buildPropertyKey(item)
+          ].display_position = item.sponsored_position;
+        }
+      });
+    }
+  }
+
+  finalizeNewtabPingFields(currentTiles) {
+    this._setTilePositions(currentTiles);
+    Glean.topsites.sponsoredTilesReceived.set(
+      JSON.stringify({
+        sponsoredTilesReceived: Object.values(this.allSponsoredTiles),
+      })
+    );
+  }
 }
 
 class ContileIntegration {
@@ -178,6 +308,7 @@ class ContileIntegration {
 
   async refresh() {
     let updateDefaultSites = await this._fetchSites();
+    await this._topSitesFeed.allocatePositions();
     if (updateDefaultSites) {
       this._topSitesFeed._readDefaults();
     }
@@ -234,12 +365,17 @@ class ContileIntegration {
       0
     );
     const validFor = Services.prefs.getIntPref(CONTILE_CACHE_VALID_FOR_PREF, 0);
+    this._topSitesFeed._telemetryUtility.setSponsoredTilesConfigured();
     if (now <= lastFetch + validFor) {
       try {
         let cachedTiles = JSON.parse(
           Services.prefs.getStringPref(CONTILE_CACHE_PREF)
         );
+        this._topSitesFeed._telemetryUtility.setTiles(cachedTiles);
         cachedTiles = this._filterBlockedSponsors(cachedTiles);
+        this._topSitesFeed._telemetryUtility.determineFilteredTilesAndSetToDismissed(
+          cachedTiles
+        );
         this._sites = cachedTiles;
         lazy.log.info("Local cache loaded.");
         return true;
@@ -278,7 +414,9 @@ class ContileIntegration {
     }
     try {
       let url = Services.prefs.getStringPref(CONTILE_ENDPOINT_PREF);
-      const response = await fetch(url, { credentials: "omit" });
+      const response = await this._topSitesFeed.fetch(url, {
+        credentials: "omit",
+      });
       if (!response.ok) {
         lazy.log.warn(
           `Contile endpoint returned unexpected status: ${response.status}`
@@ -290,11 +428,15 @@ class ContileIntegration {
 
       const lastFetch = Math.round(Date.now() / 1000);
       Services.prefs.setIntPref(CONTILE_CACHE_LAST_FETCH_PREF, lastFetch);
+      this._topSitesFeed._telemetryUtility.setSponsoredTilesConfigured();
 
       // Contile returns 204 indicating there is no content at the moment.
       // If this happens, it will clear `this._sites` reset the cached tiles
       // to an empty array.
       if (response.status === 204) {
+        this._topSitesFeed._telemetryUtility.clearTilesForProvider(
+          SPONSORED_TILE_PARTNER_AMP
+        );
         if (this._sites.length) {
           this._sites = [];
           Services.prefs.setStringPref(
@@ -318,17 +460,27 @@ class ContileIntegration {
         const maxNumFromContile = this._getMaxNumFromContile();
 
         let { tiles } = body;
+        this._topSitesFeed._telemetryUtility.setTiles(tiles);
         if (
           useAdditionalTiles !== undefined &&
           !useAdditionalTiles &&
           tiles.length > maxNumFromContile
         ) {
           tiles.length = maxNumFromContile;
+          this._topSitesFeed._telemetryUtility.determineFilteredTilesAndSetToOversold(
+            tiles
+          );
         }
         tiles = this._filterBlockedSponsors(tiles);
+        this._topSitesFeed._telemetryUtility.determineFilteredTilesAndSetToDismissed(
+          tiles
+        );
         if (tiles.length > maxNumFromContile) {
           lazy.log.info("Remove unused links from Contile");
           tiles.length = maxNumFromContile;
+          this._topSitesFeed._telemetryUtility.determineFilteredTilesAndSetToOversold(
+            tiles
+          );
         }
         this._sites = tiles;
         Services.prefs.setStringPref(
@@ -357,9 +509,10 @@ class ContileIntegration {
 
 class TopSitesFeed {
   constructor() {
+    this._telemetryUtility = new TopSitesTelemetry();
     this._contile = new ContileIntegration(this);
     this._tippyTopProvider = new TippyTopProvider();
-    XPCOMUtils.defineLazyGetter(
+    ChromeUtils.defineLazyGetter(
       this,
       "_currentSearchHostname",
       getShortURLForCurrentSearch
@@ -488,10 +641,33 @@ class TopSitesFeed {
     const contileEnabled = lazy.NimbusFeatures.newtab.getVariable(
       NIMBUS_VARIABLE_CONTILE_ENABLED
     );
+
+    // Keep the number of positions in the array in sync with CONTILE_MAX_NUM_SPONSORED.
+    // sponsored_position is a 1-based index, and contilePositions is a 0-based index,
+    // so we need to add 1 to each of these.
+    // Also currently this does not work with SOV.
+    let contilePositions = lazy.NimbusFeatures.pocketNewtab
+      .getVariable(NIMBUS_VARIABLE_CONTILE_POSITIONS)
+      ?.split(",")
+      .map(item => parseInt(item, 10) + 1)
+      .filter(item => !Number.isNaN(item));
+    if (!contilePositions || contilePositions.length === 0) {
+      contilePositions = [1, 2];
+    }
+
     let hasContileTiles = false;
     if (contileEnabled) {
-      let sponsoredPosition = 1;
-      for (let site of this._contile.sites) {
+      let contilePositionIndex = 0;
+      // We need to loop through potential spocs and set their positions.
+      // If we run out of spocs or positions, we stop.
+      // First, we need to know which array is shortest. This is our exit condition.
+      const minLength = Math.min(
+        contilePositions.length,
+        this._contile.sites.length
+      );
+      // Loop until we run out of spocs or positions.
+      for (let i = 0; i < minLength; i++) {
+        let site = this._contile.sites[i];
         let hostname = shortURL(site);
         let link = {
           isDefault: true,
@@ -500,7 +676,7 @@ class TopSitesFeed {
           sendAttributionRequest: false,
           label: site.name,
           show_sponsored_label: hostname !== "yandex",
-          sponsored_position: sponsoredPosition++,
+          sponsored_position: contilePositions[contilePositionIndex++],
           sponsored_click_url: site.click_url,
           sponsored_impression_url: site.impression_url,
           sponsored_tile_id: site.id,
@@ -514,7 +690,11 @@ class TopSitesFeed {
         }
         DEFAULT_TOP_SITES.push(link);
       }
-      hasContileTiles = sponsoredPosition > 1;
+      hasContileTiles = contilePositionIndex > 0;
+      //This is to catch where we receive 3 tiles but reduce to 2 early in the filtering, before blocked list applied.
+      this._telemetryUtility.determineFilteredTilesAndSetToOversold(
+        DEFAULT_TOP_SITES
+      );
     }
 
     // Read defaults from remote settings.
@@ -799,6 +979,14 @@ class TopSitesFeed {
   }
 
   /**
+   * This thin wrapper around global.fetch makes it easier for us to write
+   * automated tests that simulate responses from this fetch.
+   */
+  fetch(...args) {
+    return fetch(...args);
+  }
+
+  /**
    * Fetch topsites spocs from the DiscoveryStream feed.
    *
    * @returns {Array} An array of sponsored tile objects.
@@ -957,15 +1145,22 @@ class TopSitesFeed {
         );
       }
     }
+    this._telemetryUtility.determineFilteredTilesAndSetToDismissed(
+      contileSponsored
+    );
 
     const discoverySponsored = this.fetchDiscoveryStreamSpocs();
+    this._telemetryUtility.setTiles(discoverySponsored);
 
-    const sponsored = await this._mergeSponsoredLinks({
+    const sponsored = this._mergeSponsoredLinks({
       [SPONSORED_TILE_PARTNER_AMP]: contileSponsored,
       [SPONSORED_TILE_PARTNER_MOZ_SALES]: discoverySponsored,
     });
 
     this._maybeCapSponsoredLinks(sponsored);
+
+    // This will set all extra tiles to oversold, including moz-sales.
+    this._telemetryUtility.determineFilteredTilesAndSetToOversold(sponsored);
 
     // Get pinned links augmented with desired properties
     let plainPinned = await this.pinnedCache.request();
@@ -1057,7 +1252,6 @@ class TopSitesFeed {
         withPinned.splice(index, 0, link);
       }
     });
-
     // Remove excess items after we inserted sponsored ones.
     withPinned = withPinned.slice(0, numItems);
 
@@ -1083,6 +1277,7 @@ class TopSitesFeed {
 
     this._linksWithDefaults = withPinned;
 
+    this._telemetryUtility.finalizeNewtabPingFields(dedupedSponsored);
     return withPinned;
   }
 
@@ -1111,9 +1306,12 @@ class TopSitesFeed {
    * @param {Object} sponsoredLinks An object with sponsored links from all the partners.
    * @returns {Array} An array of merged sponsored links.
    */
-  async _mergeSponsoredLinks(sponsoredLinks) {
+  _mergeSponsoredLinks(sponsoredLinks) {
+    const { positions: allocatedPositions, ready: sovReady } =
+      this.store.getState().TopSites.sov || {};
     if (
       !this._contile.sov ||
+      !sovReady ||
       !lazy.NimbusFeatures.pocketNewtab.getVariable(
         NIMBUS_VARIABLE_CONTILE_SOV_ENABLED
       )
@@ -1125,16 +1323,13 @@ class TopSitesFeed {
     sponsoredLinks[SPONSORED_TILE_PARTNER_AMP] =
       sponsoredLinks[SPONSORED_TILE_PARTNER_AMP].filter(Boolean);
 
-    const sampleInput = `${lazy.contextId}-${this._contile.sov.name}`;
     let sponsored = [];
     let chosenPartners = [];
-    for (const allocation of this._contile.sov.allocations) {
+
+    for (const allocation of allocatedPositions) {
       let link = null;
-      let assignedPartner = null;
-      const ratios = allocation.allocation.map(alloc => alloc.percentage);
-      if (ratios.length) {
-        const index = await lazy.Sampling.ratioSample(sampleInput, ratios);
-        assignedPartner = allocation.allocation[index].partner;
+      const { assignedPartner } = allocation;
+      if (assignedPartner) {
         // Unknown partners are allowed so that new parters can be added to Shepherd
         // sooner without waiting for client changes.
         link = sponsoredLinks[assignedPartner]?.shift();
@@ -1265,6 +1460,41 @@ class TopSitesFeed {
       // Don't broadcast only update the state and update the preloaded tab.
       this.store.dispatch(ac.AlsoToPreloaded(newAction));
     }
+  }
+
+  // Allocate ad positions to partners based on SOV via stable randomization.
+  async allocatePositions() {
+    // If the fetch to get sov fails for whatever reason, we can just return here.
+    // Code that uses this falls back to flattening allocations instead if this has failed.
+    if (!this._contile.sov) {
+      return;
+    }
+    // This sample input should ensure we return the same result for this allocation,
+    // even if called from other parts of the code.
+    const sampleInput = `${lazy.contextId}-${this._contile.sov.name}`;
+    const allocatedPositions = [];
+    for (const allocation of this._contile.sov.allocations) {
+      const allocatedPosition = {
+        position: allocation.position,
+      };
+      allocatedPositions.push(allocatedPosition);
+      const ratios = allocation.allocation.map(alloc => alloc.percentage);
+      if (ratios.length) {
+        const index = await lazy.Sampling.ratioSample(sampleInput, ratios);
+        allocatedPosition.assignedPartner =
+          allocation.allocation[index].partner;
+      }
+    }
+
+    this.store.dispatch(
+      ac.OnlyToMain({
+        type: at.SOV_UPDATED,
+        data: {
+          ready: !!allocatedPositions.length,
+          positions: allocatedPositions,
+        },
+      })
+    );
   }
 
   async updateCustomSearchShortcuts(isStartup = false) {

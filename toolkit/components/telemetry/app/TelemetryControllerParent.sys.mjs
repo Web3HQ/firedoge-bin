@@ -5,7 +5,6 @@
 
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { AsyncShutdown } from "resource://gre/modules/AsyncShutdown.sys.mjs";
-import { PromiseUtils } from "resource://gre/modules/PromiseUtils.sys.mjs";
 import { DeferredTask } from "resource://gre/modules/DeferredTask.sys.mjs";
 
 import { TelemetryUtils } from "resource://gre/modules/TelemetryUtils.sys.mjs";
@@ -39,7 +38,6 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   ClientID: "resource://gre/modules/ClientID.sys.mjs",
   CoveragePing: "resource://gre/modules/CoveragePing.sys.mjs",
-  ProvenanceData: "resource:///modules/ProvenanceData.sys.mjs",
   TelemetryArchive: "resource://gre/modules/TelemetryArchive.sys.mjs",
   TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.sys.mjs",
   TelemetryEventPing: "resource://gre/modules/EventPing.sys.mjs",
@@ -791,7 +789,7 @@ var Impl = {
     // Delay full telemetry initialization to give the browser time to
     // run various late initializers. Otherwise our gathered memory
     // footprint and other numbers would be too optimistic.
-    this._delayedInitTaskDeferred = PromiseUtils.defer();
+    this._delayedInitTaskDeferred = Promise.withResolvers();
     this._delayedInitTask = new DeferredTask(
       async () => {
         try {
@@ -1216,17 +1214,6 @@ var Impl = {
       NEWPROFILE_PING_DEFAULT_DELAY
     );
 
-    try {
-      // This is asynchronous, but we aren't going to await on it now. Just
-      // kick it off.
-      lazy.ProvenanceData.submitProvenanceTelemetry();
-    } catch (ex) {
-      this._log.warn(
-        "scheduleNewProfilePing - submitProvenanceTelemetry failed",
-        ex
-      );
-    }
-
     this._delayedNewPingTask = new DeferredTask(async () => {
       try {
         await this.sendNewProfilePing();
@@ -1245,15 +1232,6 @@ var Impl = {
     this._log.trace(
       "sendNewProfilePing - shutting down: " + this._shuttingDown
     );
-
-    try {
-      await lazy.ProvenanceData.submitProvenanceTelemetry();
-    } catch (ex) {
-      this._log.warn(
-        "sendNewProfilePing - submitProvenanceTelemetry failed",
-        ex
-      );
-    }
 
     const scalars = Services.telemetry.getSnapshotForScalars(
       "new-profile",

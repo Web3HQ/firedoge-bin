@@ -2,9 +2,12 @@
 
 ## What are CFRs?
 The most commonly used CFR as a Messaging Surface is the doorhanger, which anchors to one of the UI elements such as the application menu, the identity panel and so on.
-CFRs like any other messaging screen has specific triggers. You can learn more about triggers [here](https://firefox-source-docs.mozilla.org/toolkit/components/messaging-system/docs/TriggerActionSchemas/index.html),
+CFRs like any other messaging screen has specific triggers. You can learn more about triggers [here](https://firefox-source-docs.mozilla.org/toolkit/components/messaging-system/docs/TriggerActionSchemas/index.html).
 
-[More examples of templates supported with CFR ](https://experimenter.info/messaging/desktop-messaging-surfaces/#doorhanger)
+[More examples of templates supported with CFR](https://experimenter.info/messaging/desktop-messaging-surfaces/#doorhanger)
+
+### Note:
+For new messages, [Feature Callout](./feature-callout.md) is recommended instead of CFR.
 
 ### Example of Doorhanger
 ![Doorhanger](./cfr-doorhanger.png)
@@ -38,8 +41,8 @@ You can test CFR messaging surface by creating an experiment or landing message 
     "persistent_doorhanger": true,
     "anchor_id": "tracking-protection-icon-container",
     "layout": "icon_and_message",
-    "icon": "chrome://browser/content/cfr-lightning.svg",
-    "icon_dark_theme": "chrome://browser/content/cfr-lightning-dark.svg",
+    "icon": "chrome://activity-stream/content/data/content/assets/glyph-webextension-16.svg",
+    "icon_dark_theme": "chrome://activity-stream/content/data/content/assets/glyph-webextension-16.svg",
     "icon_class": "cfr-doorhanger-small-icon",
     "heading_text": "Update Nightly to play Video",
     "text": "Videos on this site may not play correctly on this version of Nightly. For full video support, update Nightly now.",

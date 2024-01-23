@@ -2,7 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import { getSymbols, clearSymbols } from "./getSymbols";
+import {
+  getSymbols,
+  getFunctionSymbols,
+  getClassSymbols,
+  getClosestFunctionName,
+  clearSymbols,
+} from "./getSymbols";
 import { clearASTs } from "./utils/ast";
 import getScopes, { clearScopes } from "./getScopes";
 import { setSource, clearSources } from "./sources";
@@ -24,6 +30,9 @@ self.onmessage = workerHandler({
   findOutOfScopeLocations,
   findBestMatchExpression,
   getSymbols,
+  getFunctionSymbols,
+  getClassSymbols,
+  getClosestFunctionName,
   getScopes,
   clearSources: clearAllHelpersForSources,
   hasSyntaxError,

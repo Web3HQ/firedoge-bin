@@ -53,13 +53,13 @@
 #include "mozilla/BenchmarkStorageParent.h"
 #include "mozilla/Casting.h"
 #include "mozilla/ClearOnShutdown.h"
+#include "mozilla/ClipboardReadRequestParent.h"
 #include "mozilla/ClipboardWriteRequestParent.h"
 #include "mozilla/ContentBlockingUserInteraction.h"
 #include "mozilla/FOGIPC.h"
 #include "mozilla/GlobalStyleSheetCache.h"
 #include "mozilla/GeckoArgs.h"
 #include "mozilla/HangDetails.h"
-#include "mozilla/LoginReputationIPC.h"
 #include "mozilla/LookAndFeel.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/NullPrincipal.h"
@@ -126,6 +126,7 @@
 #include "mozilla/dom/SessionHistoryEntry.h"
 #include "mozilla/dom/SessionStorageManager.h"
 #include "mozilla/dom/StorageIPC.h"
+#include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/URLClassifierParent.h"
 #include "mozilla/dom/WindowGlobalParent.h"
 #include "mozilla/dom/ipc/SharedMap.h"
@@ -219,13 +220,13 @@
 #include "nsIScriptSecurityManager.h"
 #include "nsIServiceWorkerManager.h"
 #include "nsISiteSecurityService.h"
-#include "nsISound.h"
 #include "nsIStringBundle.h"
 #include "nsITimer.h"
 #include "nsIURL.h"
 #include "nsIWebBrowserChrome.h"
 #include "nsIX509Cert.h"
 #include "nsIXULRuntime.h"
+#include "nsICookieNotification.h"
 #if defined(MOZ_WIDGET_GTK) || defined(XP_WIN)
 #  include "nsIconChannel.h"
 #endif
@@ -233,7 +234,6 @@
 #include "nsMemoryReporterManager.h"
 #include "nsOpenURIInFrameParams.h"
 #include "nsPIWindowWatcher.h"
-#include "nsPluginHost.h"
 #include "nsPluginTags.h"
 #include "nsQueryObject.h"
 #include "nsReadableUtils.h"
@@ -323,6 +323,7 @@
 // For VP9Benchmark::sBenchmarkFpsPref
 #include "Benchmark.h"
 
+#include "mozilla/RemoteDecodeUtils.h"
 #include "nsIToolkitProfileService.h"
 #include "nsIToolkitProfile.h"
 
@@ -351,6 +352,9 @@ using mozilla::Telemetry::ProcessID;
 extern mozilla::LazyLogModule gFocusLog;
 
 #define LOGFOCUS(args) MOZ_LOG(gFocusLog, mozilla::LogLevel::Debug, args)
+
+extern mozilla::LazyLogModule sPDMLog;
+#define LOGPDM(...) MOZ_LOG(sPDMLog, mozilla::LogLevel::Debug, (__VA_ARGS__))
 
 namespace mozilla {
 namespace CubebUtils {
@@ -737,10 +741,6 @@ bool IsWebRemoteType(const nsACString& aContentProcessType) {
 bool IsWebCoopCoepRemoteType(const nsACString& aContentProcessType) {
   return StringBeginsWith(aContentProcessType,
                           WITH_COOP_COEP_REMOTE_TYPE_PREFIX);
-}
-
-bool IsPrivilegedMozillaRemoteType(const nsACString& aContentProcessType) {
-  return aContentProcessType == PRIVILEGEDMOZILLA_REMOTE_TYPE;
 }
 
 bool IsExtensionRemoteType(const nsACString& aContentProcessType) {
@@ -1445,6 +1445,14 @@ already_AddRefed<RemoteBrowser> ContentParent::CreateBrowser(
       "BrowsingContext must not have BrowserParent, or have previous "
       "BrowserParent cleared");
 
+  // Don't bother creating new content browsers after entering shutdown. This
+  // could lead to starting a new content process, which may significantly delay
+  // shutdown, and the content is unlikely to be displayed.
+  if (AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
+    NS_WARNING("Ignoring remote browser creation request during shutdown");
+    return nullptr;
+  }
+
   nsAutoCString remoteType(aRemoteType);
   if (remoteType.IsEmpty()) {
     remoteType = DEFAULT_REMOTE_TYPE;
@@ -1641,6 +1649,13 @@ void ContentParent::BroadcastMediaCodecsSupportedUpdate(
   nsCString supportString;
   media::MCSInfo::GetMediaCodecsSupportedString(supportString, support);
   gfx::gfxVars::SetCodecSupportInfo(supportString);
+
+  // Print the support info only from the given location for debug purpose.
+  supportString.Truncate();
+  media::MCSInfo::GetMediaCodecsSupportedString(supportString, aSupported);
+  supportString.ReplaceSubstring("\n"_ns, ", "_ns);
+  LOGPDM("Broadcast support from '%s', support=%s",
+         RemoteDecodeInToStr(aLocation), supportString.get());
 }
 
 const nsACString& ContentParent::GetRemoteType() const { return mRemoteType; }
@@ -1679,7 +1694,9 @@ void ContentParent::Init() {
 
   RefPtr<GeckoMediaPluginServiceParent> gmps(
       GeckoMediaPluginServiceParent::GetSingleton());
-  gmps->UpdateContentProcessGMPCapabilities(this);
+  if (gmps) {
+    gmps->UpdateContentProcessGMPCapabilities(this);
+  }
 
   // Flush any pref updates that happened during launch and weren't
   // included in the blobs set up in BeginSubprocessLaunch.
@@ -2016,11 +2033,15 @@ void ContentParent::MarkAsDead() {
   PreallocatedProcessManager::Erase(this);
   StopRecyclingE10SOnly(false);
 
-#ifdef MOZ_WIDGET_ANDROID
+#if defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_PROFILE_GENERATE)
   if (IsAlive()) {
     // We're intentionally killing the content process at this point to ensure
     // that we never have a "dead" content process sitting around and occupying
     // an Android Service.
+    //
+    // The exception is in MOZ_PROFILE_GENERATE builds where we must allow the
+    // process to shutdown cleanly so that profile data can be dumped. This is
+    // okay as we will not reach our process limit during the profile run.
     nsCOMPtr<nsIEventTarget> launcherThread(GetIPCLauncher());
     MOZ_ASSERT(launcherThread);
 
@@ -2472,7 +2493,11 @@ void ContentParent::NotifyTabDestroyed(const TabId& aTabId,
 }
 
 TestShellParent* ContentParent::CreateTestShell() {
-  return static_cast<TestShellParent*>(SendPTestShellConstructor());
+  RefPtr<TestShellParent> actor = new TestShellParent();
+  if (!SendPTestShellConstructor(actor)) {
+    return nullptr;
+  }
+  return actor;
 }
 
 bool ContentParent::DestroyTestShell(TestShellParent* aTestShell) {
@@ -3210,7 +3235,8 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
   AutoTArray<uint32_t, 3> namespaces;
 
   if (!gpm->CreateContentBridges(OtherPid(), &compositor, &imageBridge,
-                                 &vrBridge, &videoManager, &namespaces)) {
+                                 &vrBridge, &videoManager, mChildID,
+                                 &namespaces)) {
     // This can fail if we've already started shutting down the compositor
     // thread. See Bug 1562763 comment 8.
     MOZ_ASSERT(AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdown));
@@ -3291,34 +3317,34 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
 
   {
     nsTArray<BlobURLRegistrationData> registrations;
-    BlobURLProtocolHandler::ForEachBlobURL(
-        [&](BlobImpl* aBlobImpl, nsIPrincipal* aPrincipal,
-            const Maybe<nsID>& aAgentClusterId, const nsCString& aPartitionKey,
-            const nsACString& aURI, bool aRevoked) {
-          // We send all moz-extension Blob URL's to all content processes
-          // because content scripts mean that a moz-extension can live in any
-          // process. Same thing for system principal Blob URLs. Content Blob
-          // URL's are sent for content principals on-demand by
-          // AboutToLoadHttpFtpDocumentForChild and RemoteWorkerManager.
-          if (!BlobURLProtocolHandler::IsBlobURLBroadcastPrincipal(
-                  aPrincipal)) {
-            return true;
-          }
+    BlobURLProtocolHandler::ForEachBlobURL([&](BlobImpl* aBlobImpl,
+                                               nsIPrincipal* aPrincipal,
+                                               const nsCString& aPartitionKey,
+                                               const nsACString& aURI,
+                                               bool aRevoked) {
+      // We send all moz-extension Blob URL's to all content processes
+      // because content scripts mean that a moz-extension can live in any
+      // process. Same thing for system principal Blob URLs. Content Blob
+      // URL's are sent for content principals on-demand by
+      // AboutToLoadHttpFtpDocumentForChild and RemoteWorkerManager.
+      if (!BlobURLProtocolHandler::IsBlobURLBroadcastPrincipal(aPrincipal)) {
+        return true;
+      }
 
-          IPCBlob ipcBlob;
-          nsresult rv = IPCBlobUtils::Serialize(aBlobImpl, ipcBlob);
-          if (NS_WARN_IF(NS_FAILED(rv))) {
-            return false;
-          }
+      IPCBlob ipcBlob;
+      nsresult rv = IPCBlobUtils::Serialize(aBlobImpl, ipcBlob);
+      if (NS_WARN_IF(NS_FAILED(rv))) {
+        return false;
+      }
 
-          registrations.AppendElement(BlobURLRegistrationData(
-              nsCString(aURI), ipcBlob, aPrincipal, aAgentClusterId,
-              nsCString(aPartitionKey), aRevoked));
+      registrations.AppendElement(
+          BlobURLRegistrationData(nsCString(aURI), ipcBlob, aPrincipal,
+                                  nsCString(aPartitionKey), aRevoked));
 
-          rv = TransmitPermissionsForPrincipal(aPrincipal);
-          Unused << NS_WARN_IF(NS_FAILED(rv));
-          return true;
-        });
+      rv = TransmitPermissionsForPrincipal(aPrincipal);
+      Unused << NS_WARN_IF(NS_FAILED(rv));
+      return true;
+    });
 
     if (!registrations.IsEmpty()) {
       Unused << SendInitBlobURLs(registrations);
@@ -3368,19 +3394,6 @@ int32_t ContentParent::Pid() const {
   return ReleaseAssertedCast<int32_t>(pid);
 }
 
-mozilla::ipc::IPCResult ContentParent::RecvGetGfxVars(
-    nsTArray<GfxVarUpdate>* aVars) {
-  // Ensure gfxVars is initialized (for xpcshell tests).
-  gfxVars::Initialize();
-
-  *aVars = gfxVars::FetchNonDefaultVars();
-
-  // Now that content has initialized gfxVars, we can start listening for
-  // updates.
-  gfxVars::AddReceiver(this);
-  return IPC_OK();
-}
-
 void ContentParent::OnCompositorUnexpectedShutdown() {
   GPUProcessManager* gpm = GPUProcessManager::Get();
 
@@ -3391,7 +3404,8 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
   AutoTArray<uint32_t, 3> namespaces;
 
   if (!gpm->CreateContentBridges(OtherPid(), &compositor, &imageBridge,
-                                 &vrBridge, &videoManager, &namespaces)) {
+                                 &vrBridge, &videoManager, mChildID,
+                                 &namespaces)) {
     MOZ_ASSERT(AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdown));
     return;
   }
@@ -3452,7 +3466,9 @@ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
   // aRequestingPrincipal is allowed to be nullptr here.
 
   if (!ValidatePrincipal(aTransferable.requestingPrincipal(),
-                         {ValidatePrincipalOptions::AllowNullPtr})) {
+                         {ValidatePrincipalOptions::AllowNullPtr,
+                          ValidatePrincipalOptions::AllowExpanded,
+                          ValidatePrincipalOptions::AllowSystem})) {
     LogAndAssertFailedPrincipalValidationInfo(
         aTransferable.requestingPrincipal(), __func__);
   }
@@ -3551,26 +3567,6 @@ mozilla::ipc::IPCResult ContentParent::RecvClipboardHasType(
   return IPC_OK();
 }
 
-mozilla::ipc::IPCResult ContentParent::RecvClipboardHasTypesAsync(
-    nsTArray<nsCString>&& aTypes, const int32_t& aWhichClipboard,
-    ClipboardHasTypesAsyncResolver&& aResolver) {
-  nsresult rv;
-  nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
-  if (NS_FAILED(rv)) {
-    return IPC_FAIL(this, "RecvGetClipboardTypes failed.");
-  }
-
-  clipboard->AsyncHasDataMatchingFlavors(aTypes, aWhichClipboard)
-      ->Then(
-          GetMainThreadSerialEventTarget(), __func__,
-          /* resolve */
-          [aResolver](nsTArray<nsCString> types) { aResolver(types); },
-          /* reject */
-          [aResolver](nsresult rv) { aResolver(nsTArray<nsCString>{}); });
-
-  return IPC_OK();
-}
-
 mozilla::ipc::IPCResult ContentParent::RecvGetExternalClipboardFormats(
     const int32_t& aWhichClipboard, const bool& aPlainTextOnly,
     nsTArray<nsCString>* aTypes) {
@@ -3580,9 +3576,78 @@ mozilla::ipc::IPCResult ContentParent::RecvGetExternalClipboardFormats(
   return IPC_OK();
 }
 
+namespace {
+
+class ClipboardGetCallback final : public nsIAsyncClipboardGetCallback {
+ public:
+  ClipboardGetCallback(ContentParent* aContentParent,
+                       ContentParent::GetClipboardAsyncResolver&& aResolver)
+      : mContentParent(aContentParent), mResolver(std::move(aResolver)) {}
+
+  // This object will never be held by a cycle-collected object, so it doesn't
+  // need to be cycle-collected despite holding alive cycle-collected objects.
+  NS_DECL_ISUPPORTS
+
+  // nsIAsyncClipboardGetCallback
+  NS_IMETHOD OnSuccess(
+      nsIAsyncGetClipboardData* aAsyncGetClipboardData) override {
+    nsTArray<nsCString> flavors;
+    nsresult rv = aAsyncGetClipboardData->GetFlavorList(flavors);
+    if (NS_FAILED(rv)) {
+      return OnError(rv);
+    }
+
+    auto requestParent = MakeNotNull<RefPtr<ClipboardReadRequestParent>>(
+        mContentParent, aAsyncGetClipboardData);
+    if (!mContentParent->SendPClipboardReadRequestConstructor(
+            requestParent, std::move(flavors))) {
+      return OnError(NS_ERROR_FAILURE);
+    }
+
+    mResolver(PClipboardReadRequestOrError(requestParent));
+    return NS_OK;
+  }
+
+  NS_IMETHOD OnError(nsresult aResult) override {
+    mResolver(aResult);
+    return NS_OK;
+  }
+
+ protected:
+  ~ClipboardGetCallback() = default;
+
+  RefPtr<ContentParent> mContentParent;
+  ContentParent::GetClipboardAsyncResolver mResolver;
+};
+
+NS_IMPL_ISUPPORTS(ClipboardGetCallback, nsIAsyncClipboardGetCallback)
+
+}  // namespace
+
 mozilla::ipc::IPCResult ContentParent::RecvGetClipboardAsync(
     nsTArray<nsCString>&& aTypes, const int32_t& aWhichClipboard,
+    const MaybeDiscarded<WindowContext>& aRequestingWindowContext,
+    mozilla::NotNull<nsIPrincipal*> aRequestingPrincipal,
     GetClipboardAsyncResolver&& aResolver) {
+  if (!ValidatePrincipal(aRequestingPrincipal,
+                         {ValidatePrincipalOptions::AllowSystem,
+                          ValidatePrincipalOptions::AllowExpanded})) {
+    LogAndAssertFailedPrincipalValidationInfo(aRequestingPrincipal, __func__);
+  }
+
+  // If the requesting context has been discarded, cancel the paste.
+  if (aRequestingWindowContext.IsDiscarded()) {
+    aResolver(NS_ERROR_NOT_AVAILABLE);
+    return IPC_OK();
+  }
+
+  RefPtr<WindowGlobalParent> requestingWindow =
+      aRequestingWindowContext.get_canonical();
+  if (requestingWindow && requestingWindow->GetContentParent() != this) {
+    return IPC_FAIL(
+        this, "attempt to paste into WindowContext loaded in another process");
+  }
+
   nsresult rv;
   // Retrieve clipboard
   nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
@@ -3591,25 +3656,14 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardAsync(
     return IPC_OK();
   }
 
-  // Create transferable
-  auto result = CreateTransferable(aTypes);
-  if (result.isErr()) {
-    aResolver(result.unwrapErr());
+  auto callback = MakeRefPtr<ClipboardGetCallback>(this, std::move(aResolver));
+  rv = clipboard->AsyncGetData(aTypes, aWhichClipboard, requestingWindow,
+                               aRequestingPrincipal, callback);
+  if (NS_FAILED(rv)) {
+    callback->OnError(rv);
     return IPC_OK();
   }
 
-  // Get data from clipboard
-  nsCOMPtr<nsITransferable> trans = result.unwrap();
-  clipboard->AsyncGetData(trans, nsIClipboard::kGlobalClipboard)
-      ->Then(
-          GetMainThreadSerialEventTarget(), __func__,
-          [trans, aResolver,
-           self = RefPtr{this}](GenericPromise::ResolveOrRejectValue&& aValue) {
-            IPCTransferableData ipcTransferableData;
-            nsContentUtils::TransferableToIPCTransferableData(
-                trans, &ipcTransferableData, false /* aInSyncMessage */, self);
-            aResolver(std::move(ipcTransferableData));
-          });
   return IPC_OK();
 }
 
@@ -3620,47 +3674,6 @@ ContentParent::AllocPClipboardWriteRequestParent(
       MakeAndAddRef<ClipboardWriteRequestParent>(this);
   request->Init(aClipboardType);
   return request.forget();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvPlaySound(nsIURI* aURI) {
-  // If the check here fails, it can only mean that this message was spoofed.
-  if (!aURI || !aURI->SchemeIs("chrome")) {
-    // PlaySound only accepts a valid chrome URI.
-    return IPC_FAIL(this, "Invalid aURI passed.");
-  }
-  nsCOMPtr<nsIURL> soundURL(do_QueryInterface(aURI));
-  if (!soundURL) {
-    return IPC_OK();
-  }
-
-  nsresult rv;
-  nsCOMPtr<nsISound> sound(do_GetService(NS_SOUND_CID, &rv));
-  NS_ENSURE_SUCCESS(rv, IPC_OK());
-
-  sound->Play(soundURL);
-
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvBeep() {
-  nsresult rv;
-  nsCOMPtr<nsISound> sound(do_GetService(NS_SOUND_CID, &rv));
-  NS_ENSURE_SUCCESS(rv, IPC_OK());
-
-  sound->Beep();
-
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvPlayEventSound(
-    const uint32_t& aEventId) {
-  nsresult rv;
-  nsCOMPtr<nsISound> sound(do_GetService(NS_SOUND_CID, &rv));
-  NS_ENSURE_SUCCESS(rv, IPC_OK());
-
-  sound->PlayEventSound(aEventId);
-
-  return IPC_OK();
 }
 
 mozilla::ipc::IPCResult ContentParent::RecvGetIconForExtension(
@@ -4077,9 +4090,12 @@ ContentParent::Observe(nsISupports* aSubject, const char* aTopic,
     Unused << SendUpdateRequestedLocales(requestedLocales);
   } else if (!strcmp(aTopic, "cookie-changed") ||
              !strcmp(aTopic, "private-cookie-changed")) {
-    if (!aData) {
-      return NS_ERROR_UNEXPECTED;
-    }
+    MOZ_ASSERT(aSubject, "cookie changed notification must have subject.");
+    nsCOMPtr<nsICookieNotification> notification = do_QueryInterface(aSubject);
+    MOZ_ASSERT(notification,
+               "cookie changed notification must have nsICookieNotification.");
+    nsICookieNotification::Action action = notification->GetAction();
+
     PNeckoParent* neckoParent = LoneManagedOrNullAsserts(ManagedPNeckoParent());
     if (!neckoParent) {
       return NS_OK;
@@ -4090,14 +4106,16 @@ ContentParent::Observe(nsISupports* aSubject, const char* aTopic,
       return NS_OK;
     }
     auto* cs = static_cast<CookieServiceParent*>(csParent);
-    if (!nsCRT::strcmp(aData, u"batch-deleted")) {
-      nsCOMPtr<nsIArray> cookieList = do_QueryInterface(aSubject);
-      NS_ASSERTION(cookieList, "couldn't get cookie list");
+    if (action == nsICookieNotification::COOKIES_BATCH_DELETED) {
+      nsCOMPtr<nsIArray> cookieList;
+      DebugOnly<nsresult> rv =
+          notification->GetBatchDeletedCookies(getter_AddRefs(cookieList));
+      NS_ASSERTION(NS_SUCCEEDED(rv) && cookieList, "couldn't get cookie list");
       cs->RemoveBatchDeletedCookies(cookieList);
       return NS_OK;
     }
 
-    if (!nsCRT::strcmp(aData, u"cleared")) {
+    if (action == nsICookieNotification::ALL_COOKIES_CLEARED) {
       cs->RemoveAll();
       return NS_OK;
     }
@@ -4108,8 +4126,9 @@ ContentParent::Observe(nsISupports* aSubject, const char* aTopic,
       return NS_OK;
     }
 
-    nsCOMPtr<nsICookie> xpcCookie = do_QueryInterface(aSubject);
-    NS_ASSERTION(xpcCookie, "couldn't get cookie");
+    nsCOMPtr<nsICookie> xpcCookie;
+    DebugOnly<nsresult> rv = notification->GetCookie(getter_AddRefs(xpcCookie));
+    NS_ASSERTION(NS_SUCCEEDED(rv) && xpcCookie, "couldn't get cookie");
 
     // only broadcast the cookie change to content processes that need it
     const Cookie& cookie = xpcCookie->AsCookie();
@@ -4119,10 +4138,10 @@ ContentParent::Observe(nsISupports* aSubject, const char* aTopic,
       return NS_OK;
     }
 
-    if (!nsCRT::strcmp(aData, u"deleted")) {
+    if (action == nsICookieNotification::COOKIE_DELETED) {
       cs->RemoveCookie(cookie);
-    } else if ((!nsCRT::strcmp(aData, u"added")) ||
-               (!nsCRT::strcmp(aData, u"changed"))) {
+    } else if (action == nsICookieNotification::COOKIE_ADDED ||
+               action == nsICookieNotification::COOKIE_CHANGED) {
       cs->AddCookie(cookie);
     }
   } else if (!strcmp(aTopic, NS_NETWORK_LINK_TYPE_TOPIC)) {
@@ -4238,7 +4257,7 @@ static bool CloneIsLegal(ContentParent* aCp, CanonicalBrowsingContext& aSource,
     return false;
   }
 
-  auto* targetEmbedder = aSource.GetParentWindowContext();
+  auto* targetEmbedder = aTarget.GetParentWindowContext();
   if (NS_WARN_IF(!targetEmbedder) ||
       NS_WARN_IF(targetEmbedder->GetContentParent() != aCp)) {
     return false;
@@ -4658,15 +4677,6 @@ bool ContentParent::CycleCollectWithLogs(
       this, aDumpAllTraces, aSink, aCallback);
 }
 
-PTestShellParent* ContentParent::AllocPTestShellParent() {
-  return new TestShellParent();
-}
-
-bool ContentParent::DeallocPTestShellParent(PTestShellParent* shell) {
-  delete shell;
-  return true;
-}
-
 PScriptCacheParent* ContentParent::AllocPScriptCacheParent(
     const FileDescOrError& cacheFile, const bool& wantCacheData) {
   return new loader::ScriptCacheParent(wantCacheData);
@@ -4766,17 +4776,13 @@ bool ContentParent::DeallocPBenchmarkStorageParent(
 }
 
 #ifdef MOZ_WEBSPEECH
-PSpeechSynthesisParent* ContentParent::AllocPSpeechSynthesisParent() {
+already_AddRefed<PSpeechSynthesisParent>
+ContentParent::AllocPSpeechSynthesisParent() {
   if (!StaticPrefs::media_webspeech_synth_enabled()) {
     return nullptr;
   }
-  return new mozilla::dom::SpeechSynthesisParent();
-}
-
-bool ContentParent::DeallocPSpeechSynthesisParent(
-    PSpeechSynthesisParent* aActor) {
-  delete aActor;
-  return true;
+  RefPtr<SpeechSynthesisParent> actor = new SpeechSynthesisParent();
+  return actor.forget();
 }
 
 mozilla::ipc::IPCResult ContentParent::RecvPSpeechSynthesisConstructor(
@@ -5150,7 +5156,9 @@ mozilla::ipc::IPCResult ContentParent::RecvScriptErrorInternal(
     }
 
     JS::Rooted<JSObject*> stackObj(cx, &stack.toObject());
-    MOZ_ASSERT(JS::IsUnwrappedSavedFrame(stackObj));
+    if (!JS::IsUnwrappedSavedFrame(stackObj)) {
+      return IPC_FAIL(this, "Unexpected object");
+    }
 
     JS::Rooted<JSObject*> stackGlobal(cx, JS::GetNonCCWObjectGlobal(stackObj));
     msg = new nsScriptErrorWithStack(JS::NothingHandleValue, stackObj,
@@ -5203,6 +5211,11 @@ mozilla::ipc::IPCResult ContentParent::RecvCopyFavicon(
 mozilla::ipc::IPCResult ContentParent::RecvFindImageText(
     IPCImage&& aImage, nsTArray<nsCString>&& aLanguages,
     FindImageTextResolver&& aResolver) {
+  if (!TextRecognition::IsSupported() ||
+      !Preferences::GetBool("dom.text-recognition.enabled")) {
+    return IPC_FAIL(this, "Text recognition not available.");
+  }
+
   RefPtr<DataSourceSurface> surf =
       nsContentUtils::IPCImageToSurface(std::move(aImage));
   if (!surf) {
@@ -5226,29 +5239,6 @@ mozilla::ipc::IPCResult ContentParent::RecvFindImageText(
 bool ContentParent::ShouldContinueFromReplyTimeout() {
   RefPtr<ProcessHangMonitor> monitor = ProcessHangMonitor::Get();
   return !monitor || !monitor->ShouldTimeOutCPOWs();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvRecordingDeviceEvents(
-    const nsAString& aRecordingStatus, const nsAString& aPageURL,
-    const bool& aIsAudio, const bool& aIsVideo) {
-  nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
-  if (obs) {
-    // recording-device-ipc-events needs to gather more information from content
-    // process
-    RefPtr<nsHashPropertyBag> props = new nsHashPropertyBag();
-    props->SetPropertyAsUint64(u"childID"_ns, ChildID());
-    props->SetPropertyAsBool(u"isAudio"_ns, aIsAudio);
-    props->SetPropertyAsBool(u"isVideo"_ns, aIsVideo);
-    props->SetPropertyAsAString(u"requestURL"_ns, aPageURL);
-
-    obs->NotifyObservers((nsIPropertyBag2*)props, "recording-device-ipc-events",
-                         PromiseFlatString(aRecordingStatus).get());
-  } else {
-    NS_WARNING(
-        "Could not get the Observer service for "
-        "ContentParent::RecvRecordingDeviceEvents.");
-  }
-  return IPC_OK();
 }
 
 mozilla::ipc::IPCResult ContentParent::RecvAddIdleObserver(
@@ -5519,16 +5509,10 @@ bool ContentParent::DeallocPContentPermissionRequestParent(
   return true;
 }
 
-PWebBrowserPersistDocumentParent*
+already_AddRefed<PWebBrowserPersistDocumentParent>
 ContentParent::AllocPWebBrowserPersistDocumentParent(
     PBrowserParent* aBrowser, const MaybeDiscarded<BrowsingContext>& aContext) {
-  return new WebBrowserPersistDocumentParent();
-}
-
-bool ContentParent::DeallocPWebBrowserPersistDocumentParent(
-    PWebBrowserPersistDocumentParent* aActor) {
-  delete aActor;
-  return true;
+  return MakeAndAddRef<WebBrowserPersistDocumentParent>();
 }
 
 mozilla::ipc::IPCResult ContentParent::CommonCreateWindow(
@@ -5536,6 +5520,7 @@ mozilla::ipc::IPCResult ContentParent::CommonCreateWindow(
     const uint32_t& aChromeFlags, const bool& aCalledFromJS,
     const bool& aForPrinting, const bool& aForWindowDotPrint,
     nsIURI* aURIToLoad, const nsACString& aFeatures,
+    const UserActivation::Modifiers& aModifiers,
     BrowserParent* aNextRemoteBrowser, const nsAString& aName,
     nsresult& aResult, nsCOMPtr<nsIRemoteTab>& aNewRemoteTab,
     bool* aWindowIsNew, int32_t& aOpenLocation,
@@ -5624,9 +5609,10 @@ mozilla::ipc::IPCResult ContentParent::CommonCreateWindow(
   }
 
   aOpenLocation = nsWindowWatcher::GetWindowOpenLocation(
-      outerWin, aChromeFlags, aCalledFromJS, aForPrinting);
+      outerWin, aChromeFlags, aModifiers, aCalledFromJS, aForPrinting);
 
   MOZ_ASSERT(aOpenLocation == nsIBrowserDOMWindow::OPEN_NEWTAB ||
+             aOpenLocation == nsIBrowserDOMWindow::OPEN_NEWTAB_BACKGROUND ||
              aOpenLocation == nsIBrowserDOMWindow::OPEN_NEWWINDOW ||
              aOpenLocation == nsIBrowserDOMWindow::OPEN_PRINT_BROWSER);
 
@@ -5636,6 +5622,7 @@ mozilla::ipc::IPCResult ContentParent::CommonCreateWindow(
   }
 
   if (aOpenLocation == nsIBrowserDOMWindow::OPEN_NEWTAB ||
+      aOpenLocation == nsIBrowserDOMWindow::OPEN_NEWTAB_BACKGROUND ||
       aOpenLocation == nsIBrowserDOMWindow::OPEN_PRINT_BROWSER) {
     RefPtr<Element> openerElement = do_QueryObject(frame);
 
@@ -5694,8 +5681,8 @@ mozilla::ipc::IPCResult ContentParent::CommonCreateWindow(
   features.Tokenize(aFeatures);
 
   aResult = pwwatch->OpenWindowWithRemoteTab(
-      thisBrowserHost, features, aCalledFromJS, aParent.FullZoom(), openInfo,
-      getter_AddRefs(aNewRemoteTab));
+      thisBrowserHost, features, aModifiers, aCalledFromJS, aParent.FullZoom(),
+      openInfo, getter_AddRefs(aNewRemoteTab));
   if (NS_WARN_IF(NS_FAILED(aResult))) {
     return IPC_OK();
   }
@@ -5760,9 +5747,9 @@ mozilla::ipc::IPCResult ContentParent::RecvCreateWindow(
     PBrowserParent* aNewTab, const uint32_t& aChromeFlags,
     const bool& aCalledFromJS, const bool& aForPrinting,
     const bool& aForPrintPreview, nsIURI* aURIToLoad,
-    const nsACString& aFeatures, nsIPrincipal* aTriggeringPrincipal,
-    nsIContentSecurityPolicy* aCsp, nsIReferrerInfo* aReferrerInfo,
-    const OriginAttributes& aOriginAttributes,
+    const nsACString& aFeatures, const UserActivation::Modifiers& aModifiers,
+    nsIPrincipal* aTriggeringPrincipal, nsIContentSecurityPolicy* aCsp,
+    nsIReferrerInfo* aReferrerInfo, const OriginAttributes& aOriginAttributes,
     CreateWindowResolver&& aResolve) {
   if (!aTriggeringPrincipal) {
     return IPC_FAIL(this, "No principal");
@@ -5845,7 +5832,7 @@ mozilla::ipc::IPCResult ContentParent::RecvCreateWindow(
   int32_t openLocation = nsIBrowserDOMWindow::OPEN_NEWWINDOW;
   mozilla::ipc::IPCResult ipcResult = CommonCreateWindow(
       aThisTab, *parent, newBCOpenerId != 0, aChromeFlags, aCalledFromJS,
-      aForPrinting, aForPrintPreview, aURIToLoad, aFeatures, newTab,
+      aForPrinting, aForPrintPreview, aURIToLoad, aFeatures, aModifiers, newTab,
       VoidString(), rv, newRemoteTab, &cwi.windowOpened(), openLocation,
       aTriggeringPrincipal, aReferrerInfo, /* aLoadUri = */ false, aCsp,
       aOriginAttributes);
@@ -5862,8 +5849,9 @@ mozilla::ipc::IPCResult ContentParent::RecvCreateWindow(
 
   // This used to happen in the child - there may now be a better place to
   // do this work.
-  MOZ_ALWAYS_SUCCEEDS(
-      newBC->SetHasSiblings(openLocation == nsIBrowserDOMWindow::OPEN_NEWTAB));
+  MOZ_ALWAYS_SUCCEEDS(newBC->SetHasSiblings(
+      openLocation == nsIBrowserDOMWindow::OPEN_NEWTAB ||
+      openLocation == nsIBrowserDOMWindow::OPEN_NEWTAB_BACKGROUND));
 
   newTab->SwapFrameScriptsFrom(cwi.frameScripts());
   newTab->MaybeShowFrame();
@@ -5881,9 +5869,10 @@ mozilla::ipc::IPCResult ContentParent::RecvCreateWindow(
 mozilla::ipc::IPCResult ContentParent::RecvCreateWindowInDifferentProcess(
     PBrowserParent* aThisTab, const MaybeDiscarded<BrowsingContext>& aParent,
     const uint32_t& aChromeFlags, const bool& aCalledFromJS, nsIURI* aURIToLoad,
-    const nsACString& aFeatures, const nsAString& aName,
-    nsIPrincipal* aTriggeringPrincipal, nsIContentSecurityPolicy* aCsp,
-    nsIReferrerInfo* aReferrerInfo, const OriginAttributes& aOriginAttributes) {
+    const nsACString& aFeatures, const UserActivation::Modifiers& aModifiers,
+    const nsAString& aName, nsIPrincipal* aTriggeringPrincipal,
+    nsIContentSecurityPolicy* aCsp, nsIReferrerInfo* aReferrerInfo,
+    const OriginAttributes& aOriginAttributes) {
   MOZ_DIAGNOSTIC_ASSERT(!nsContentUtils::IsSpecialName(aName));
 
   // Don't continue to try to create a new window if we've been fully discarded.
@@ -5925,7 +5914,7 @@ mozilla::ipc::IPCResult ContentParent::RecvCreateWindowInDifferentProcess(
   mozilla::ipc::IPCResult ipcResult = CommonCreateWindow(
       aThisTab, *parent, /* aSetOpener = */ false, aChromeFlags, aCalledFromJS,
       /* aForPrinting = */ false,
-      /* aForPrintPreview = */ false, aURIToLoad, aFeatures,
+      /* aForPrintPreview = */ false, aURIToLoad, aFeatures, aModifiers,
       /* aNextRemoteBrowser = */ nullptr, aName, rv, newRemoteTab, &windowIsNew,
       openLocation, aTriggeringPrincipal, aReferrerInfo,
       /* aLoadUri = */ true, aCsp, aOriginAttributes);
@@ -5949,19 +5938,6 @@ mozilla::ipc::IPCResult ContentParent::RecvShutdownProfile(
 mozilla::ipc::IPCResult ContentParent::RecvShutdownPerfStats(
     const nsACString& aPerfStats) {
   PerfStats::StorePerfStats(this, aPerfStats);
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvGetGraphicsDeviceInitData(
-    ContentDeviceData* aOut) {
-  gfxPlatform::GetPlatform()->BuildContentDeviceData(aOut);
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvGetOutputColorProfileData(
-    nsTArray<uint8_t>* aOutputColorProfileData) {
-  (*aOutputColorProfileData) =
-      gfxPlatform::GetPlatform()->GetPlatformCMSOutputProfileData();
   return IPC_OK();
 }
 
@@ -6162,10 +6138,11 @@ ContentParent::RecvNotifyPushSubscriptionModifiedObservers(
 }
 
 /* static */
-void ContentParent::BroadcastBlobURLRegistration(
-    const nsACString& aURI, BlobImpl* aBlobImpl, nsIPrincipal* aPrincipal,
-    const Maybe<nsID>& aAgentClusterId, const nsCString& aPartitionKey,
-    ContentParent* aIgnoreThisCP) {
+void ContentParent::BroadcastBlobURLRegistration(const nsACString& aURI,
+                                                 BlobImpl* aBlobImpl,
+                                                 nsIPrincipal* aPrincipal,
+                                                 const nsCString& aPartitionKey,
+                                                 ContentParent* aIgnoreThisCP) {
   uint64_t originHash = ComputeLoadedOriginHash(aPrincipal);
 
   bool toBeSent =
@@ -6191,7 +6168,7 @@ void ContentParent::BroadcastBlobURLRegistration(
       }
 
       Unused << cp->SendBlobURLRegistration(uri, ipcBlob, aPrincipal,
-                                            aAgentClusterId, aPartitionKey);
+                                            aPartitionKey);
     }
   }
 }
@@ -6217,7 +6194,7 @@ void ContentParent::BroadcastBlobURLUnregistration(
 
 mozilla::ipc::IPCResult ContentParent::RecvStoreAndBroadcastBlobURLRegistration(
     const nsACString& aURI, const IPCBlob& aBlob, nsIPrincipal* aPrincipal,
-    const Maybe<nsID>& aAgentClusterId, const nsCString& aPartitionKey) {
+    const nsCString& aPartitionKey) {
   if (!aPrincipal) {
     return IPC_FAIL(this, "No principal");
   }
@@ -6230,10 +6207,9 @@ mozilla::ipc::IPCResult ContentParent::RecvStoreAndBroadcastBlobURLRegistration(
     return IPC_FAIL(this, "Blob deserialization failed.");
   }
 
-  BlobURLProtocolHandler::AddDataEntry(aURI, aPrincipal, aAgentClusterId,
-                                       aPartitionKey, blobImpl);
-  BroadcastBlobURLRegistration(aURI, blobImpl, aPrincipal, aAgentClusterId,
-                               aPartitionKey, this);
+  BlobURLProtocolHandler::AddDataEntry(aURI, aPrincipal, aPartitionKey,
+                                       blobImpl);
+  BroadcastBlobURLRegistration(aURI, blobImpl, aPrincipal, aPartitionKey, this);
 
   // We want to store this blobURL, so we can unregister it if the child
   // crashes.
@@ -6452,6 +6428,16 @@ nsresult ContentParent::TransmitPermissionsForPrincipal(
     EnsurePermissionsByKey(pair.first, pair.second);
   }
 
+  // We need to add the Site to the secondary keys of interest here.
+  // This allows site-scoped permission updates to propogate when the
+  // port is non-standard.
+  nsAutoCString siteKey;
+  nsresult rv =
+      PermissionManager::GetKeyForPrincipal(aPrincipal, false, true, siteKey);
+  if (NS_SUCCEEDED(rv) && !siteKey.IsEmpty()) {
+    mActiveSecondaryPermissionKeys.EnsureInserted(siteKey);
+  }
+
   return NS_OK;
 }
 
@@ -6479,8 +6465,8 @@ void ContentParent::TransmitBlobURLsForPrincipal(nsIPrincipal* aPrincipal) {
     nsTArray<BlobURLRegistrationData> registrations;
     BlobURLProtocolHandler::ForEachBlobURL(
         [&](BlobImpl* aBlobImpl, nsIPrincipal* aBlobPrincipal,
-            const Maybe<nsID>& aAgentClusterId, const nsCString& aPartitionKey,
-            const nsACString& aURI, bool aRevoked) {
+            const nsCString& aPartitionKey, const nsACString& aURI,
+            bool aRevoked) {
           // This check uses `ComputeLoadedOriginHash` to compare, rather than
           // doing the more accurate `Equals` check, as it needs to match the
           // behaviour of the logic to broadcast new registrations.
@@ -6494,9 +6480,9 @@ void ContentParent::TransmitBlobURLsForPrincipal(nsIPrincipal* aPrincipal) {
             return false;
           }
 
-          registrations.AppendElement(BlobURLRegistrationData(
-              nsCString(aURI), ipcBlob, aBlobPrincipal, aAgentClusterId,
-              nsCString(aPartitionKey), aRevoked));
+          registrations.AppendElement(
+              BlobURLRegistrationData(nsCString(aURI), ipcBlob, aPrincipal,
+                                      nsCString(aPartitionKey), aRevoked));
 
           rv = TransmitPermissionsForPrincipal(aBlobPrincipal);
           Unused << NS_WARN_IF(NS_FAILED(rv));
@@ -6544,6 +6530,11 @@ void ContentParent::EnsurePermissionsByKey(const nsACString& aKey,
 bool ContentParent::NeedsPermissionsUpdate(
     const nsACString& aPermissionKey) const {
   return mActivePermissionKeys.Contains(aPermissionKey);
+}
+
+bool ContentParent::NeedsSecondaryKeyPermissionsUpdate(
+    const nsACString& aPermissionKey) const {
+  return mActiveSecondaryPermissionKeys.Contains(aPermissionKey);
 }
 
 mozilla::ipc::IPCResult ContentParent::RecvAccumulateChildHistograms(
@@ -6680,37 +6671,6 @@ bool ContentParent::DeallocPURLClassifierLocalParent(
   return true;
 }
 
-PLoginReputationParent* ContentParent::AllocPLoginReputationParent(
-    nsIURI* aURI) {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  RefPtr<LoginReputationParent> actor = new LoginReputationParent();
-  return actor.forget().take();
-}
-
-mozilla::ipc::IPCResult ContentParent::RecvPLoginReputationConstructor(
-    PLoginReputationParent* aActor, nsIURI* aURI) {
-  MOZ_ASSERT(NS_IsMainThread());
-  MOZ_ASSERT(aActor);
-
-  if (!aURI) {
-    return IPC_FAIL(this, "aURI should not be null");
-  }
-
-  auto* actor = static_cast<LoginReputationParent*>(aActor);
-  return actor->QueryReputation(aURI);
-}
-
-bool ContentParent::DeallocPLoginReputationParent(
-    PLoginReputationParent* aActor) {
-  MOZ_ASSERT(NS_IsMainThread());
-  MOZ_ASSERT(aActor);
-
-  RefPtr<LoginReputationParent> actor =
-      dont_AddRef(static_cast<LoginReputationParent*>(aActor));
-  return true;
-}
-
 PSessionStorageObserverParent*
 ContentParent::AllocPSessionStorageObserverParent() {
   MOZ_ASSERT(NS_IsMainThread());
@@ -6835,7 +6795,7 @@ mozilla::ipc::IPCResult ContentParent::RecvCompleteAllowAccessFor(
     return IPC_OK();
   }
 
-  StorageAccessAPIHelper::CompleteAllowAccessFor(
+  StorageAccessAPIHelper::CompleteAllowAccessForOnParentProcess(
       aParentContext.get_canonical(), aTopLevelWindowId, aTrackingPrincipal,
       aTrackingOrigin, aCookieBehavior, aReason, nullptr)
       ->Then(GetCurrentSerialEventTarget(), __func__,
@@ -7740,8 +7700,8 @@ mozilla::ipc::IPCResult ContentParent::RecvCommitBrowsingContextTransaction(
 mozilla::ipc::IPCResult ContentParent::RecvBlobURLDataRequest(
     const nsACString& aBlobURL, nsIPrincipal* aTriggeringPrincipal,
     nsIPrincipal* aLoadingPrincipal, const OriginAttributes& aOriginAttributes,
-    uint64_t aInnerWindowId, const Maybe<nsID>& aAgentClusterId,
-    const nsCString& aPartitionKey, BlobURLDataRequestResolver&& aResolver) {
+    uint64_t aInnerWindowId, const nsCString& aPartitionKey,
+    BlobURLDataRequestResolver&& aResolver) {
   RefPtr<BlobImpl> blobImpl;
 
   // Since revoked blobs are also retrieved, it is possible that the blob no
@@ -7749,7 +7709,7 @@ mozilla::ipc::IPCResult ContentParent::RecvBlobURLDataRequest(
   if (!BlobURLProtocolHandler::GetDataEntry(
           aBlobURL, getter_AddRefs(blobImpl), aLoadingPrincipal,
           aTriggeringPrincipal, aOriginAttributes, aInnerWindowId,
-          aAgentClusterId, aPartitionKey, true /* AlsoIfRevoked */)) {
+          aPartitionKey, true /* AlsoIfRevoked */)) {
     aResolver(NS_ERROR_DOM_BAD_URI);
     return IPC_OK();
   }
@@ -7782,7 +7742,7 @@ mozilla::ipc::IPCResult ContentParent::RecvNotifyOnHistoryReload(
   bool canReload = false;
   Maybe<NotNull<RefPtr<nsDocShellLoadState>>> loadState;
   Maybe<bool> reloadActiveEntry;
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     aContext.get_canonical()->NotifyOnHistoryReload(
         aForceReload, canReload, loadState, reloadActiveEntry);
   }
@@ -7815,7 +7775,7 @@ mozilla::ipc::IPCResult ContentParent::RecvHistoryGo(
     const MaybeDiscarded<BrowsingContext>& aContext, int32_t aOffset,
     uint64_t aHistoryEpoch, bool aRequireUserInteraction, bool aUserActivation,
     HistoryGoResolver&& aResolveRequestedIndex) {
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     RefPtr<CanonicalBrowsingContext> canonical = aContext.get_canonical();
     aResolveRequestedIndex(
         canonical->HistoryGo(aOffset, aHistoryEpoch, aRequireUserInteraction,
@@ -8005,7 +7965,7 @@ mozilla::ipc::IPCResult ContentParent::RecvSetActiveSessionHistoryEntry(
     const MaybeDiscarded<BrowsingContext>& aContext,
     const Maybe<nsPoint>& aPreviousScrollPos, SessionHistoryInfo&& aInfo,
     uint32_t aLoadType, uint32_t aUpdatedCacheKey, const nsID& aChangeID) {
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     aContext.get_canonical()->SetActiveSessionHistoryEntry(
         aPreviousScrollPos, &aInfo, aLoadType, aUpdatedCacheKey, aChangeID);
   }
@@ -8015,7 +7975,7 @@ mozilla::ipc::IPCResult ContentParent::RecvSetActiveSessionHistoryEntry(
 mozilla::ipc::IPCResult ContentParent::RecvReplaceActiveSessionHistoryEntry(
     const MaybeDiscarded<BrowsingContext>& aContext,
     SessionHistoryInfo&& aInfo) {
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     aContext.get_canonical()->ReplaceActiveSessionHistoryEntry(&aInfo);
   }
   return IPC_OK();
@@ -8024,7 +7984,7 @@ mozilla::ipc::IPCResult ContentParent::RecvReplaceActiveSessionHistoryEntry(
 mozilla::ipc::IPCResult
 ContentParent::RecvRemoveDynEntriesFromActiveSessionHistoryEntry(
     const MaybeDiscarded<BrowsingContext>& aContext) {
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     aContext.get_canonical()->RemoveDynEntriesFromActiveSessionHistoryEntry();
   }
   return IPC_OK();
@@ -8032,7 +7992,7 @@ ContentParent::RecvRemoveDynEntriesFromActiveSessionHistoryEntry(
 
 mozilla::ipc::IPCResult ContentParent::RecvRemoveFromSessionHistory(
     const MaybeDiscarded<BrowsingContext>& aContext, const nsID& aChangeID) {
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     aContext.get_canonical()->RemoveFromSessionHistory(aChangeID);
   }
   return IPC_OK();
@@ -8041,7 +8001,7 @@ mozilla::ipc::IPCResult ContentParent::RecvRemoveFromSessionHistory(
 mozilla::ipc::IPCResult ContentParent::RecvHistoryReload(
     const MaybeDiscarded<BrowsingContext>& aContext,
     const uint32_t aReloadFlags) {
-  if (!aContext.IsDiscarded()) {
+  if (!aContext.IsNullOrDiscarded()) {
     nsCOMPtr<nsISHistory> shistory =
         aContext.get_canonical()->GetSessionHistory();
     if (shistory) {
@@ -8239,3 +8199,5 @@ ParentIdleListener::Observe(nsISupports*, const char* aTopic,
       mObserver, nsDependentCString(aTopic), nsDependentString(aData));
   return NS_OK;
 }
+
+#undef LOGPDM

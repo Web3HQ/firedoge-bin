@@ -194,7 +194,7 @@ nsresult AudioStream::EnsureTimeStretcherInitialized() {
 }
 
 nsresult AudioStream::SetPlaybackRate(double aPlaybackRate) {
-  TRACE("AudioStream::SetPlaybackRate");
+  TRACE_COMMENT("AudioStream::SetPlaybackRate", "%f", aPlaybackRate);
   NS_ASSERTION(
       aPlaybackRate > 0.0,
       "Can't handle negative or null playbackrate in the AudioStream.");
@@ -208,7 +208,7 @@ nsresult AudioStream::SetPlaybackRate(double aPlaybackRate) {
 }
 
 nsresult AudioStream::SetPreservesPitch(bool aPreservesPitch) {
-  TRACE("AudioStream::SetPreservesPitch");
+  TRACE_COMMENT("AudioStream::SetPreservesPitch", "%d", aPreservesPitch);
   if (aPreservesPitch == mPreservesPitch) {
     return NS_OK;
   }
@@ -289,7 +289,7 @@ nsresult AudioStream::OpenCubeb(cubeb* aContext, cubeb_stream_params& aParams,
 }
 
 void AudioStream::SetVolume(double aVolume) {
-  TRACE("AudioStream::SetVolume");
+  TRACE_COMMENT("AudioStream::SetVolume", "%f", aVolume);
   MOZ_ASSERT(aVolume >= 0.0 && aVolume <= 1.0, "Invalid volume");
 
   MOZ_ASSERT(mState != SHUTDOWN, "Don't set volume after shutdown.");
@@ -604,7 +604,8 @@ long AudioStream::DataCallback(void* aBuffer, long aFrames) {
     mCallbacksStarted = true;
   }
 
-  TRACE_AUDIO_CALLBACK_BUDGET(aFrames, mAudioClock.GetInputRate());
+  TRACE_AUDIO_CALLBACK_BUDGET("AudioStream real-time budget", aFrames,
+                              mAudioClock.GetInputRate());
   TRACE("AudioStream::DataCallback");
   MOZ_ASSERT(mState != SHUTDOWN, "No data callback after shutdown");
 
@@ -693,7 +694,7 @@ void AudioClock::UpdateFrameHistory(uint32_t aServiced, uint32_t aUnderrun,
                                     bool aAudioThreadChanged) {
 #ifdef XP_MACOSX
   if (aAudioThreadChanged) {
-    mCallbackInfoQueue.ResetThreadIds();
+    mCallbackInfoQueue.ResetProducerThreadId();
   }
   // Flush the local items, if any, and then attempt to enqueue the current
   // item. This is only a fallback mechanism, under non-critical load this is

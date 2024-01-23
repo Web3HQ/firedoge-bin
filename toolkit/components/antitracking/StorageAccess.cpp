@@ -32,7 +32,6 @@
 #include "AntiTrackingLog.h"
 #include "ContentBlockingAllowList.h"
 #include "mozIThirdPartyUtil.h"
-#include "RejectForeignAllowList.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -142,8 +141,36 @@ static StorageAccess InternalStorageAllowedCheck(
     return access;
   }
 
-  if (!StorageDisabledByAntiTracking(aWindow, aChannel, aPrincipal, aURI,
-                                     aRejectedReason)) {
+  bool disabled = true;
+  if (aWindow) {
+    nsIURI* documentURI = aURI ? aURI : aWindow->GetDocumentURI();
+    disabled = !documentURI ||
+               !ShouldAllowAccessFor(aWindow, documentURI, &aRejectedReason);
+    ContentBlockingNotifier::OnDecision(
+        aWindow,
+        disabled ? ContentBlockingNotifier::BlockingDecision::eBlock
+                 : ContentBlockingNotifier::BlockingDecision::eAllow,
+        aRejectedReason);
+  } else if (aChannel) {
+    disabled = false;
+    nsCOMPtr<nsIURI> uri;
+    nsresult rv = aChannel->GetURI(getter_AddRefs(uri));
+    if (!NS_WARN_IF(NS_FAILED(rv))) {
+      disabled = !ShouldAllowAccessFor(aChannel, uri, &aRejectedReason);
+    }
+    ContentBlockingNotifier::OnDecision(
+        aChannel,
+        disabled ? ContentBlockingNotifier::BlockingDecision::eBlock
+                 : ContentBlockingNotifier::BlockingDecision::eAllow,
+        aRejectedReason);
+  } else {
+    MOZ_ASSERT(aPrincipal);
+    nsCOMPtr<nsICookieJarSettings> cookieJarSettings =
+        net::CookieJarSettings::Create(aPrincipal);
+    disabled = !ShouldAllowAccessFor(aPrincipal, cookieJarSettings);
+  }
+
+  if (!disabled) {
     return access;
   }
 
@@ -201,32 +228,6 @@ static StorageAccess InternalStorageAllowedCheckCached(
   }
 
   return result;
-}
-
-static bool StorageDisabledByAntiTrackingInternal(
-    nsPIDOMWindowInner* aWindow, nsIChannel* aChannel, nsIPrincipal* aPrincipal,
-    nsIURI* aURI, nsICookieJarSettings* aCookieJarSettings,
-    uint32_t& aRejectedReason) {
-  MOZ_ASSERT(aWindow || aChannel || aPrincipal);
-
-  if (aWindow) {
-    nsIURI* documentURI = aURI ? aURI : aWindow->GetDocumentURI();
-    return !documentURI ||
-           !ShouldAllowAccessFor(aWindow, documentURI, &aRejectedReason);
-  }
-
-  if (aChannel) {
-    nsCOMPtr<nsIURI> uri;
-    nsresult rv = aChannel->GetURI(getter_AddRefs(uri));
-    if (NS_WARN_IF(NS_FAILED(rv))) {
-      return false;
-    }
-
-    return !ShouldAllowAccessFor(aChannel, uri, &aRejectedReason);
-  }
-
-  MOZ_ASSERT(aPrincipal);
-  return !ShouldAllowAccessFor(aPrincipal, aCookieJarSettings);
 }
 
 namespace mozilla {
@@ -337,53 +338,6 @@ StorageAccess StorageAllowedForServiceWorker(
   uint32_t rejectedReason = 0;
   return InternalStorageAllowedCheck(aPrincipal, nullptr, nullptr, nullptr,
                                      aCookieJarSettings, rejectedReason);
-}
-
-bool StorageDisabledByAntiTracking(nsPIDOMWindowInner* aWindow,
-                                   nsIChannel* aChannel,
-                                   nsIPrincipal* aPrincipal, nsIURI* aURI,
-                                   uint32_t& aRejectedReason) {
-  MOZ_ASSERT(aWindow || aChannel || aPrincipal);
-  nsCOMPtr<nsICookieJarSettings> cookieJarSettings;
-  if (aWindow) {
-    if (aWindow->GetExtantDoc()) {
-      cookieJarSettings = aWindow->GetExtantDoc()->CookieJarSettings();
-    }
-  } else if (aChannel) {
-    nsCOMPtr<nsILoadInfo> loadInfo = aChannel->LoadInfo();
-    Unused << loadInfo->GetCookieJarSettings(getter_AddRefs(cookieJarSettings));
-  }
-  if (!cookieJarSettings) {
-    cookieJarSettings = net::CookieJarSettings::Create(aPrincipal);
-  }
-  bool disabled = StorageDisabledByAntiTrackingInternal(
-      aWindow, aChannel, aPrincipal, aURI, cookieJarSettings, aRejectedReason);
-
-  if (aWindow) {
-    ContentBlockingNotifier::OnDecision(
-        aWindow,
-        disabled ? ContentBlockingNotifier::BlockingDecision::eBlock
-                 : ContentBlockingNotifier::BlockingDecision::eAllow,
-        aRejectedReason);
-  } else if (aChannel) {
-    ContentBlockingNotifier::OnDecision(
-        aChannel,
-        disabled ? ContentBlockingNotifier::BlockingDecision::eBlock
-                 : ContentBlockingNotifier::BlockingDecision::eAllow,
-        aRejectedReason);
-  }
-  return disabled;
-}
-
-bool StorageDisabledByAntiTracking(dom::Document* aDocument, nsIURI* aURI,
-                                   uint32_t& aRejectedReason) {
-  aRejectedReason = 0;
-  // Note that GetChannel() below may return null, but that's OK, since the
-  // callee is able to deal with a null channel argument, and if passed null,
-  // will only fail to notify the UI in case storage gets blocked.
-  return StorageDisabledByAntiTracking(
-      aDocument->GetInnerWindow(), aDocument->GetChannel(),
-      aDocument->NodePrincipal(), aURI, aRejectedReason);
 }
 
 bool ShouldPartitionStorage(StorageAccess aAccess) {
@@ -534,8 +488,7 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
     }
   }
 
-  if ((behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN &&
-       !CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior)) ||
+  if (behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN ||
       behavior == nsICookieService::BEHAVIOR_LIMIT_FOREIGN) {
     // XXX For non-cookie forms of storage, we handle BEHAVIOR_LIMIT_FOREIGN by
     // simply rejecting the request to use the storage. In the future, if we
@@ -552,7 +505,6 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
   }
 
   MOZ_ASSERT(
-      CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior) ||
       behavior == nsICookieService::BEHAVIOR_REJECT_TRACKER ||
       behavior ==
           nsICookieService::BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN);
@@ -590,13 +542,8 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
       return true;
     }
   } else {
-    MOZ_ASSERT(CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior));
-    if (RejectForeignAllowList::Check(document)) {
-      LOG(("This window is exceptionlisted for reject foreign"));
-      return true;
-    }
-
-    blockedReason = nsIWebProgressListener::STATE_COOKIES_PARTITIONED_FOREIGN;
+    MOZ_ASSERT_UNREACHABLE(
+        "This should be an exhaustive list of cookie behaviors possible here.");
   }
 
   Document* doc = aWindow->GetExtantDoc();
@@ -725,8 +672,7 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
     return true;
   }
 
-  if ((behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN &&
-       !CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior)) ||
+  if (behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN ||
       behavior == nsICookieService::BEHAVIOR_LIMIT_FOREIGN) {
     // XXX For non-cookie forms of storage, we handle BEHAVIOR_LIMIT_FOREIGN by
     // simply rejecting the request to use the storage. In the future, if we
@@ -744,7 +690,6 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
   }
 
   MOZ_ASSERT(
-      CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior) ||
       behavior == nsICookieService::BEHAVIOR_REJECT_TRACKER ||
       behavior ==
           nsICookieService::BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN);
@@ -784,12 +729,8 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
       return true;
     }
   } else {
-    MOZ_ASSERT(CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior));
-    if (httpChannel && RejectForeignAllowList::Check(httpChannel)) {
-      LOG(("This channel is exceptionlisted"));
-      return true;
-    }
-    blockedReason = nsIWebProgressListener::STATE_COOKIES_BLOCKED_FOREIGN;
+    MOZ_ASSERT_UNREACHABLE(
+        "This should be an exhaustive list of cookie behaviors possible here.");
   }
 
   RefPtr<BrowsingContext> targetBC;

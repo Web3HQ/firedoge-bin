@@ -2,7 +2,7 @@
 # cargo-vet config file
 
 [cargo-vet]
-version = "0.8"
+version = "0.9"
 
 [imports.bytecode-alliance]
 url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
@@ -39,17 +39,17 @@ notes = "This is a pinned version of the upstream code, presumably to get a fix 
 audit-as-crates-io = true
 notes = "This is upstream plus a warning fix from bug 1823866."
 
-[policy.diplomat]
+[policy.cssparser]
 audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
+notes = "Upstream release plus a couple unpublished changes"
 
-[policy.diplomat-runtime]
+[policy.cssparser-macros]
 audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
+notes = "Upstream release plus a couple unpublished changes"
 
-[policy.diplomat_core]
+[policy.d3d12]
 audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
+notes = "Part of the wgpu repository, pinned as the rest of wgpu crates."
 
 [policy.firefox-on-glean]
 audit-as-crates-io = false
@@ -76,13 +76,13 @@ notes = "Used for fuzzing."
 criteria = "safe-to-run"
 notes = "Used for testing."
 
-[policy.icu_provider_macros]
+[policy.icu_capi]
 audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
+notes = "Patched version of upstream"
 
-[policy.icu_testdata]
-audit-as-crates-io = false
-notes = "Customized ICU4X baked data only that Gecko wants"
+[policy.icu_segmenter_data]
+audit-as-crates-io = true
+notes = "Patched version of upstream"
 
 [policy.l10nregistry]
 dependency-criteria = { fluent-testing = "safe-to-run", tokio = "safe-to-run" }
@@ -103,14 +103,6 @@ notes = "This is a first-party crate which is also published to crates.io. We ce
 [policy.midir]
 audit-as-crates-io = true
 notes = "This is a pinned version of the upstream code, presumably to get a fix that hadn't been released yet. We should consider switching to the latest official release."
-
-[policy."minidump-common:0.17.0@git:87a29fba5e19cfae5ebf73a57ba31504a3872545"]
-audit-as-crates-io = true
-notes = "Unreleased upstream."
-
-[policy.minidump-writer]
-audit-as-crates-io = true
-notes = "Unreleased upstream."
 
 [policy."mio:0.6.23"]
 audit-as-crates-io = true
@@ -153,21 +145,13 @@ audit-as-crates-io = false
 
 [policy.naga]
 audit-as-crates-io = true
-notes = "wgpu-core pins this crate."
-
-[policy.packed_simd]
-audit-as-crates-io = true
-notes = "Based on upstream, see bug 1719674."
+notes = "Part of the wgpu repository, pinned as the rest of wgpu crates."
 
 [policy.peek-poke]
 audit-as-crates-io = false
 
 [policy.peek-poke-derive]
 audit-as-crates-io = false
-
-[policy.prost-derive]
-audit-as-crates-io = true
-notes = "Fork of prost-derive with support for syn 2"
 
 [policy.pulse]
 audit-as-crates-io = false
@@ -176,10 +160,6 @@ notes = "This is a first-party crate which is entirely unrelated to the crates.i
 [policy.qcms]
 audit-as-crates-io = true
 notes = "This is a first-party crate which is also published to crates.io, but we should publish audits for it for the benefit of the ecosystem."
-
-[policy.rayon-core]
-audit-as-crates-io = true
-notes = "Identical to upstream, with a Mozilla-authored PR, see Cargo.toml comment for details"
 
 [policy.rure]
 audit-as-crates-io = true
@@ -241,18 +221,6 @@ notes = "Upstream project which we pin."
 
 [policy.wr_malloc_size_of]
 audit-as-crates-io = false
-
-[policy.yoke-derive]
-audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
-
-[policy.zerofrom-derive]
-audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
-
-[policy.zerovec-derive]
-audit-as-crates-io = true
-notes = "Upstream version not to use syn 1.x"
 
 [[exemptions.ahash]]
 version = "0.7.6"
@@ -523,10 +491,6 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.instant]]
-version = "0.1.12"
-criteria = "safe-to-deploy"
-
 [[exemptions.ioctl-sys]]
 version = "0.7.1"
 criteria = "safe-to-deploy"
@@ -599,10 +563,6 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.miniz_oxide]]
-version = "0.5.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.mio]]
 version = "0.8.0"
 criteria = "safe-to-deploy"
@@ -613,7 +573,7 @@ criteria = "safe-to-run"
 
 [[exemptions.miow]]
 version = "0.3.7"
-criteria = "safe-to-deploy"
+criteria = "safe-to-run"
 
 [[exemptions.murmurhash3]]
 version = "0.0.5"
@@ -629,10 +589,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.nom]]
 version = "7.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.ntapi]]
-version = "0.3.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.objc]]
@@ -703,20 +659,12 @@ criteria = "safe-to-deploy"
 version = "0.8.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.qlog]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.quick-error]]
 version = "1.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
 version = "0.8.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand_chacha]]
-version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.remove_dir_all]]
@@ -811,10 +759,6 @@ criteria = "safe-to-deploy"
 version = "0.1.44"
 criteria = "safe-to-deploy"
 
-[[exemptions.tokio]]
-version = "1.17.0"
-criteria = "safe-to-run"
-
 [[exemptions.triple_buffer]]
 version = "5.0.6"
 criteria = "safe-to-deploy"
@@ -834,10 +778,6 @@ criteria = "safe-to-run"
 [[exemptions.unix_str]]
 version = "1.0.0"
 criteria = "safe-to-run"
-
-[[exemptions.url]]
-version = "2.1.0"
-criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
 version = "0.8.2"

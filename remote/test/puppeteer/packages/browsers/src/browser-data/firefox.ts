@@ -19,7 +19,7 @@ import path from 'path';
 
 import {getJSON} from '../httpUtil.js';
 
-import {BrowserPlatform, ProfileOptions} from './types.js';
+import {BrowserPlatform, type ProfileOptions} from './types.js';
 
 function archive(platform: BrowserPlatform, buildId: string): string {
   switch (platform) {
@@ -130,7 +130,6 @@ function defaultProfilePreferences(
     'browser.safebrowsing.blockedURIs.enabled': false,
     'browser.safebrowsing.downloads.enabled': false,
     'browser.safebrowsing.malware.enabled': false,
-    'browser.safebrowsing.passwords.enabled': false,
     'browser.safebrowsing.phishing.enabled': false,
 
     // Disable updates to search engines.
@@ -155,6 +154,9 @@ function defaultProfilePreferences(
     'browser.tabs.warnOnCloseOtherTabs': false,
     // Do not warn when multiple tabs will be opened
     'browser.tabs.warnOnOpen': false,
+
+    // Do not automatically offer translations, as tests do not expect this.
+    'browser.translations.automaticallyPopup': false,
 
     // Disable the UI tour.
     'browser.uitour.enabled': false,
@@ -217,12 +219,6 @@ function defaultProfilePreferences(
 
     // Make sure opening about:addons will not hit the network
     'extensions.webservice.discoverURL': `http://${server}/dummy/discoveryURL`,
-
-    // Temporarily force disable BFCache in parent (https://bit.ly/bug-1732263)
-    'fission.bfcacheInParent': false,
-
-    // Force all web content to use a single content process
-    'fission.webContentIsolationStrategy': 0,
 
     // Allow the application to have focus even it runs in the background
     'focusmanager.testmode': true,

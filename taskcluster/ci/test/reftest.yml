@@ -73,7 +73,7 @@ crashtest:
             default:
                 by-test-platform:
                     android.*: []
-                    .*wayland.*: []
+                    .*wayland/debug.*: []
                     default: built-projects
     max-run-time: 3600
     tier:
@@ -119,6 +119,7 @@ jsreftest:
     max-run-time:
         by-test-platform:
             .*ccov.*: 7200
+            .*-wayland/debug.*: 5400
             default: 3600
     variants:
         - no-fission

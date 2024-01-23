@@ -20,7 +20,7 @@ dictionary FontFaceDescriptors {
   UTF8String variant = "normal";
   UTF8String featureSettings = "normal";
   [Pref="layout.css.font-variations.enabled"] UTF8String variationSettings = "normal";
-  [Pref="layout.css.font-display.enabled"] UTF8String display = "auto";
+  UTF8String display = "auto";
   UTF8String ascentOverride = "normal";
   UTF8String descentOverride = "normal";
   UTF8String lineGapOverride = "normal";
@@ -29,10 +29,7 @@ dictionary FontFaceDescriptors {
 
 enum FontFaceLoadStatus { "unloaded", "loading", "loaded", "error" };
 
-// Bug 1072107 is for exposing this in workers.
-// [Exposed=(Window,Worker)]
-[Func="FontFaceSet::IsEnabled",
- Exposed=(Window,Worker)]
+[Exposed=(Window,Worker)]
 interface FontFace {
   [Throws]
   constructor(UTF8String family,
@@ -47,7 +44,7 @@ interface FontFace {
   [SetterThrows] attribute UTF8String variant;
   [SetterThrows] attribute UTF8String featureSettings;
   [SetterThrows, Pref="layout.css.font-variations.enabled"] attribute UTF8String variationSettings;
-  [SetterThrows, Pref="layout.css.font-display.enabled"] attribute UTF8String display;
+  [SetterThrows] attribute UTF8String display;
   [SetterThrows] attribute UTF8String ascentOverride;
   [SetterThrows] attribute UTF8String descentOverride;
   [SetterThrows] attribute UTF8String lineGapOverride;

@@ -1,49 +1,41 @@
-From: Jan Grulich <jgrulich@redhat.com>
-Date: Thu, 27 Jul 2023 09:49:00 +0000
-Subject: Bug 1841851 - WebRTC backport: PipeWire capturer: increase buffer
- size to avoid buffer overflow r=jib,webrtc-reviewers,mjf
+From: Andreas Pehrson <apehrson@mozilla.com>
+Date: Wed, 18 Oct 2023 17:21:00 +0000
+Subject: Bug 1859786 - Fix lock annotation warning in Mozilla-specific edit on
+ top of video_capture_impl.cc. r=webrtc-reviewers,mjf
 
-This is a simple backport of an WebRTC upstream change.
+The annotations were added in M116:
+https://hg.mozilla.org/mozilla-central/rev/9cd372df013948ad822ae936752d725d77474fb5
 
-Upstream commit: 8fcc6df79daf1810cd4ecdb8d2ef1d361abfdc9c
+Note that this was never unsafe, since _dataCallbacks is only written on the
+same thread that we are patching here. This patch however, adds helpful static
+analysis.
 
-Differential Revision: https://phabricator.services.mozilla.com/D183355
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/263be02fdeb0c3556e1da296eb18eb3d154eb99e
+Differential Revision: https://phabricator.services.mozilla.com/D191301
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/56ff441b644400f09d2d0453dbd8991ea25db7b1
 ---
- .../linux/wayland/shared_screencast_stream.cc               | 6 +++---
- 1 file changed, 3 insertions(+), 3 deletions(-)
+ modules/video_capture/video_capture_impl.cc | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
 
-diff --git a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
-index 17c895088a..0102346036 100644
---- a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
-+++ b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
-@@ -281,7 +281,7 @@ void SharedScreenCastStreamPrivate::OnStreamParamChanged(
+diff --git a/modules/video_capture/video_capture_impl.cc b/modules/video_capture/video_capture_impl.cc
+index 02404697ad..1bddaf824d 100644
+--- a/modules/video_capture/video_capture_impl.cc
++++ b/modules/video_capture/video_capture_impl.cc
+@@ -119,11 +119,14 @@ void VideoCaptureImpl::DeRegisterCaptureDataCallback(
+ }
  
-   that->stream_size_ = DesktopSize(width, height);
+ int32_t VideoCaptureImpl::StopCaptureIfAllClientsClose() {
+-  if (_dataCallBacks.empty()) {
+-    return StopCapture();
+-  } else {
+-    return 0;
++  RTC_DCHECK_RUN_ON(&api_checker_);
++  {
++    MutexLock lock(&api_lock_);
++    if (!_dataCallBacks.empty()) {
++      return 0;
++    }
+   }
++  return StopCapture();
+ }
  
--  uint8_t buffer[1024] = {};
-+  uint8_t buffer[2048] = {};
-   auto builder = spa_pod_builder{buffer, sizeof(buffer)};
- 
-   // Setup buffers and meta header for new format.
-@@ -364,7 +364,7 @@ void SharedScreenCastStreamPrivate::OnRenegotiateFormat(void* data, uint64_t) {
-   {
-     PipeWireThreadLoopLock thread_loop_lock(that->pw_main_loop_);
- 
--    uint8_t buffer[2048] = {};
-+    uint8_t buffer[4096] = {};
- 
-     spa_pod_builder builder = spa_pod_builder{buffer, sizeof(buffer)};
- 
-@@ -482,7 +482,7 @@ bool SharedScreenCastStreamPrivate::StartScreenCastStream(
- 
-     pw_stream_add_listener(pw_stream_, &spa_stream_listener_,
-                            &pw_stream_events_, this);
--    uint8_t buffer[2048] = {};
-+    uint8_t buffer[4096] = {};
- 
-     spa_pod_builder builder = spa_pod_builder{buffer, sizeof(buffer)};
- 
--- 
-2.34.1
-
+ int32_t VideoCaptureImpl::DeliverCapturedFrame(VideoFrame& captureFrame) {

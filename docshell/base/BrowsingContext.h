@@ -229,7 +229,7 @@ struct EmbedderColorSchemes {
    * and non-initial about:blank are not considered to be initial             \
    * documents. */                                                            \
   FIELD(HasLoadedNonInitialDocument, bool)                                    \
-  /* Default value for nsIContentViewer::authorStyleDisabled in any new       \
+  /* Default value for nsIDocumentViewer::authorStyleDisabled in any new      \
    * browsing contexts created as a descendant of this one.  Valid only for   \
    * top BCs. */                                                              \
   FIELD(AuthorStyleDisabledDefault, bool)                                     \
@@ -267,7 +267,9 @@ struct EmbedderColorSchemes {
    * a content process. */                                                    \
   FIELD(EmbeddedInContentDocument, bool)                                      \
   /* If true, this browsing context is within a hidden embedded document. */  \
-  FIELD(IsUnderHiddenEmbedderElement, bool)
+  FIELD(IsUnderHiddenEmbedderElement, bool)                                   \
+  /* If true, this browsing context is offline */                             \
+  FIELD(ForceOffline, bool)
 
 // BrowsingContext, in this context, is the cross process replicated
 // environment in which information about documents is stored. In
@@ -611,6 +613,8 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
                       aRv);
   }
 
+  bool ForceOffline() const { return GetForceOffline(); }
+
   bool ForceDesktopViewport() const { return GetForceDesktopViewport(); }
 
   bool AuthorStyleDisabledDefault() const {
@@ -902,8 +906,18 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   bool CanBlurCheck(CallerType aCallerType);
 
+  // Examine the current document state to see if we're in a way that is
+  // typically abused by web designers. The window.open code uses this
+  // routine to determine whether to allow the new window.
+  // Returns a value from the PopupControlState enum.
   PopupBlocker::PopupControlState RevisePopupAbuseLevel(
       PopupBlocker::PopupControlState aControl);
+
+  // Get the modifiers associated with the user activation for relevant
+  // documents. The window.open code uses this routine to determine where the
+  // new window should be located.
+  void GetUserActivationModifiersForPopup(
+      UserActivation::Modifiers* aModifiers);
 
   void IncrementHistoryEntryCountForBrowsingContext();
 
@@ -1227,6 +1241,9 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   bool CanSet(FieldIndex<IDX_IsUnderHiddenEmbedderElement>,
               const bool& aIsUnderHiddenEmbedderElement,
+              ContentParent* aSource);
+
+  bool CanSet(FieldIndex<IDX_ForceOffline>, bool aNewValue,
               ContentParent* aSource);
 
   bool CanSet(FieldIndex<IDX_EmbeddedInContentDocument>, bool,

@@ -206,7 +206,8 @@ nsresult SVGElement::CopyInnerTo(mozilla::dom::Element* aDest) {
 
   // If our destination is a print document, copy all the relevant length values
   // etc so that they match the state of the original node.
-  if (aDest->OwnerDoc()->IsStaticDocument()) {
+  if (aDest->OwnerDoc()->IsStaticDocument() ||
+      aDest->OwnerDoc()->CloningForSVGUse()) {
     LengthAttributesInfo lengthInfo = GetLengthInfo();
     dest->GetLengthInfo().CopyAllFrom(lengthInfo);
     if (SVGGeometryProperty::ElementMapsLengthsToStyle(this)) {
@@ -216,7 +217,8 @@ nsresult SVGElement::CopyInnerTo(mozilla::dom::Element* aDest) {
 
         // We don't map use element width/height currently. We can remove this
         // test when we do.
-        if (propId != eCSSProperty_UNKNOWN) {
+        if (propId != eCSSProperty_UNKNOWN &&
+            lengthInfo.mValues[i].IsAnimated()) {
           dest->SMILOverrideStyle()->SetSMILValue(propId,
                                                   lengthInfo.mValues[i]);
         }
@@ -245,8 +247,10 @@ nsresult SVGElement::CopyInnerTo(mozilla::dom::Element* aDest) {
     }
     if (const auto* pathSegList = GetAnimPathSegList()) {
       *dest->GetAnimPathSegList() = *pathSegList;
-      dest->SMILOverrideStyle()->SetSMILValue(nsCSSPropertyID::eCSSProperty_d,
-                                              *pathSegList);
+      if (pathSegList->IsAnimating()) {
+        dest->SMILOverrideStyle()->SetSMILValue(nsCSSPropertyID::eCSSProperty_d,
+                                                *pathSegList);
+      }
     }
     if (const auto* transformList = GetAnimatedTransformList()) {
       *dest->GetAnimatedTransformList(DO_ALLOCATE) = *transformList;
@@ -1069,11 +1073,14 @@ bool SVGElement::UpdateDeclarationBlockFromLength(
     StyleLockedDeclarationBlock& aBlock, nsCSSPropertyID aPropId,
     const SVGAnimatedLength& aLength, ValToUse aValToUse) {
   float value;
+  uint8_t units;
   if (aValToUse == ValToUse::Anim) {
     value = aLength.GetAnimValInSpecifiedUnits();
+    units = aLength.GetAnimUnitType();
   } else {
     MOZ_ASSERT(aValToUse == ValToUse::Base);
     value = aLength.GetBaseValInSpecifiedUnits();
+    units = aLength.GetBaseUnitType();
   }
 
   // SVG parser doesn't check non-negativity of some parsed value, we should not
@@ -1083,8 +1090,7 @@ bool SVGElement::UpdateDeclarationBlockFromLength(
     return false;
   }
 
-  nsCSSUnit cssUnit =
-      SVGLength::SpecifiedUnitTypeToCSSUnit(aLength.GetSpecifiedUnitType());
+  nsCSSUnit cssUnit = SVGLength::SpecifiedUnitTypeToCSSUnit(units);
 
   if (cssUnit == eCSSUnit_Percent) {
     Servo_DeclarationBlock_SetPercentValue(&aBlock, aPropId, value / 100.f);
@@ -1504,8 +1510,13 @@ void SVGElement::DidAnimateLength(uint8_t aAttrEnum) {
     // We don't map use element width/height currently. We can remove this
     // test when we do.
     if (propId != eCSSProperty_UNKNOWN) {
-      SMILOverrideStyle()->SetSMILValue(propId,
-                                        GetLengthInfo().mValues[aAttrEnum]);
+      auto lengthInfo = GetLengthInfo();
+      if (lengthInfo.mValues[aAttrEnum].IsAnimated()) {
+        SMILOverrideStyle()->SetSMILValue(propId,
+                                          lengthInfo.mValues[aAttrEnum]);
+      } else {
+        SMILOverrideStyle()->ClearSMILValue(propId);
+      }
     }
   }
 
@@ -1708,8 +1719,13 @@ void SVGElement::DidAnimatePathSegList() {
 
   // Notify style we have to update the d property because of SMIL animation.
   if (name == nsGkAtoms::d) {
-    SMILOverrideStyle()->SetSMILValue(nsCSSPropertyID::eCSSProperty_d,
-                                      *GetAnimPathSegList());
+    auto* animPathSegList = GetAnimPathSegList();
+    if (animPathSegList->IsAnimating()) {
+      SMILOverrideStyle()->SetSMILValue(nsCSSPropertyID::eCSSProperty_d,
+                                        *animPathSegList);
+    } else {
+      SMILOverrideStyle()->ClearSMILValue(nsCSSPropertyID::eCSSProperty_d);
+    }
   }
 
   DidAnimateAttribute(kNameSpaceID_None, name);

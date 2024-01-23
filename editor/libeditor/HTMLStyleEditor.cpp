@@ -23,7 +23,6 @@
 #include "mozilla/EditorForwards.h"
 #include "mozilla/mozalloc.h"
 #include "mozilla/SelectionState.h"
-#include "mozilla/StaticPrefs_editor.h"
 #include "mozilla/dom/AncestorIterator.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/HTMLBRElement.h"
@@ -303,22 +302,13 @@ nsresult HTMLEditor::SetInlinePropertiesAroundRanges(
     AutoRangeArray& aRanges,
     const AutoTArray<EditorInlineStyleAndValue, N>& aStylesToSet,
     const Element& aEditingHost) {
+  MOZ_ASSERT(!aRanges.HasSavedRanges());
   for (const EditorInlineStyleAndValue& styleToSet : aStylesToSet) {
-    if (!StaticPrefs::
-            editor_inline_style_range_compatible_with_the_other_browsers() &&
-        !aRanges.IsCollapsed()) {
-      MOZ_ALWAYS_TRUE(aRanges.SaveAndTrackRanges(*this));
-    }
     AutoInlineStyleSetter inlineStyleSetter(styleToSet);
     for (OwningNonNull<nsRange>& domRange : aRanges.Ranges()) {
       inlineStyleSetter.Reset();
       auto rangeOrError =
           [&]() MOZ_CAN_RUN_SCRIPT -> Result<EditorDOMRange, nsresult> {
-        if (aRanges.HasSavedRanges()) {
-          return EditorDOMRange(
-              GetExtendedRangeWrappingEntirelySelectedElements(
-                  EditorRawDOMRange(domRange)));
-        }
         EditorDOMRange range(domRange);
         // If we're setting <font>, we want to remove ancestors which set
         // `font-size` or <font size="..."> recursively.  Therefore, for
@@ -406,9 +396,6 @@ nsresult HTMLEditor::SetInlinePropertiesAroundRanges(
       AutoTrackDOMRange trackRange(RangeUpdaterRef(),
                                    const_cast<EditorDOMRange*>(&range));
       auto UpdateSelectionRange = [&]() MOZ_CAN_RUN_SCRIPT {
-        if (aRanges.HasSavedRanges()) {
-          return;
-        }
         // If inlineStyleSetter creates elements or setting styles, we should
         // select between start of first element and end of last element.
         if (inlineStyleSetter.FirstHandledPointRef().IsInContentNode()) {
@@ -555,9 +542,6 @@ nsresult HTMLEditor::SetInlinePropertiesAroundRanges(
         wrapTextInStyledElementResult.inspect().IgnoreCaretPointSuggestion();
       }
       UpdateSelectionRange();
-    }
-    if (aRanges.HasSavedRanges()) {
-      aRanges.RestoreFromSavedRanges();
     }
   }
   return NS_OK;
@@ -768,7 +752,9 @@ bool HTMLEditor::AutoInlineStyleSetter::ElementIsGoodContainerToSetStyle(
   // E.g., we don't want to create new <span> when
   // `<p>{  <span>abc</span>  }</p>`.
   if (aStyledElement.GetParentElement() &&
-      HTMLEditUtils::IsBlockElement(*aStyledElement.GetParentElement())) {
+      HTMLEditUtils::IsBlockElement(
+          *aStyledElement.GetParentElement(),
+          BlockInlineCheck::UseComputedDisplayStyle)) {
     for (nsIContent* previousSibling = aStyledElement.GetPreviousSibling();
          previousSibling;
          previousSibling = previousSibling->GetPreviousSibling()) {
@@ -855,8 +841,7 @@ HTMLEditor::AutoInlineStyleSetter::SplitTextNodeAndApplyStyleToMiddleNode(
       [&]() MOZ_CAN_RUN_SCRIPT -> Result<SplitNodeResult, nsresult> {
     EditorDOMPoint atEnd(&aText, aEndOffset);
     if (atEnd.IsEndOfContainer()) {
-      return SplitNodeResult::NotHandled(atEnd,
-                                         aHTMLEditor.GetSplitNodeDirection());
+      return SplitNodeResult::NotHandled(atEnd);
     }
     // We need to split off back of text node
     Result<SplitNodeResult, nsresult> splitNodeResult =
@@ -885,8 +870,7 @@ HTMLEditor::AutoInlineStyleSetter::SplitTextNodeAndApplyStyleToMiddleNode(
                                : &aText,
                            aStartOffset);
     if (atStart.IsStartOfContainer()) {
-      return SplitNodeResult::NotHandled(atStart,
-                                         aHTMLEditor.GetSplitNodeDirection());
+      return SplitNodeResult::NotHandled(atStart);
     }
     // We need to split off front of text node
     Result<SplitNodeResult, nsresult> splitNodeResult =
@@ -1499,7 +1483,9 @@ nsIContent* HTMLEditor::AutoInlineStyleSetter::GetNextEditableInlineContent(
       if (parent == aLimiter ||
           !EditorUtils::IsEditableContent(*parent, EditorType::HTML) ||
           (parent->IsElement() &&
-           (HTMLEditUtils::IsBlockElement(*parent->AsElement()) ||
+           (HTMLEditUtils::IsBlockElement(
+                *parent->AsElement(),
+                BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
             HTMLEditUtils::IsDisplayInsideFlowRoot(*parent->AsElement())))) {
         return nullptr;
       }
@@ -1512,7 +1498,9 @@ nsIContent* HTMLEditor::AutoInlineStyleSetter::GetNextEditableInlineContent(
   return nextContentInRange &&
                  EditorUtils::IsEditableContent(*nextContentInRange,
                                                 EditorType::HTML) &&
-                 !HTMLEditUtils::IsBlockElement(*nextContentInRange)
+                 !HTMLEditUtils::IsBlockElement(
+                     *nextContentInRange,
+                     BlockInlineCheck::UseComputedDisplayOutsideStyle)
              ? nextContentInRange
              : nullptr;
 }
@@ -1525,7 +1513,9 @@ nsIContent* HTMLEditor::AutoInlineStyleSetter::GetPreviousEditableInlineContent(
       if (parent == aLimiter ||
           !EditorUtils::IsEditableContent(*parent, EditorType::HTML) ||
           (parent->IsElement() &&
-           (HTMLEditUtils::IsBlockElement(*parent->AsElement()) ||
+           (HTMLEditUtils::IsBlockElement(
+                *parent->AsElement(),
+                BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
             HTMLEditUtils::IsDisplayInsideFlowRoot(*parent->AsElement())))) {
         return nullptr;
       }
@@ -1538,7 +1528,9 @@ nsIContent* HTMLEditor::AutoInlineStyleSetter::GetPreviousEditableInlineContent(
   return previousContentInRange &&
                  EditorUtils::IsEditableContent(*previousContentInRange,
                                                 EditorType::HTML) &&
-                 !HTMLEditUtils::IsBlockElement(*previousContentInRange)
+                 !HTMLEditUtils::IsBlockElement(
+                     *previousContentInRange,
+                     BlockInlineCheck::UseComputedDisplayOutsideStyle)
              ? previousContentInRange
              : nullptr;
 }
@@ -1581,7 +1573,8 @@ EditorRawDOMPoint HTMLEditor::AutoInlineStyleSetter::GetShrunkenRangeStart(
   while (nsIContent* child = startPoint.GetChild()) {
     // We shouldn't cross editable and block boundary.
     if (!EditorUtils::IsEditableContent(*child, EditorType::HTML) ||
-        HTMLEditUtils::IsBlockElement(*child)) {
+        HTMLEditUtils::IsBlockElement(
+            *child, BlockInlineCheck::UseComputedDisplayOutsideStyle)) {
       break;
     }
     // If we reach a text node, the minimized range starts from start of it.
@@ -1654,7 +1647,8 @@ EditorRawDOMPoint HTMLEditor::AutoInlineStyleSetter::GetShrunkenRangeEnd(
   while (nsIContent* child = endPoint.GetPreviousSiblingOfChild()) {
     // We shouldn't cross editable and block boundary.
     if (!EditorUtils::IsEditableContent(*child, EditorType::HTML) ||
-        HTMLEditUtils::IsBlockElement(*child)) {
+        HTMLEditUtils::IsBlockElement(
+            *child, BlockInlineCheck::UseComputedDisplayOutsideStyle)) {
       break;
     }
     // If we reach a text node, the minimized range starts from start of it.
@@ -1712,7 +1706,8 @@ EditorRawDOMPoint HTMLEditor::AutoInlineStyleSetter::
   for (Element* parent :
        startPoint.GetContainer()->InclusiveAncestorsOfType<Element>()) {
     if (!EditorUtils::IsEditableContent(*parent, EditorType::HTML) ||
-        HTMLEditUtils::IsBlockElement(*parent) ||
+        HTMLEditUtils::IsBlockElement(
+            *parent, BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
         HTMLEditUtils::IsDisplayInsideFlowRoot(*parent)) {
       break;
     }
@@ -1757,7 +1752,8 @@ EditorRawDOMPoint HTMLEditor::AutoInlineStyleSetter::
   for (Element* parent :
        endPoint.GetContainer()->InclusiveAncestorsOfType<Element>()) {
     if (!EditorUtils::IsEditableContent(*parent, EditorType::HTML) ||
-        HTMLEditUtils::IsBlockElement(*parent) ||
+        HTMLEditUtils::IsBlockElement(
+            *parent, BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
         HTMLEditUtils::IsDisplayInsideFlowRoot(*parent)) {
       break;
     }
@@ -1800,7 +1796,8 @@ EditorRawDOMRange HTMLEditor::AutoInlineStyleSetter::
               *aStartPoint.ContainerAs<nsIContent>(), EditorType::HTML) ||
           (aStartPoint.ContainerAs<nsIContent>()->IsElement() &&
            (HTMLEditUtils::IsBlockElement(
-                *aStartPoint.ContainerAs<Element>()) ||
+                *aStartPoint.ContainerAs<Element>(),
+                BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
             HTMLEditUtils::IsDisplayInsideFlowRoot(
                 *aStartPoint.ContainerAs<Element>())))) {
         break;
@@ -1813,7 +1810,9 @@ EditorRawDOMRange HTMLEditor::AutoInlineStyleSetter::
       if (!EditorUtils::IsEditableContent(*aEndPoint.ContainerAs<nsIContent>(),
                                           EditorType::HTML) ||
           (aEndPoint.ContainerAs<nsIContent>()->IsElement() &&
-           (HTMLEditUtils::IsBlockElement(*aEndPoint.ContainerAs<Element>()) ||
+           (HTMLEditUtils::IsBlockElement(
+                *aEndPoint.ContainerAs<Element>(),
+                BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
             HTMLEditUtils::IsDisplayInsideFlowRoot(
                 *aEndPoint.ContainerAs<Element>())))) {
         break;
@@ -1862,7 +1861,8 @@ EditorRawDOMRange HTMLEditor::AutoInlineStyleSetter::
              *aStartPoint.ChildAs<nsStyledElement>())) &&
         // but don't cross block boundary at climbing up the tree
         !HTMLEditUtils::IsBlockElement(
-            *aStartPoint.ContainerAs<nsIContent>()) &&
+            *aStartPoint.ContainerAs<nsIContent>(),
+            BlockInlineCheck::UseComputedDisplayOutsideStyle) &&
         // and the container is a good editable element to set CSS style
         aStartPoint.GetContainerAs<nsStyledElement>() &&
         ElementIsGoodContainerToSetStyle(
@@ -1879,7 +1879,9 @@ EditorRawDOMRange HTMLEditor::AutoInlineStyleSetter::
          !ElementIsGoodContainerToSetStyle(
              *aEndPoint.GetPreviousSiblingOfChildAs<nsStyledElement>())) &&
         // but don't cross block boundary at climbing up the tree
-        !HTMLEditUtils::IsBlockElement(*aEndPoint.ContainerAs<nsIContent>()) &&
+        !HTMLEditUtils::IsBlockElement(
+            *aEndPoint.ContainerAs<nsIContent>(),
+            BlockInlineCheck::UseComputedDisplayOutsideStyle) &&
         // and the container is a good editable element to set CSS style
         aEndPoint.GetContainerAs<nsStyledElement>() &&
         ElementIsGoodContainerToSetStyle(
@@ -1913,14 +1915,20 @@ HTMLEditor::AutoInlineStyleSetter::ExtendOrShrinkRangeToApplyTheStyle(
   EditorDOMRange range(aRange);
   if (range.EndRef().IsInContentNode()) {
     WSScanResult nextContentData =
-        WSRunScanner::ScanNextVisibleNodeOrBlockBoundary(&aEditingHost,
-                                                         range.EndRef());
+        WSRunScanner::ScanNextVisibleNodeOrBlockBoundary(
+            &aEditingHost, range.EndRef(),
+            BlockInlineCheck::UseComputedDisplayOutsideStyle);
     if (nextContentData.ReachedInvisibleBRElement() &&
         nextContentData.BRElementPtr()->GetParentElement() &&
-        HTMLEditUtils::IsInlineElement(
-            *nextContentData.BRElementPtr()->GetParentElement())) {
+        HTMLEditUtils::IsInlineContent(
+            *nextContentData.BRElementPtr()->GetParentElement(),
+            BlockInlineCheck::UseComputedDisplayOutsideStyle)) {
       range.SetEnd(EditorDOMPoint::After(*nextContentData.BRElementPtr()));
       MOZ_ASSERT(range.EndRef().IsSet());
+      commonAncestor = range.GetClosestCommonInclusiveAncestor();
+      if (NS_WARN_IF(!commonAncestor)) {
+        return Err(NS_ERROR_FAILURE);
+      }
     }
   }
 
@@ -2103,7 +2111,7 @@ HTMLEditor::SplitAncestorStyledInlineElementsAt(
   // If the point is in a non-content node, e.g., in the document node, we
   // should split nothing.
   if (MOZ_UNLIKELY(!aPointToSplit.IsInContentNode())) {
-    return SplitNodeResult::NotHandled(aPointToSplit, GetSplitNodeDirection());
+    return SplitNodeResult::NotHandled(aPointToSplit);
   }
 
   // We assume that this method is called only when we're removing style(s).
@@ -2123,17 +2131,21 @@ HTMLEditor::SplitAncestorStyledInlineElementsAt(
   AutoTArray<OwningNonNull<Element>, 24> arrayOfParents;
   for (Element* element :
        aPointToSplit.GetContainer()->InclusiveAncestorsOfType<Element>()) {
-    if (HTMLEditUtils::IsBlockElement(*element) || !element->GetParent() ||
+    if (element->IsAnyOfHTMLElements(nsGkAtoms::body, nsGkAtoms::head,
+                                     nsGkAtoms::html) ||
+        HTMLEditUtils::IsBlockElement(
+            *element, BlockInlineCheck::UseComputedDisplayOutsideStyle) ||
+        !element->GetParent() ||
         !EditorUtils::IsEditableContent(*element->GetParent(),
-                                        EditorType::HTML)) {
+                                        EditorType::HTML) ||
+        NS_WARN_IF(!HTMLEditUtils::IsSplittableNode(*element))) {
       break;
     }
     arrayOfParents.AppendElement(*element);
   }
 
   // Split any matching style nodes above the point.
-  SplitNodeResult result =
-      SplitNodeResult::NotHandled(aPointToSplit, GetSplitNodeDirection());
+  SplitNodeResult result = SplitNodeResult::NotHandled(aPointToSplit);
   MOZ_ASSERT(!result.Handled());
   EditorDOMPoint pointToPutCaret;
   for (OwningNonNull<Element>& element : arrayOfParents) {
@@ -2260,8 +2272,10 @@ HTMLEditor::SplitAncestorStyledInlineElementsAt(
     if (!unwrappedSplitNodeResult.Handled()) {
       continue;
     }
-    // Mark the final result as handled forcibly.
-    result = unwrappedSplitNodeResult.ToHandledResult();
+    // Respect the last split result which actually did it.
+    if (!result.DidSplit() || unwrappedSplitNodeResult.DidSplit()) {
+      result = unwrappedSplitNodeResult.ToHandledResult();
+    }
     MOZ_ASSERT(result.Handled());
   }
 
@@ -2529,7 +2543,8 @@ Result<EditorDOMPoint, nsresult> HTMLEditor::ClearStyleAt(
             emptyInlineContainerElements,
             {EmptyCheckOption::TreatSingleBRElementAsVisible,
              EmptyCheckOption::TreatListItemAsVisible,
-             EmptyCheckOption::TreatTableCellAsVisible});
+             EmptyCheckOption::TreatTableCellAsVisible},
+            BlockInlineCheck::UseComputedDisplayOutsideStyle);
         for (const OwningNonNull<nsIContent>& emptyInlineContainerElement :
              emptyInlineContainerElements) {
           // MOZ_KnownLive(emptyInlineContainerElement) due to bug 1622253.
@@ -3526,50 +3541,51 @@ nsresult HTMLEditor::RemoveInlinePropertiesAsSubAction(
         }  // for-loop for arrayOfContentsAroundRange
       }
 
-      auto FlushAndStopTrackingAndShrinkSelectionRange = [&]() MOZ_CAN_RUN_SCRIPT {
-        trackSelectionRange.FlushAndStopTracking();
-        if (NS_WARN_IF(!selectionRange->IsPositioned()) ||
-            !StaticPrefs::
-                editor_inline_style_range_compatible_with_the_other_browsers()) {
-          return;
-        }
-        EditorRawDOMRange range(selectionRange);
-        nsINode* const commonAncestor =
-            range.GetClosestCommonInclusiveAncestor();
-        // Shrink range for compatibility between browsers.
-        nsIContent* const maybeNextContent =
-            range.StartRef().IsInContentNode() &&
-                    range.StartRef().IsEndOfContainer()
-                ? AutoInlineStyleSetter::GetNextEditableInlineContent(
-                      *range.StartRef().ContainerAs<nsIContent>(),
-                      commonAncestor)
-                : nullptr;
-        nsIContent* const maybePreviousContent =
-            range.EndRef().IsInContentNode() &&
-                    range.EndRef().IsStartOfContainer()
-                ? AutoInlineStyleSetter::GetPreviousEditableInlineContent(
-                      *range.EndRef().ContainerAs<nsIContent>(), commonAncestor)
-                : nullptr;
-        if (!maybeNextContent && !maybePreviousContent) {
-          return;
-        }
-        const auto startPoint =
-            maybeNextContent &&
-                    maybeNextContent != selectionRange->GetStartContainer()
-                ? HTMLEditUtils::GetDeepestEditableStartPointOf<
-                      EditorRawDOMPoint>(*maybeNextContent)
-                : range.StartRef();
-        const auto endPoint =
-            maybePreviousContent &&
-                    maybePreviousContent != selectionRange->GetEndContainer()
-                ? HTMLEditUtils::GetDeepestEditableEndPointOf<
-                      EditorRawDOMPoint>(*maybePreviousContent)
-                : range.EndRef();
-        DebugOnly<nsresult> rvIgnored = selectionRange->SetStartAndEnd(
-            startPoint.ToRawRangeBoundary(), endPoint.ToRawRangeBoundary());
-        NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
-                             "nsRange::SetStartAndEnd() failed, but ignored");
-      };
+      auto FlushAndStopTrackingAndShrinkSelectionRange =
+          [&]() MOZ_CAN_RUN_SCRIPT {
+            trackSelectionRange.FlushAndStopTracking();
+            if (NS_WARN_IF(!selectionRange->IsPositioned())) {
+              return;
+            }
+            EditorRawDOMRange range(selectionRange);
+            nsINode* const commonAncestor =
+                range.GetClosestCommonInclusiveAncestor();
+            // Shrink range for compatibility between browsers.
+            nsIContent* const maybeNextContent =
+                range.StartRef().IsInContentNode() &&
+                        range.StartRef().IsEndOfContainer()
+                    ? AutoInlineStyleSetter::GetNextEditableInlineContent(
+                          *range.StartRef().ContainerAs<nsIContent>(),
+                          commonAncestor)
+                    : nullptr;
+            nsIContent* const maybePreviousContent =
+                range.EndRef().IsInContentNode() &&
+                        range.EndRef().IsStartOfContainer()
+                    ? AutoInlineStyleSetter::GetPreviousEditableInlineContent(
+                          *range.EndRef().ContainerAs<nsIContent>(),
+                          commonAncestor)
+                    : nullptr;
+            if (!maybeNextContent && !maybePreviousContent) {
+              return;
+            }
+            const auto startPoint =
+                maybeNextContent &&
+                        maybeNextContent != selectionRange->GetStartContainer()
+                    ? HTMLEditUtils::GetDeepestEditableStartPointOf<
+                          EditorRawDOMPoint>(*maybeNextContent)
+                    : range.StartRef();
+            const auto endPoint =
+                maybePreviousContent && maybePreviousContent !=
+                                            selectionRange->GetEndContainer()
+                    ? HTMLEditUtils::GetDeepestEditableEndPointOf<
+                          EditorRawDOMPoint>(*maybePreviousContent)
+                    : range.EndRef();
+            DebugOnly<nsresult> rvIgnored = selectionRange->SetStartAndEnd(
+                startPoint.ToRawRangeBoundary(), endPoint.ToRawRangeBoundary());
+            NS_WARNING_ASSERTION(
+                NS_SUCCEEDED(rvIgnored),
+                "nsRange::SetStartAndEnd() failed, but ignored");
+          };
 
       if (arrayOfContentsToInvertStyle.IsEmpty()) {
         FlushAndStopTrackingAndShrinkSelectionRange();

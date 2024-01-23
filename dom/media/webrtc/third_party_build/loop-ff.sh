@@ -49,10 +49,6 @@ if [ "x$MOZ_ADVANCE_ONE_COMMIT" = "x" ]; then
   MOZ_ADVANCE_ONE_COMMIT=""
 fi
 
-# if [ "x$SKIP_NEXT_REVERT_CHK" = "x" ]; then
-#   SKIP_NEXT_REVERT_CHK="0"
-# fi
-
 MOZ_CHANGED=0
 GIT_CHANGED=0
 HANDLE_NOOP_COMMIT=""
@@ -83,6 +79,7 @@ SKIP_NEXT_REVERT_CHK=""
 if [ -f $STATE_DIR/loop.skip-revert-detect ]; then
   SKIP_NEXT_REVERT_CHK=`tail -1 $STATE_DIR/loop.skip-revert-detect`
 fi
+echo "SKIP_NEXT_REVERT_CHK: '$SKIP_NEXT_REVERT_CHK'" 2>&1| tee -a $LOOP_OUTPUT_LOG
 
 ERROR_HELP=$"
 It appears that verification of initial vendoring from our local copy
@@ -139,6 +136,8 @@ COMMITS_REMAINING=`cd $MOZ_LIBWEBRTC_SRC ; \
    | wc -l | tr -d " "`
 echo_log "Commits remaining: $COMMITS_REMAINING"
 
+echo "Before revert detection, SKIP_NEXT_REVERT_CHK: '$SKIP_NEXT_REVERT_CHK'" 2>&1| tee -a $LOOP_OUTPUT_LOG
+echo "Before revert detection, RESUME: '$RESUME'" 2>&1| tee -a $LOOP_OUTPUT_LOG
 ERROR_HELP=$"Some portion of the detection and/or fixing of upstream revert commits
 has failed.  Please fix the state of the git hub repo at: $MOZ_LIBWEBRTC_SRC.
 When fixed, please resume this script with the following command:
@@ -188,13 +187,15 @@ if [ "x$HANDLE_NOOP_COMMIT" == "x1" ]; then
   echo_log "NO-OP commit detected, we expect file changed counts to differ"
 elif [ $MOZ_CHANGED -ne $GIT_CHANGED ]; then
   echo_log "MOZ_CHANGED $MOZ_CHANGED should equal GIT_CHANGED $GIT_CHANGED"
-  echo "$FILE_CNT_MISMATCH_MSG"
+  echo "$FILE_CNT_MISMATCH_MSG" 2>&1| tee -a $LOOP_OUTPUT_LOG
   exit 1
 fi
 HANDLE_NOOP_COMMIT=""
 
 # save the current patch stack in case we need to reconstitute it later
+echo_log "Save patch-stack"
 ./mach python $SCRIPT_DIR/save_patch_stack.py \
+    --skip-startup-sanity \
     --repo-path $MOZ_LIBWEBRTC_SRC \
     --branch $MOZ_LIBWEBRTC_BRANCH \
     --patch-path "third_party/libwebrtc/moz-patch-stack" \
@@ -222,6 +223,7 @@ Then complete these steps:
 After a successful build, you may resume this script.
 "
 echo_log "Modified BUILD.gn (or webrtc.gni) files: $MODIFIED_BUILD_RELATED_FILE_CNT"
+MOZ_BUILD_CHANGE_CNT=0
 if [ "x$MODIFIED_BUILD_RELATED_FILE_CNT" != "x0" ]; then
   echo_log "Regenerate build files"
   ./mach python python/mozbuild/mozbuild/gn_processor.py \
@@ -232,9 +234,6 @@ if [ "x$MODIFIED_BUILD_RELATED_FILE_CNT" != "x0" ]; then
   if [ "x$MOZ_BUILD_CHANGE_CNT" != "x0" ]; then
     echo_log "Detected modified moz.build files, commiting"
     bash $SCRIPT_DIR/commit-build-file-changes.sh 2>&1| tee -a $LOOP_OUTPUT_LOG
-    TRY_FUZZY_QUERY_STRING="^build-"
-    echo_log "Starting try builds with '$TRY_FUZZY_QUERY_STRING'"
-    ./mach try fuzzy --full -q $TRY_FUZZY_QUERY_STRING 2>&1| tee -a $LOOP_OUTPUT_LOG
   fi
 fi
 ERROR_HELP=""
@@ -250,6 +249,22 @@ echo_log "Test build"
 ./mach build 2>&1| tee -a $LOOP_OUTPUT_LOG
 ERROR_HELP=""
 
+# If we've committed moz.build changes, spin up try builds.
+if [ "x$MOZ_BUILD_CHANGE_CNT" != "x0" ]; then
+  TRY_FUZZY_QUERY_STRING="^build-"
+  CURRENT_TIME=`date`
+  echo_log "Detected modified moz.build files, starting try builds with"
+  echo_log "'$TRY_FUZZY_QUERY_STRING' at $CURRENT_TIME"
+  echo_log "This try push is started to help earlier detection of build issues"
+  echo_log "across different platforms supported by Mozilla."
+  echo_log "Note - this step can take a long time (occasionally in the 10min range)"
+  echo_log "       with little or no feedback."
+  # Show the time used for this command, and don't let it fail if the
+  # command times out so the script continues running.  This command
+  # can take quite long, occasionally 10min.
+  (time ./mach try fuzzy --full -q $TRY_FUZZY_QUERY_STRING) 2>&1| tee -a $LOOP_OUTPUT_LOG || true
+fi
+
 if [ ! "x$MOZ_STOP_AFTER_COMMIT" = "x" ]; then
 if [ $MOZ_LIBWEBRTC_NEXT_BASE = $MOZ_STOP_AFTER_COMMIT ]; then
   break
@@ -260,6 +275,9 @@ if [ ! "x$MOZ_ADVANCE_ONE_COMMIT" = "x" ]; then
   echo_log "Done advancing one commit."
   exit
 fi
+
+# successfully completed one iteration through the loop, so we can reset RESUME
+RESUME=""
 
 done
 

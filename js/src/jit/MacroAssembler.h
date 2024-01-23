@@ -46,6 +46,7 @@
 #include "util/Memory.h"
 #include "vm/FunctionFlags.h"
 #include "vm/Opcodes.h"
+#include "vm/RealmFuses.h"
 #include "wasm/WasmCodegenTypes.h"
 #include "wasm/WasmFrame.h"
 
@@ -220,6 +221,8 @@
 #define PER_ARCH DEFINED_ON(ALL_ARCH)
 #define PER_SHARED_ARCH DEFINED_ON(ALL_SHARED_ARCH)
 #define OOL_IN_HEADER
+
+class JSLinearString;
 
 namespace JS {
 struct ExpandoAndGeneration;
@@ -517,7 +520,7 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // layout.
 
   // The size of the area used by PushRegsInMask.
-  size_t PushRegsInMaskSizeInBytes(LiveRegisterSet set)
+  static size_t PushRegsInMaskSizeInBytes(LiveRegisterSet set)
       DEFINED_ON(arm, arm64, mips32, mips64, loong64, riscv64, wasm32,
                  x86_shared);
 
@@ -576,8 +579,6 @@ class MacroAssembler : public MacroAssemblerSpecific {
   void PopFlags() DEFINED_ON(x86_shared);
   void PopStackPtr()
       DEFINED_ON(arm, mips_shared, x86_shared, loong64, riscv64, wasm32);
-  void popRooted(VMFunctionData::RootType rootType, Register cellReg,
-                 const ValueOperand& valueReg);
 
   // Move the stack pointer based on the requested amount.
   void adjustStack(int amount);
@@ -586,7 +587,7 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // Move the stack pointer to the specified position. It assumes the SP
   // register is not valid -- it uses FP to set the position.
   void freeStackTo(uint32_t framePushed)
-      DEFINED_ON(x86_shared, arm, arm64, loong64, mips64);
+      DEFINED_ON(x86_shared, arm, arm64, loong64, mips64, riscv64);
 
   // Warning: This method does not update the framePushed() counter.
   void freeStack(Register amount);
@@ -646,6 +647,9 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // Useful for dealing with two-valued returns.
   void moveRegPair(Register src0, Register src1, Register dst0, Register dst1,
                    MoveOp::Type type = MoveOp::GENERAL);
+
+  void reserveVMFunctionOutParamSpace(const VMFunctionData& f);
+  void loadVMFunctionOutParam(const VMFunctionData& f, const Address& addr);
 
  public:
   // ===============================================================
@@ -717,9 +721,9 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // 3) Passing arguments. Arguments are passed left-to-right.
   //
   //      masm.passABIArg(scratch);
-  //      masm.passABIArg(FloatOp0, MoveOp::Double);
+  //      masm.passABIArg(FloatOp0, ABIType::Float64);
   //
-  //    Note how float register arguments are annotated with MoveOp::Double.
+  //    Note how float register arguments are annotated with ABIType::Float64.
   //
   //    Concerning stack-relative address, see the note on passABIArg.
   //
@@ -732,7 +736,7 @@ class MacroAssembler : public MacroAssemblerSpecific {
   //    indicated to the callWithABI like this:
   //
   //      using Fn = double (*)(int32_t)
-  //      masm.callWithABI<Fn, Callee>(MoveOp::DOUBLE);
+  //      masm.callWithABI<Fn, Callee>(ABIType::Float64);
   //
   //    There are overloads to allow calls to registers and addresses.
   //
@@ -780,32 +784,37 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // scratch register.
   void setupUnalignedABICall(Register scratch) PER_ARCH;
 
+  // Like setupUnalignedABICall, but more efficient because it doesn't push/pop
+  // the unaligned stack pointer. The caller is responsible for restoring SP
+  // after the callWithABI, for example using the frame pointer register.
+  void setupUnalignedABICallDontSaveRestoreSP();
+
   // Arguments must be assigned to a C/C++ call in order. They are moved
   // in parallel immediately before performing the call. This process may
   // temporarily use more stack, in which case esp-relative addresses will be
   // automatically adjusted. It is extremely important that esp-relative
   // addresses are computed *after* setupABICall(). Furthermore, no
   // operations should be emitted while setting arguments.
-  void passABIArg(const MoveOperand& from, MoveOp::Type type);
+  void passABIArg(const MoveOperand& from, ABIType type);
   inline void passABIArg(Register reg);
-  inline void passABIArg(FloatRegister reg, MoveOp::Type type);
+  inline void passABIArg(FloatRegister reg, ABIType type);
 
   inline void callWithABI(
-      DynFn fun, MoveOp::Type result = MoveOp::GENERAL,
+      DynFn fun, ABIType result = ABIType::General,
       CheckUnsafeCallWithABI check = CheckUnsafeCallWithABI::Check);
   template <typename Sig, Sig fun>
   inline void callWithABI(
-      MoveOp::Type result = MoveOp::GENERAL,
+      ABIType result = ABIType::General,
       CheckUnsafeCallWithABI check = CheckUnsafeCallWithABI::Check);
-  inline void callWithABI(Register fun, MoveOp::Type result = MoveOp::GENERAL);
+  inline void callWithABI(Register fun, ABIType result = ABIType::General);
   inline void callWithABI(const Address& fun,
-                          MoveOp::Type result = MoveOp::GENERAL);
+                          ABIType result = ABIType::General);
 
   CodeOffset callWithABI(wasm::BytecodeOffset offset, wasm::SymbolicAddress fun,
                          mozilla::Maybe<int32_t> instanceOffset,
-                         MoveOp::Type result = MoveOp::GENERAL);
+                         ABIType result = ABIType::General);
   void callDebugWithABI(wasm::SymbolicAddress fun,
-                        MoveOp::Type result = MoveOp::GENERAL);
+                        ABIType result = ABIType::General);
 
  private:
   // Reinitialize the variables which have to be cleared before making a call
@@ -822,18 +831,18 @@ class MacroAssembler : public MacroAssemblerSpecific {
                       bool callFromWasm = false) PER_ARCH;
 
   // Emits a call to a C/C++ function, resolving all argument moves.
-  void callWithABINoProfiler(void* fun, MoveOp::Type result,
+  void callWithABINoProfiler(void* fun, ABIType result,
                              CheckUnsafeCallWithABI check);
-  void callWithABINoProfiler(Register fun, MoveOp::Type result) PER_ARCH;
-  void callWithABINoProfiler(const Address& fun, MoveOp::Type result) PER_ARCH;
+  void callWithABINoProfiler(Register fun, ABIType result) PER_ARCH;
+  void callWithABINoProfiler(const Address& fun, ABIType result) PER_ARCH;
 
   // Restore the stack to its state before the setup function call.
-  void callWithABIPost(uint32_t stackAdjust, MoveOp::Type result,
+  void callWithABIPost(uint32_t stackAdjust, ABIType result,
                        bool callFromWasm = false) PER_ARCH;
 
   // Create the signature to be able to decode the arguments of a native
   // function, when calling a function within the simulator.
-  inline void appendSignatureType(MoveOp::Type type);
+  inline void appendSignatureType(ABIType type);
   inline ABIFunctionType signature() const;
 
   // Private variables used to handle moves between registers given as
@@ -939,9 +948,8 @@ class MacroAssembler : public MacroAssemblerSpecific {
   //
   // See JitFrames.h, and TraceJitExitFrame in JitFrames.cpp.
 
-  // Push stub code and the VMFunctionData pointer.
-  inline void enterExitFrame(Register cxreg, Register scratch,
-                             const VMFunctionData* f);
+  // Links the exit frame and pushes the ExitFooterFrame.
+  inline void enterExitFrame(Register cxreg, Register scratch, VMFunctionId f);
 
   // Push an exit frame token to identify which fake exit frame this footer
   // corresponds to.
@@ -974,6 +982,8 @@ class MacroAssembler : public MacroAssemblerSpecific {
 
   inline void moveDoubleToGPR64(FloatRegister src, Register64 dest) PER_ARCH;
   inline void moveGPR64ToDouble(Register64 src, FloatRegister dest) PER_ARCH;
+
+  inline void move8ZeroExtend(Register src, Register dest) PER_SHARED_ARCH;
 
   inline void move8SignExtend(Register src, Register dest) PER_SHARED_ARCH;
   inline void move16SignExtend(Register src, Register dest) PER_SHARED_ARCH;
@@ -1084,6 +1094,7 @@ class MacroAssembler : public MacroAssemblerSpecific {
 
   inline void add32(Register src, Register dest) PER_SHARED_ARCH;
   inline void add32(Imm32 imm, Register dest) PER_SHARED_ARCH;
+  inline void add32(Imm32 imm, Register src, Register dest) PER_SHARED_ARCH;
   inline void add32(Imm32 imm, const Address& dest) PER_SHARED_ARCH;
   inline void add32(Imm32 imm, const AbsoluteAddress& dest)
       DEFINED_ON(x86_shared);
@@ -2105,6 +2116,10 @@ class MacroAssembler : public MacroAssemblerSpecific {
   template <typename T>
   inline void fallibleUnboxBigInt(const T& src, Register dest, Label* fail);
 
+  inline void cmp32Move32(Condition cond, Register lhs, Imm32 rhs, Register src,
+                          Register dest)
+      DEFINED_ON(arm, arm64, loong64, riscv64, wasm32, mips_shared, x86_shared);
+
   inline void cmp32Move32(Condition cond, Register lhs, Register rhs,
                           Register src, Register dest)
       DEFINED_ON(arm, arm64, loong64, riscv64, wasm32, mips_shared, x86_shared);
@@ -2126,6 +2141,10 @@ class MacroAssembler : public MacroAssemblerSpecific {
   inline void cmp32Load32(Condition cond, Register lhs, Register rhs,
                           const Address& src, Register dest)
       DEFINED_ON(arm, arm64, loong64, riscv64, mips_shared, x86_shared);
+
+  inline void cmp32Load32(Condition cond, Register lhs, Imm32 rhs,
+                          const Address& src, Register dest)
+      DEFINED_ON(arm, arm64, loong64, riscv64, wasm32, mips_shared, x86_shared);
 
   inline void cmp32LoadPtr(Condition cond, const Address& lhs, Imm32 rhs,
                            const Address& src, Register dest)
@@ -2185,38 +2204,40 @@ class MacroAssembler : public MacroAssemblerSpecific {
  public:
   // ========================================================================
   // Memory access primitives.
-  inline void storeUncanonicalizedDouble(FloatRegister src, const Address& dest)
+  inline FaultingCodeOffset storeUncanonicalizedDouble(FloatRegister src,
+                                                       const Address& dest)
       DEFINED_ON(x86_shared, arm, arm64, mips32, mips64, loong64, riscv64,
                  wasm32);
-  inline void storeUncanonicalizedDouble(FloatRegister src,
-                                         const BaseIndex& dest)
+  inline FaultingCodeOffset storeUncanonicalizedDouble(FloatRegister src,
+                                                       const BaseIndex& dest)
       DEFINED_ON(x86_shared, arm, arm64, mips32, mips64, loong64, riscv64,
                  wasm32);
-  inline void storeUncanonicalizedDouble(FloatRegister src, const Operand& dest)
+  inline FaultingCodeOffset storeUncanonicalizedDouble(FloatRegister src,
+                                                       const Operand& dest)
       DEFINED_ON(x86_shared);
 
   template <class T>
-  inline void storeDouble(FloatRegister src, const T& dest);
+  inline FaultingCodeOffset storeDouble(FloatRegister src, const T& dest);
 
   template <class T>
   inline void boxDouble(FloatRegister src, const T& dest);
 
   using MacroAssemblerSpecific::boxDouble;
 
-  inline void storeUncanonicalizedFloat32(FloatRegister src,
-                                          const Address& dest)
+  inline FaultingCodeOffset storeUncanonicalizedFloat32(FloatRegister src,
+                                                        const Address& dest)
       DEFINED_ON(x86_shared, arm, arm64, mips32, mips64, loong64, riscv64,
                  wasm32);
-  inline void storeUncanonicalizedFloat32(FloatRegister src,
-                                          const BaseIndex& dest)
+  inline FaultingCodeOffset storeUncanonicalizedFloat32(FloatRegister src,
+                                                        const BaseIndex& dest)
       DEFINED_ON(x86_shared, arm, arm64, mips32, mips64, loong64, riscv64,
                  wasm32);
-  inline void storeUncanonicalizedFloat32(FloatRegister src,
-                                          const Operand& dest)
+  inline FaultingCodeOffset storeUncanonicalizedFloat32(FloatRegister src,
+                                                        const Operand& dest)
       DEFINED_ON(x86_shared);
 
   template <class T>
-  inline void storeFloat32(FloatRegister src, const T& dest);
+  inline FaultingCodeOffset storeFloat32(FloatRegister src, const T& dest);
 
   template <typename T>
   void storeUnboxedValue(const ConstantOrRegister& value, MIRType valueType,
@@ -2492,6 +2513,21 @@ class MacroAssembler : public MacroAssemblerSpecific {
 
   inline void rightShiftSimd128(Imm32 count, FloatRegister src,
                                 FloatRegister dest)
+      DEFINED_ON(x86_shared, arm64);
+
+  // Zero extend int values.
+
+  inline void zeroExtend8x16To16x8(FloatRegister src, FloatRegister dest)
+      DEFINED_ON(x86_shared, arm64);
+  inline void zeroExtend8x16To32x4(FloatRegister src, FloatRegister dest)
+      DEFINED_ON(x86_shared, arm64);
+  inline void zeroExtend8x16To64x2(FloatRegister src, FloatRegister dest)
+      DEFINED_ON(x86_shared, arm64);
+  inline void zeroExtend16x8To32x4(FloatRegister src, FloatRegister dest)
+      DEFINED_ON(x86_shared, arm64);
+  inline void zeroExtend16x8To64x2(FloatRegister src, FloatRegister dest)
+      DEFINED_ON(x86_shared, arm64);
+  inline void zeroExtend32x4To64x2(FloatRegister src, FloatRegister dest)
       DEFINED_ON(x86_shared, arm64);
 
   // Reverse bytes in lanes.
@@ -3171,18 +3207,22 @@ class MacroAssembler : public MacroAssemblerSpecific {
   inline void loadUnalignedSimd128(const Operand& src, FloatRegister dest)
       DEFINED_ON(x86_shared);
 
-  inline void loadUnalignedSimd128(const Address& src, FloatRegister dest)
+  inline FaultingCodeOffset loadUnalignedSimd128(const Address& src,
+                                                 FloatRegister dest)
       DEFINED_ON(x86_shared, arm64);
 
-  inline void loadUnalignedSimd128(const BaseIndex& src, FloatRegister dest)
+  inline FaultingCodeOffset loadUnalignedSimd128(const BaseIndex& src,
+                                                 FloatRegister dest)
       DEFINED_ON(x86_shared, arm64);
 
   // Store
 
-  inline void storeUnalignedSimd128(FloatRegister src, const Address& dest)
+  inline FaultingCodeOffset storeUnalignedSimd128(FloatRegister src,
+                                                  const Address& dest)
       DEFINED_ON(x86_shared, arm64);
 
-  inline void storeUnalignedSimd128(FloatRegister src, const BaseIndex& dest)
+  inline FaultingCodeOffset storeUnalignedSimd128(FloatRegister src,
+                                                  const BaseIndex& dest)
       DEFINED_ON(x86_shared, arm64);
 
   // Floating point negation
@@ -3632,7 +3672,7 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // ========================================================================
   // wasm support
 
-  CodeOffset wasmTrapInstruction() PER_SHARED_ARCH;
+  FaultingCodeOffset wasmTrapInstruction() PER_SHARED_ARCH;
 
   void wasmTrap(wasm::Trap trap, wasm::BytecodeOffset bytecodeOffset);
 
@@ -3837,9 +3877,10 @@ class MacroAssembler : public MacroAssemblerSpecific {
 
   void wasmCheckSlowCallsite(Register ra, Label* notSlow, Register temp1,
                              Register temp2)
-      DEFINED_ON(x86, x64, arm, arm64, loong64, mips64);
+      DEFINED_ON(x86, x64, arm, arm64, loong64, mips64, riscv64);
 
-  void wasmMarkSlowCall() DEFINED_ON(x86, x64, arm, arm64, loong64, mips64);
+  void wasmMarkSlowCall()
+      DEFINED_ON(x86, x64, arm, arm64, loong64, mips64, riscv64);
 #endif
 
   // WasmTableCallIndexReg must contain the index of the indirect call.  This is
@@ -3901,19 +3942,29 @@ class MacroAssembler : public MacroAssemblerSpecific {
                                            wasm::SymbolicAddress builtin,
                                            wasm::FailureMode failureMode);
 
+  // Performs a bounds check for ranged wasm operations like memory.fill or
+  // array.fill. This handles the bizarre edge case in the wasm spec where a
+  // write to index N is valid as long as the length is zero - despite the index
+  // itself being out of bounds.
+  //
+  // `length` and `limit` will be unchanged.
+  void wasmBoundsCheckRange32(Register index, Register length, Register limit,
+                              Register tmp,
+                              wasm::BytecodeOffset bytecodeOffset);
+
   // Perform a subtype check that `ref` is a subtype of `type`, branching to
   // `label` depending on `onSuccess`. `type` must be in the `any` hierarchy.
   //
-  // `superSuperTypeVector` is required iff the destination type is a concrete
+  // `superSTV` is required iff the destination type is a concrete
   // type. `scratch1` is required iff the destination type is eq or lower and
   // not none. `scratch2` is required iff the destination type is a concrete
   // type and its `subTypingDepth` is >= wasm::MinSuperTypeVectorLength.
   //
-  // `ref` and `superSuperTypeVector` are preserved. Scratch registers are
+  // `ref` and `superSTV` are preserved. Scratch registers are
   // clobbered.
   void branchWasmRefIsSubtypeAny(Register ref, wasm::RefType sourceType,
                                  wasm::RefType destType, Label* label,
-                                 bool onSuccess, Register superSuperTypeVector,
+                                 bool onSuccess, Register superSTV,
                                  Register scratch1, Register scratch2);
   static bool needScratch1ForBranchWasmRefIsSubtypeAny(wasm::RefType type);
   static bool needScratch2ForBranchWasmRefIsSubtypeAny(wasm::RefType type);
@@ -3922,16 +3973,16 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // Perform a subtype check that `ref` is a subtype of `type`, branching to
   // `label` depending on `onSuccess`. `type` must be in the `func` hierarchy.
   //
-  // `superSuperTypeVector` and `scratch1` are required iff the destination type
+  // `superSTV` and `scratch1` are required iff the destination type
   // is a concrete type (not func and not nofunc). `scratch2` is required iff
   // the destination type is a concrete type and its `subTypingDepth` is >=
   // wasm::MinSuperTypeVectorLength.
   //
-  // `ref` and `superSuperTypeVector` are preserved. Scratch registers are
+  // `ref` and `superSTV` are preserved. Scratch registers are
   // clobbered.
   void branchWasmRefIsSubtypeFunc(Register ref, wasm::RefType sourceType,
                                   wasm::RefType destType, Label* label,
-                                  bool onSuccess, Register superSuperTypeVector,
+                                  bool onSuccess, Register superSTV,
                                   Register scratch1, Register scratch2);
   static bool needSuperSTVAndScratch1ForBranchWasmRefIsSubtypeFunc(
       wasm::RefType type);
@@ -3943,21 +3994,27 @@ class MacroAssembler : public MacroAssemblerSpecific {
                                     wasm::RefType destType, Label* label,
                                     bool onSuccess);
 
-  // Perform a subtype check that `subSuperTypeVector` is a subtype of
-  // `superSuperTypeVector`, branching to `label` depending on `onSuccess`.
-  // This method is a specialization of the general
-  // `wasm::TypeDef::isSubTypeOf` method for the case where the
-  // `superSuperTypeVector` is statically known, which is the case for all
-  // wasm instructions.
+  // Perform a subtype check that `subSTV` is a subtype of `superSTV`, branching
+  // to `label` depending on `onSuccess`. This method is a specialization of the
+  // general `wasm::TypeDef::isSubTypeOf` method for the case where the
+  // `superSTV` is statically known, which is the case for all wasm
+  // instructions.
   //
-  // `scratch` is required iff the `subTypeDepth` is >=
-  // wasm::MinSuperTypeVectorLength. `subSuperTypeVector` is clobbered by this
-  // method.  `superSuperTypeVector` is preserved.
-  void branchWasmSuperTypeVectorIsSubtype(Register subSuperTypeVector,
-                                          Register superSuperTypeVector,
-                                          Register scratch,
-                                          uint32_t superTypeDepth, Label* label,
-                                          bool onSuccess);
+  // `scratch` is required iff the `superDepth` is >=
+  // wasm::MinSuperTypeVectorLength. `subSTV` is clobbered by this method.
+  // `superSTV` is preserved.
+  void branchWasmSTVIsSubtype(Register subSTV, Register superSTV,
+                              Register scratch, uint32_t superDepth,
+                              Label* label, bool onSuccess);
+
+  // Same as branchWasmSTVIsSubtype, but looks up a dynamic position in the
+  // super type vector.
+  //
+  // `scratch` is always required. `subSTV` and `superDepth` are clobbered.
+  // `superSTV` is preserved.
+  void branchWasmSTVIsSubtypeDynamicDepth(Register subSTV, Register superSTV,
+                                          Register superDepth, Register scratch,
+                                          Label* label, bool onSuccess);
 
   // Branch if the wasm anyref `src` is or is not the null value.
   void branchWasmAnyRefIsNull(bool isNull, Register src, Label* label);
@@ -4005,6 +4062,18 @@ class MacroAssembler : public MacroAssemblerSpecific {
   // Branch if the object `src` is or is not a WasmGcObject.
   void branchObjectIsWasmGcObject(bool isGcObject, Register src,
                                   Register scratch, Label* label);
+
+  // `typeDefData` will be preserved. `instance` and `result` may be the same
+  // register, in which case `instance` will be clobbered.
+  void wasmNewStructObject(Register instance, Register result,
+                           Register typeDefData, Register temp1, Register temp2,
+                           Label* fail, gc::AllocKind allocKind,
+                           bool zeroFields);
+  // `typeDefData` will be preserved. `instance` and `result` may be the same
+  // register, in which case `instance` will be clobbered.
+  void wasmBumpPointerAllocate(Register instance, Register result,
+                               Register typeDefData, Register temp1,
+                               Register temp2, Label* fail, uint32_t size);
 
   // Compute ptr += (indexTemp32 << shift) where shift can be any value < 32.
   // May destroy indexTemp32.  The value of indexTemp32 must be positive, and it
@@ -4635,17 +4704,66 @@ class MacroAssembler : public MacroAssemblerSpecific {
   void loadInlineStringCharsForStore(Register str, Register dest);
 
  private:
-  void loadRopeChild(Register str, Register index, Register output,
-                     Label* isLinear);
+  enum class CharKind { CharCode, CodePoint };
+
+  void branchIfMaybeSplitSurrogatePair(Register leftChild, Register index,
+                                       Register scratch, Label* maybeSplit,
+                                       Label* notSplit);
+
+  void loadRopeChild(CharKind kind, Register str, Register index,
+                     Register output, Register maybeScratch, Label* isLinear,
+                     Label* splitSurrogate);
+
+  void branchIfCanLoadStringChar(CharKind kind, Register str, Register index,
+                                 Register scratch, Register maybeScratch,
+                                 Label* label);
+  void branchIfNotCanLoadStringChar(CharKind kind, Register str, Register index,
+                                    Register scratch, Register maybeScratch,
+                                    Label* label);
+
+  void loadStringChar(CharKind kind, Register str, Register index,
+                      Register output, Register scratch1, Register scratch2,
+                      Label* fail);
 
  public:
   void branchIfCanLoadStringChar(Register str, Register index, Register scratch,
-                                 Label* label);
+                                 Label* label) {
+    branchIfCanLoadStringChar(CharKind::CharCode, str, index, scratch,
+                              InvalidReg, label);
+  }
   void branchIfNotCanLoadStringChar(Register str, Register index,
-                                    Register scratch, Label* label);
+                                    Register scratch, Label* label) {
+    branchIfNotCanLoadStringChar(CharKind::CharCode, str, index, scratch,
+                                 InvalidReg, label);
+  }
+
+  void branchIfCanLoadStringCodePoint(Register str, Register index,
+                                      Register scratch1, Register scratch2,
+                                      Label* label) {
+    branchIfCanLoadStringChar(CharKind::CodePoint, str, index, scratch1,
+                              scratch2, label);
+  }
+  void branchIfNotCanLoadStringCodePoint(Register str, Register index,
+                                         Register scratch1, Register scratch2,
+                                         Label* label) {
+    branchIfNotCanLoadStringChar(CharKind::CodePoint, str, index, scratch1,
+                                 scratch2, label);
+  }
 
   void loadStringChar(Register str, Register index, Register output,
+                      Register scratch1, Register scratch2, Label* fail) {
+    loadStringChar(CharKind::CharCode, str, index, output, scratch1, scratch2,
+                   fail);
+  }
+
+  void loadStringChar(Register str, int32_t index, Register output,
                       Register scratch1, Register scratch2, Label* fail);
+
+  void loadStringCodePoint(Register str, Register index, Register output,
+                           Register scratch1, Register scratch2, Label* fail) {
+    loadStringChar(CharKind::CodePoint, str, index, output, scratch1, scratch2,
+                   fail);
+  }
 
   void loadRopeLeftChild(Register str, Register dest);
   void loadRopeRightChild(Register str, Register dest);
@@ -4692,6 +4810,41 @@ class MacroAssembler : public MacroAssemblerSpecific {
    */
   void addToCharPtr(Register chars, Register index, CharEncoding encoding);
 
+  /**
+   * Branch if |src| is not a lead surrogate character.
+   */
+  void branchIfNotLeadSurrogate(Register src, Label* label);
+
+ private:
+  enum class SurrogateChar { Lead, Trail };
+  void branchSurrogate(Assembler::Condition cond, Register src,
+                       Register scratch, Label* label,
+                       SurrogateChar surrogateChar);
+
+ public:
+  /**
+   * Branch if |src| is a lead surrogate character.
+   */
+  void branchIfLeadSurrogate(Register src, Register scratch, Label* label) {
+    branchSurrogate(Assembler::Equal, src, scratch, label, SurrogateChar::Lead);
+  }
+
+  /**
+   * Branch if |src| is not a lead surrogate character.
+   */
+  void branchIfNotLeadSurrogate(Register src, Register scratch, Label* label) {
+    branchSurrogate(Assembler::NotEqual, src, scratch, label,
+                    SurrogateChar::Lead);
+  }
+
+  /**
+   * Branch if |src| is not a trail surrogate character.
+   */
+  void branchIfNotTrailSurrogate(Register src, Register scratch, Label* label) {
+    branchSurrogate(Assembler::NotEqual, src, scratch, label,
+                    SurrogateChar::Trail);
+  }
+
  private:
   void loadStringFromUnit(Register unit, Register dest,
                           const StaticStrings& staticStrings);
@@ -4700,6 +4853,39 @@ class MacroAssembler : public MacroAssemblerSpecific {
 
  public:
   /**
+   * Lookup the length-one string from the static strings cache.
+   */
+  void lookupStaticString(Register ch, Register dest,
+                          const StaticStrings& staticStrings);
+
+  /**
+   * Lookup the length-one string from the static strings cache. Jumps to |fail|
+   * when the string wasn't found in the strings cache.
+   */
+  void lookupStaticString(Register ch, Register dest,
+                          const StaticStrings& staticStrings, Label* fail);
+
+  /**
+   * Lookup the length-two string from the static strings cache. Jumps to |fail|
+   * when the string wasn't found in the strings cache.
+   *
+   * Clobbers |ch1| and |ch2|.
+   */
+  void lookupStaticString(Register ch1, Register ch2, Register dest,
+                          const StaticStrings& staticStrings, Label* fail);
+
+  /**
+   * Lookup the integer string from the static integer strings cache. Jumps to
+   * |fail| when the string wasn't found in the strings cache.
+   */
+  void lookupStaticIntString(Register integer, Register dest, Register scratch,
+                             const StaticStrings& staticStrings, Label* fail);
+  void lookupStaticIntString(Register integer, Register dest,
+                             const StaticStrings& staticStrings, Label* fail) {
+    lookupStaticIntString(integer, dest, dest, staticStrings, fail);
+  }
+
+  /**
    * Load the string representation of |input| in base |base|. Jumps to |fail|
    * when the string representation needs to be allocated dynamically.
    */
@@ -4707,11 +4893,11 @@ class MacroAssembler : public MacroAssemblerSpecific {
                                  Register scratch1, Register scratch2,
                                  const StaticStrings& staticStrings,
                                  const LiveRegisterSet& volatileRegs,
-                                 Label* fail);
+                                 bool lowerCase, Label* fail);
   void loadInt32ToStringWithBase(Register input, int32_t base, Register dest,
                                  Register scratch1, Register scratch2,
                                  const StaticStrings& staticStrings,
-                                 Label* fail);
+                                 bool lowerCase, Label* fail);
 
   /**
    * Load the BigInt digits from |bigInt| into |digits|.
@@ -4806,6 +4992,8 @@ class MacroAssembler : public MacroAssemblerSpecific {
   void loadJSContext(Register dest);
 
   void loadGlobalObjectData(Register dest);
+
+  void loadRealmFuse(RealmFuses::FuseIndex index, Register dest);
 
   void switchToRealm(Register realm);
   void switchToRealm(const void* realm, Register scratch);
@@ -5272,6 +5460,24 @@ class MacroAssembler : public MacroAssemblerSpecific {
 
   void newGCBigInt(Register result, Register temp, gc::Heap initialHeap,
                    Label* fail);
+
+ private:
+  void branchIfNotStringCharsEquals(Register stringChars,
+                                    const JSLinearString* linear, Label* label);
+
+ public:
+  // Returns true if |linear| is a (non-empty) string which can be compared
+  // using |compareStringChars|.
+  static bool canCompareStringCharsInline(const JSLinearString* linear);
+
+  // Load the string characters in preparation for |compareStringChars|.
+  void loadStringCharsForCompare(Register input, const JSLinearString* linear,
+                                 Register stringChars, Label* fail);
+
+  // Compare string characters based on the equality operator. The string
+  // characters must be at least as long as the length of |linear|.
+  void compareStringChars(JSOp op, Register stringChars,
+                          const JSLinearString* linear, Register result);
 
   // Compares two strings for equality based on the JSOP.
   // This checks for identical pointers, atoms and length and fails for

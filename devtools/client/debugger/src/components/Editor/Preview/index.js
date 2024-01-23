@@ -2,14 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import PropTypes from "prop-types";
-import React, { PureComponent } from "react";
-import { connect } from "../../../utils/connect";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import React, { PureComponent } from "devtools/client/shared/vendor/react";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 
 import Popup from "./Popup";
 
-import { getIsCurrentThreadPaused } from "../../../selectors";
-import actions from "../../../actions";
+import { getIsCurrentThreadPaused } from "../../../selectors/index";
+import actions from "../../../actions/index";
 
 const EXCEPTION_MARKER = "mark-text-exception";
 
@@ -53,7 +53,7 @@ class Preview extends PureComponent {
     codeMirrorWrapper.addEventListener("mousedown", this.onMouseDown);
   }
 
-  // Note that these events are emitted by utils/editor/token-events.js
+  // Note that these events are emitted by utils/editor/tokens.js
   onTokenEnter = async ({ target, tokenPos }) => {
     // Use a temporary object to uniquely identify the asynchronous processing of this user event
     // and bail out if we started hovering another token.
@@ -61,7 +61,6 @@ class Preview extends PureComponent {
     this.currentTokenId = tokenId;
 
     const { editor, getPreview, getExceptionPreview } = this.props;
-
     const isTargetException = target.classList.contains(EXCEPTION_MARKER);
 
     let preview;
@@ -69,7 +68,7 @@ class Preview extends PureComponent {
       preview = await getExceptionPreview(target, tokenPos, editor.codeMirror);
     }
 
-    if (this.props.isPaused && !this.state.selecting) {
+    if (!preview && this.props.isPaused && !this.state.selecting) {
       preview = await getPreview(target, tokenPos, editor.codeMirror);
     }
 

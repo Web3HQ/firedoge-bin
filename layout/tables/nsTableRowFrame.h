@@ -114,7 +114,7 @@ class nsTableRowFrame : public nsContainerFrame {
                    nsTableFrame* aTableFrame = nullptr,
                    nsTableCellFrame* aCellFrame = nullptr);
 
-  void ResetBSize(nscoord aRowStyleBSize);
+  void ResetBSize();
 
   // calculate the bsize, considering content bsize of the
   // cells and the style bsize of the row and cells, excluding pct bsizes
@@ -172,9 +172,17 @@ class nsTableRowFrame : public nsContainerFrame {
    */
   void InsertCellFrame(nsTableCellFrame* aFrame, int32_t aColIndex);
 
-  nsresult CalculateCellActualBSize(nsTableCellFrame* aCellFrame,
-                                    nscoord& aDesiredBSize,
-                                    mozilla::WritingMode aWM);
+  /**
+   * Calculate the cell frame's actual block-size given its desired block-size
+   * (the border-box block-size in the last reflow). This method takes into
+   * account the specified bsize (in the style).
+   *
+   * @return the specified block-size if it is larger than the desired
+   *         block-size. Otherwise, the desired block-size.
+   */
+  nscoord CalcCellActualBSize(nsTableCellFrame* aCellFrame,
+                              const nscoord& aDesiredBSize,
+                              mozilla::WritingMode aWM);
 
   bool IsFirstInserted() const;
   void SetFirstInserted(bool aValue);
@@ -198,12 +206,14 @@ class nsTableRowFrame : public nsContainerFrame {
 
   nscoord GetInitialBSize(nscoord aBasis = 0) const;
 
+  nsTableRowFrame* GetPrevRow() const;
   nsTableRowFrame* GetNextRow() const;
 
-  bool HasUnpaginatedBSize();
-  void SetHasUnpaginatedBSize(bool aValue);
-  nscoord GetUnpaginatedBSize();
-  void SetUnpaginatedBSize(nsPresContext* aPresContext, nscoord aValue);
+  bool HasUnpaginatedBSize() const {
+    return HasAnyStateBits(NS_TABLE_ROW_HAS_UNPAGINATED_BSIZE);
+  }
+  nscoord GetUnpaginatedBSize() const;
+  void SetUnpaginatedBSize(nscoord aValue);
 
   BCPixelSize GetBStartBCBorderWidth() const { return mBStartBorderWidth; }
   BCPixelSize GetBEndBCBorderWidth() const { return mBEndBorderWidth; }
@@ -212,34 +222,6 @@ class nsTableRowFrame : public nsContainerFrame {
   }
   void SetBEndBCBorderWidth(BCPixelSize aWidth) { mBEndBorderWidth = aWidth; }
   mozilla::LogicalMargin GetBCBorderWidth(mozilla::WritingMode aWM);
-
-  /**
-   * Gets inner border widths before collapsing with cell borders
-   * Caller must get block-end border from next row or from table
-   * GetContinuousBCBorderWidth will not overwrite that border
-   * see nsTablePainter about continuous borders
-   */
-  void GetContinuousBCBorderWidth(mozilla::WritingMode aWM,
-                                  mozilla::LogicalMargin& aBorder);
-
-  /**
-   * @returns outer block-start bc border == prev row's block-end inner
-   */
-  nscoord GetOuterBStartContBCBorderWidth();
-  /**
-   * Sets full border widths before collapsing with cell borders
-   * @param aForSide - side to set; only accepts iend, istart, and bstart
-   */
-  void SetContinuousBCBorderWidth(mozilla::LogicalSide aForSide,
-                                  BCPixelSize aPixelValue);
-
-  bool IsFrameOfType(uint32_t aFlags) const override {
-    if (aFlags & (eSupportsContainLayoutAndPaint | eSupportsAspectRatio)) {
-      return false;
-    }
-
-    return nsContainerFrame::IsFrameOfType(aFlags & ~(nsIFrame::eTablePart));
-  }
 
   void InvalidateFrame(uint32_t aDisplayItemKey = 0,
                        bool aRebuildDisplayItems = true) override;
@@ -307,9 +289,6 @@ class nsTableRowFrame : public nsContainerFrame {
   // half of the border only
   BCPixelSize mBStartBorderWidth = 0;
   BCPixelSize mBEndBorderWidth = 0;
-  BCPixelSize mIEndContBorderWidth = 0;
-  BCPixelSize mBStartContBorderWidth = 0;
-  BCPixelSize mIStartContBorderWidth = 0;
 
   /**
    * Sets the NS_ROW_HAS_CELL_WITH_STYLE_BSIZE bit to indicate whether
@@ -396,37 +375,12 @@ inline float nsTableRowFrame::GetPctBSize() const {
   return 0.0f;
 }
 
-inline bool nsTableRowFrame::HasUnpaginatedBSize() {
-  return HasAnyStateBits(NS_TABLE_ROW_HAS_UNPAGINATED_BSIZE);
-}
-
-inline void nsTableRowFrame::SetHasUnpaginatedBSize(bool aValue) {
-  if (aValue) {
-    AddStateBits(NS_TABLE_ROW_HAS_UNPAGINATED_BSIZE);
-  } else {
-    RemoveStateBits(NS_TABLE_ROW_HAS_UNPAGINATED_BSIZE);
-  }
-}
-
 inline mozilla::LogicalMargin nsTableRowFrame::GetBCBorderWidth(
     mozilla::WritingMode aWM) {
   nsPresContext* presContext = PresContext();
   return mozilla::LogicalMargin(
       aWM, presContext->DevPixelsToAppUnits(mBStartBorderWidth), 0,
       presContext->DevPixelsToAppUnits(mBEndBorderWidth), 0);
-}
-
-inline void nsTableRowFrame::GetContinuousBCBorderWidth(
-    mozilla::WritingMode aWM, mozilla::LogicalMargin& aBorder) {
-  int32_t d2a = PresContext()->AppUnitsPerDevPixel();
-  aBorder.IEnd(aWM) = BC_BORDER_START_HALF_COORD(d2a, mIStartContBorderWidth);
-  aBorder.BStart(aWM) = BC_BORDER_END_HALF_COORD(d2a, mBStartContBorderWidth);
-  aBorder.IStart(aWM) = BC_BORDER_END_HALF_COORD(d2a, mIEndContBorderWidth);
-}
-
-inline nscoord nsTableRowFrame::GetOuterBStartContBCBorderWidth() {
-  int32_t aPixelsToTwips = mozilla::AppUnitsPerCSSPixel();
-  return BC_BORDER_START_HALF_COORD(aPixelsToTwips, mBStartContBorderWidth);
 }
 
 #endif

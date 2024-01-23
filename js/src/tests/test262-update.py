@@ -19,7 +19,6 @@ from operator import itemgetter
 UNSUPPORTED_FEATURES = set(
     [
         "tail-call-optimization",
-        "Intl.Segmenter",  # Bug 1423593
         "Intl.Locale-info",  # Bug 1693576
         "Intl.DurationFormat",  # Bug 1648139
         "Atomics.waitAsync",  # Bug 1467846
@@ -27,8 +26,8 @@ UNSUPPORTED_FEATURES = set(
         "json-modules",  # Bug 1670176
         "resizable-arraybuffer",  # Bug 1670026
         "regexp-duplicate-named-groups",  # Bug 1773135
-        "symbols-as-weakmap-keys",  # Bug 1710433
         "json-parse-with-source",  # Bug 1658310
+        "set-methods",  # Bug 1805038
     ]
 )
 FEATURE_CHECK_NEEDED = {
@@ -37,18 +36,21 @@ FEATURE_CHECK_NEEDED = {
     "SharedArrayBuffer": "!this.hasOwnProperty('SharedArrayBuffer')",
     "Temporal": "!this.hasOwnProperty('Temporal')",
     "WeakRef": "!this.hasOwnProperty('WeakRef')",
-    "array-grouping": "!Object.groupBy",  # Bug 1792650
-    "decorators": "!(this.hasOwnProperty('getBuildConfiguration')&&getBuildConfiguration()['decorators'])",  # Bug 1435869
+    "decorators": "!(this.hasOwnProperty('getBuildConfiguration')&&getBuildConfiguration('decorators'))",  # Bug 1435869
     "iterator-helpers": "!this.hasOwnProperty('Iterator')",  # Bug 1568906
-    "arraybuffer-transfer": "!ArrayBuffer.prototype.transfer",  # Bug 1519163
+    "Intl.Segmenter": "!Intl.Segmenter",  # Bug 1423593
 }
-RELEASE_OR_BETA = set([])
+RELEASE_OR_BETA = set(
+    [
+        "symbols-as-weakmap-keys",
+    ]
+)
 SHELL_OPTIONS = {
     "import-assertions": "--enable-import-assertions",
+    "import-attributes": "--enable-import-attributes",
     "ShadowRealm": "--enable-shadow-realms",
-    "array-grouping": "--enable-array-grouping",
     "iterator-helpers": "--enable-iterator-helpers",
-    "arraybuffer-transfer": "--enable-arraybuffer-transfer",
+    "symbols-as-weakmap-keys": "--enable-symbols-as-weakmap-keys",
 }
 
 
@@ -366,7 +368,7 @@ def convertTestFile(test262parser, testSource, testName, includeSet, strictTests
                 refTestSkipIf.append(
                     (
                         "(this.hasOwnProperty('getBuildConfiguration')"
-                        "&&getBuildConfiguration()['arm64-simulator'])",
+                        "&&getBuildConfiguration('arm64-simulator'))",
                         "ARM64 Simulator cannot emulate atomics",
                     )
                 )

@@ -1,17 +1,5 @@
 // |jit-test| skip-if: !wasmGcEnabled()
 
-// Test the maximum depth limit
-{
-  const MaxDepth = 31;
-  let types = `(type (sub (struct)))\n`;
-  for (let depth = 1; depth <= MaxDepth + 1; depth++) {
-    types += `(type (sub ${depth - 1} (struct)))\n`;
-  }
-  wasmFailValidateText(`(module
-    ${types}
-  )`, /too deep/);
-}
-
 // Test all possible casting combinations of the following graph:
 //
 //  A1       A2
@@ -90,11 +78,11 @@ function testAllCasts(types) {
     funcSection += `
       (func (export "new${name}") (result externref)
         struct.new_default \$${name}
-        extern.externalize
+        extern.convert_any
       )
       (func (export "is${name}") (param externref) (result i32)
         local.get 0
-        extern.internalize
+        any.convert_extern
         ref.test (ref \$${name})
       )`;
   }

@@ -621,23 +621,25 @@ void EventLogAnalyzer::CreateTotalPacketRateGraph(PacketDirection direction,
     Timestamp log_time_;
   };
   std::vector<LogTime> packet_times;
-  auto handle_rtp = [&](const LoggedRtpPacket& packet) {
+  auto handle_rtp = [&packet_times](const LoggedRtpPacket& packet) {
     packet_times.emplace_back(packet.log_time());
   };
   RtcEventProcessor process;
   for (const auto& stream : parsed_log_.rtp_packets_by_ssrc(direction)) {
-    process.AddEvents(stream.packet_view, handle_rtp);
+    process.AddEvents(stream.packet_view, handle_rtp, direction);
   }
   if (direction == kIncomingPacket) {
-    auto handle_incoming_rtcp = [&](const LoggedRtcpPacketIncoming& packet) {
-      packet_times.emplace_back(packet.log_time());
-    };
+    auto handle_incoming_rtcp =
+        [&packet_times](const LoggedRtcpPacketIncoming& packet) {
+          packet_times.emplace_back(packet.log_time());
+        };
     process.AddEvents(parsed_log_.incoming_rtcp_packets(),
                       handle_incoming_rtcp);
   } else {
-    auto handle_outgoing_rtcp = [&](const LoggedRtcpPacketOutgoing& packet) {
-      packet_times.emplace_back(packet.log_time());
-    };
+    auto handle_outgoing_rtcp =
+        [&packet_times](const LoggedRtcpPacketOutgoing& packet) {
+          packet_times.emplace_back(packet.log_time());
+        };
     process.AddEvents(parsed_log_.outgoing_rtcp_packets(),
                       handle_outgoing_rtcp);
   }
@@ -1362,16 +1364,15 @@ void EventLogAnalyzer::CreateSendSideBweSimulationGraph(Plot* plot) {
 
   RateStatistics raw_acked_bitrate(750, 8000);
   test::ExplicitKeyValueConfig throughput_config(
-      "WebRTC-Bwe-RobustThroughputEstimatorSettings/"
-      "enabled:true,required_packets:10,"
-      "window_packets:25,window_duration:1000ms,unacked_weight:1.0/");
+      "WebRTC-Bwe-RobustThroughputEstimatorSettings/enabled:true/");
   std::unique_ptr<AcknowledgedBitrateEstimatorInterface>
       robust_throughput_estimator(
           AcknowledgedBitrateEstimatorInterface::Create(&throughput_config));
-  FieldTrialBasedConfig field_trial_config;
+  test::ExplicitKeyValueConfig acked_bitrate_config(
+      "WebRTC-Bwe-RobustThroughputEstimatorSettings/enabled:false/");
   std::unique_ptr<AcknowledgedBitrateEstimatorInterface>
       acknowledged_bitrate_estimator(
-          AcknowledgedBitrateEstimatorInterface::Create(&field_trial_config));
+          AcknowledgedBitrateEstimatorInterface::Create(&acked_bitrate_config));
   int64_t time_us =
       std::min({NextRtpTime(), NextRtcpTime(), NextProcessTime()});
   int64_t last_update_us = 0;

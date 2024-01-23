@@ -14,7 +14,7 @@ use serde_bytes::ByteBuf;
 use serde_cbor::{from_slice, to_vec, Value};
 use std::fmt;
 
-use super::{Command, CommandError, PinUvAuthCommand, RequestCtap2, StatusCode};
+use super::{Command, CommandError, CtapResponse, PinUvAuthCommand, RequestCtap2, StatusCode};
 
 #[derive(Debug, Clone, Copy)]
 pub enum BioEnrollmentModality {
@@ -518,6 +518,8 @@ pub struct BioEnrollmentResponse {
     pub(crate) max_template_friendly_name: Option<u64>,
 }
 
+impl CtapResponse for BioEnrollmentResponse {}
+
 impl<'de> Deserialize<'de> for BioEnrollmentResponse {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -650,7 +652,7 @@ pub struct FingerprintSensorInfo {
 #[derive(Debug, Serialize)]
 pub enum BioEnrollmentResult {
     EnrollmentList(Vec<EnrollmentInfo>),
-    DeleteSucess(AuthenticatorInfo),
+    DeleteSuccess(AuthenticatorInfo),
     UpdateSuccess,
     AddSuccess(AuthenticatorInfo),
     FingerprintSensorInfo(FingerprintSensorInfo),

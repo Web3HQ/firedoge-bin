@@ -625,9 +625,12 @@ void nsChildView::SetCursor(const Cursor& aCursor) {
 
   nsBaseWidget::SetCursor(aCursor);
 
-  if (NS_SUCCEEDED([[nsCursorManager sharedInstance]
-            setCustomCursor:aCursor
-          widgetScaleFactor:BackingScaleFactor()])) {
+  bool forceUpdate = mUpdateCursor;
+  mUpdateCursor = false;
+  if (mCustomCursorAllowed && NS_SUCCEEDED([[nsCursorManager sharedInstance]
+                                    setCustomCursor:aCursor
+                                  widgetScaleFactor:BackingScaleFactor()
+                                        forceUpdate:forceUpdate])) {
     return;
   }
 
@@ -1769,14 +1772,6 @@ static Maybe<VibrancyType> ThemeGeometryTypeToVibrancyType(
       return Some(VibrancyType::TOOLTIP);
     case eThemeGeometryTypeMenu:
       return Some(VibrancyType::MENU);
-    case eThemeGeometryTypeHighlightedMenuItem:
-      return Some(VibrancyType::HIGHLIGHTED_MENUITEM);
-    case eThemeGeometryTypeSourceList:
-      return Some(VibrancyType::SOURCE_LIST);
-    case eThemeGeometryTypeSourceListSelection:
-      return Some(VibrancyType::SOURCE_LIST_SELECTION);
-    case eThemeGeometryTypeActiveSourceListSelection:
-      return Some(VibrancyType::ACTIVE_SOURCE_LIST_SELECTION);
     default:
       return Nothing();
   }
@@ -1822,31 +1817,13 @@ void nsChildView::UpdateVibrancy(
       GatherVibrantRegion(aThemeGeometries, VibrancyType::MENU);
   LayoutDeviceIntRegion tooltipRegion =
       GatherVibrantRegion(aThemeGeometries, VibrancyType::TOOLTIP);
-  LayoutDeviceIntRegion highlightedMenuItemRegion =
-      GatherVibrantRegion(aThemeGeometries, VibrancyType::HIGHLIGHTED_MENUITEM);
-  LayoutDeviceIntRegion sourceListRegion =
-      GatherVibrantRegion(aThemeGeometries, VibrancyType::SOURCE_LIST);
-  LayoutDeviceIntRegion sourceListSelectionRegion = GatherVibrantRegion(
-      aThemeGeometries, VibrancyType::SOURCE_LIST_SELECTION);
-  LayoutDeviceIntRegion activeSourceListSelectionRegion = GatherVibrantRegion(
-      aThemeGeometries, VibrancyType::ACTIVE_SOURCE_LIST_SELECTION);
 
-  MakeRegionsNonOverlapping(
-      menuRegion, tooltipRegion, highlightedMenuItemRegion, sourceListRegion,
-      sourceListSelectionRegion, activeSourceListSelectionRegion);
+  MakeRegionsNonOverlapping(menuRegion, tooltipRegion);
 
   auto& vm = EnsureVibrancyManager();
   bool changed = false;
   changed |= vm.UpdateVibrantRegion(VibrancyType::MENU, menuRegion);
   changed |= vm.UpdateVibrantRegion(VibrancyType::TOOLTIP, tooltipRegion);
-  changed |= vm.UpdateVibrantRegion(VibrancyType::HIGHLIGHTED_MENUITEM,
-                                    highlightedMenuItemRegion);
-  changed |=
-      vm.UpdateVibrantRegion(VibrancyType::SOURCE_LIST, sourceListRegion);
-  changed |= vm.UpdateVibrantRegion(VibrancyType::SOURCE_LIST_SELECTION,
-                                    sourceListSelectionRegion);
-  changed |= vm.UpdateVibrantRegion(VibrancyType::ACTIVE_SOURCE_LIST_SELECTION,
-                                    activeSourceListSelectionRegion);
 
   if (changed) {
     SuspendAsyncCATransactions();
@@ -1897,7 +1874,10 @@ void nsChildView::UpdateBoundsFromView() {
   // of _opaqueRect returns [self visibleRect], and the default implementation
   // of _opaqueRectForWindowMoveWhenInTitlebar returns NSZeroRect unless it's
   // overridden.
-  return [self visibleRect];
+  //
+  // Since this view is constructed and used such that its entire bounds is the
+  // relevant region, we just return our bounds.
+  return self.bounds;
 }
 @end
 
@@ -3566,14 +3546,14 @@ static gfx::IntPoint GetIntegerDeltaForEvent(NSEvent* aEvent) {
 
   nsAutoRetainCocoaObject kungFuDeathGrip(self);
 
-  NSAttributedString* attrStr;
+  NSString* str;
   if ([aString isKindOfClass:[NSAttributedString class]]) {
-    attrStr = static_cast<NSAttributedString*>(aString);
+    str = [aString string];
   } else {
-    attrStr = [[[NSAttributedString alloc] initWithString:aString] autorelease];
+    str = aString;
   }
 
-  mTextInputHandler->InsertText(attrStr, &replacementRange);
+  mTextInputHandler->InsertText(str, &replacementRange);
 
   NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
@@ -5024,12 +5004,15 @@ void ChildViewMouseTracker::OnDestroyWindow(NSWindow* aWindow) {
 }
 
 void ChildViewMouseTracker::MouseEnteredWindow(NSEvent* aEvent) {
-  sWindowUnderMouse = [aEvent window];
-  ReEvaluateMouseEnterState(aEvent);
+  NSWindow* window = aEvent.window;
+  if (!window.ignoresMouseEvents) {
+    sWindowUnderMouse = window;
+    ReEvaluateMouseEnterState(aEvent);
+  }
 }
 
 void ChildViewMouseTracker::MouseExitedWindow(NSEvent* aEvent) {
-  if (sWindowUnderMouse == [aEvent window]) {
+  if (sWindowUnderMouse == aEvent.window) {
     sWindowUnderMouse = nil;
     [sLastMouseMoveEvent release];
     sLastMouseMoveEvent = nil;

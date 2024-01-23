@@ -10,6 +10,7 @@
 #include "HttpChannelParent.h"
 #include "MainThreadUtils.h"
 #include "NeckoCommon.h"
+#include "gfxPlatform.h"
 #include "mozilla/CORSMode.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/nsCSPContext.h"
@@ -219,6 +220,11 @@ void EarlyHintPreloader::MaybeCreateAndInsertPreload(
     return;
   }
 
+  if (destination == ASDestination::DESTINATION_FONT &&
+      !gfxPlatform::GetPlatform()->DownloadableFontsEnabled()) {
+    return;
+  }
+
   nsCOMPtr<nsIURI> uri;
   NS_ENSURE_SUCCESS_VOID(
       NS_NewURI(getter_AddRefs(uri), aLinkHeader.mHref, nullptr, aBaseURI));
@@ -363,9 +369,8 @@ void EarlyHintPreloader::MaybeCreateAndInsertPreload(
   }
 
   int16_t shouldLoad = nsIContentPolicy::ACCEPT;
-  nsresult rv =
-      NS_CheckContentLoadPolicy(uri, secCheckLoadInfo, ""_ns, &shouldLoad,
-                                nsContentUtils::GetContentPolicy());
+  nsresult rv = NS_CheckContentLoadPolicy(uri, secCheckLoadInfo, &shouldLoad,
+                                          nsContentUtils::GetContentPolicy());
 
   if (NS_FAILED(rv) || NS_CP_REJECTED(shouldLoad)) {
     return;

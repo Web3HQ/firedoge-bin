@@ -22,7 +22,6 @@
 #include "jstypes.h"
 
 #include "ds/Sort.h"
-#include "gc/Allocator.h"
 #include "jit/InlinableNatives.h"
 #include "js/Class.h"
 #include "js/Conversions.h"
@@ -5154,7 +5153,12 @@ static bool array_proto_finish(JSContext* cx, JS::HandleObject ctor,
 
   RootedId id(cx, PropertyKey::Symbol(cx->wellKnownSymbols().unscopables));
   value.setObject(*unscopables);
-  return DefineDataProperty(cx, proto, id, value, JSPROP_READONLY);
+  if (!DefineDataProperty(cx, proto, id, value, JSPROP_READONLY)) {
+    return false;
+  }
+
+  // Mark Array prototype as having fuse property (@iterator for example).
+  return JSObject::setHasFuseProperty(cx, proto);
 }
 
 static const JSClassOps ArrayObjectClassOps = {
@@ -5343,7 +5347,7 @@ void js::ArraySpeciesLookup::initialize(JSContext* cx) {
   // optimizable, set to disabled now, and clear it later when we succeed.
   state_ = State::Disabled;
 
-  // Look up Array.prototype[@@iterator] and ensure it's a data property.
+  // Look up Array.prototype.constructor and ensure it's a data property.
   Maybe<PropertyInfo> ctorProp =
       arrayProto->lookup(cx, NameToId(cx->names().constructor));
   if (ctorProp.isNothing() || !ctorProp->isDataProperty()) {

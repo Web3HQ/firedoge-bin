@@ -310,9 +310,7 @@ class nsDisplayListBuilder {
         : mAccumulatedRectLevels(0), mAllowAsyncAnimation(true) {}
 
     Preserves3DContext(const Preserves3DContext& aOther)
-        : mAccumulatedTransform(),
-          mAccumulatedRect(),
-          mAccumulatedRectLevels(0),
+        : mAccumulatedRectLevels(0),
           mVisibleRect(aOther.mVisibleRect),
           mAllowAsyncAnimation(aOther.mAllowAsyncAnimation) {}
 
@@ -2600,11 +2598,14 @@ class nsDisplayItem {
   virtual bool NeedsGeometryUpdates() const { return false; }
 
   /**
-   * Some items such as those calling into the native themed widget machinery
-   * have to be painted on the content process. In this case it is best to avoid
-   * allocating layers that serializes and forwards the work to the compositor.
+   * When this item is rendered using fallback rendering, whether it should use
+   * blob rendering (i.e. a recording DrawTarget), as opposed to a pixel-backed
+   * DrawTarget.
+   * Some items, such as those calling into the native themed widget machinery,
+   * are more efficiently painted without blob recording. Those should return
+   * false here.
    */
-  virtual bool MustPaintOnContentSide() const { return false; }
+  virtual bool ShouldUseBlobRenderingForFallback() const { return true; }
 
   /**
    * If this has a child list where the children are in the same coordinate
@@ -4299,7 +4300,9 @@ class nsDisplayThemedBackground : public nsPaintedDisplayItem {
       layers::RenderRootStateManager* aManager,
       nsDisplayListBuilder* aDisplayListBuilder) override;
 
-  bool MustPaintOnContentSide() const override { return true; }
+  bool ShouldUseBlobRenderingForFallback() const override {
+    return !XRE_IsParentProcess();
+  }
 
   /**
    * GetBounds() returns the background painting area.
@@ -4639,10 +4642,10 @@ class nsDisplayOutline final : public nsPaintedDisplayItem {
 
   NS_DISPLAY_DECL_NAME("Outline", TYPE_OUTLINE)
 
-  bool MustPaintOnContentSide() const override {
+  bool ShouldUseBlobRenderingForFallback() const override {
     MOZ_ASSERT(IsThemedOutline(),
                "The only fallback path we have is for themed outlines");
-    return true;
+    return !XRE_IsParentProcess();
   }
 
   bool CreateWebRenderCommands(
@@ -5457,7 +5460,7 @@ class nsDisplayOwnLayer : public nsDisplayWrapList {
   bool IsFixedPositionLayer() const;
   bool IsStickyPositionLayer() const;
   bool HasDynamicToolbar() const;
-  bool ShouldFixedAndStickyContentGetAnimationIds() const;
+  virtual bool ShouldGetFixedOrStickyAnimationId() { return false; }
 
   bool CreatesStackingContextHelper() override { return true; }
 
@@ -5557,6 +5560,7 @@ class nsDisplayStickyPosition : public nsDisplayOwnLayer {
 
   bool UpdateScrollData(layers::WebRenderScrollData* aData,
                         layers::WebRenderLayerScrollData* aLayerData) override;
+  bool ShouldGetFixedOrStickyAnimationId() override;
 
   const ActiveScrolledRoot* GetContainerASR() const { return mContainerASR; }
 
@@ -5642,6 +5646,7 @@ class nsDisplayFixedPosition : public nsDisplayOwnLayer {
       nsDisplayListBuilder* aDisplayListBuilder) override;
   bool UpdateScrollData(layers::WebRenderScrollData* aData,
                         layers::WebRenderLayerScrollData* aLayerData) override;
+  bool ShouldGetFixedOrStickyAnimationId() override;
   void WriteDebugInfo(std::stringstream& aStream) override;
 
  protected:
@@ -5649,7 +5654,7 @@ class nsDisplayFixedPosition : public nsDisplayOwnLayer {
   nsDisplayFixedPosition(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
                          nsDisplayList* aList,
                          const ActiveScrolledRoot* aScrollTargetASR);
-  ViewID GetScrollTargetId();
+  ViewID GetScrollTargetId() const;
 
   RefPtr<const ActiveScrolledRoot> mScrollTargetASR;
   bool mIsFixedBackground;

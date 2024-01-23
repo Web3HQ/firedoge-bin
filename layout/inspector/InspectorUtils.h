@@ -82,7 +82,7 @@ class InspectorUtils {
   // Utilities for working with CSS properties
   //
   // Returns true if the string names a property that is inherited by default.
-  static bool IsInheritedProperty(GlobalObject& aGlobal,
+  static bool IsInheritedProperty(GlobalObject& aGlobal, Document& aDocument,
                                   const nsACString& aPropertyName);
 
   // Get a list of all our supported property names.  Optionally
@@ -225,6 +225,9 @@ class InspectorUtils {
 
   static Element* ContainingBlockOf(GlobalObject&, Element&);
 
+  static void GetBlockLineCounts(GlobalObject& aGlobal, Element& aElement,
+                                 Nullable<nsTArray<uint32_t>>& aResult);
+
   MOZ_CAN_RUN_SCRIPT
   static already_AddRefed<nsINodeList> GetOverflowingChildrenOfElement(
       GlobalObject& aGlobal, Element& element);
@@ -251,6 +254,12 @@ class InspectorUtils {
   static void GetRegisteredCssHighlights(GlobalObject& aGlobal,
                                          Document& aDocument, bool aActiveOnly,
                                          nsTArray<nsString>& aResult);
+  /**
+   * Get registered CSS properties (via CSS.registerProperty or @property)
+   */
+  static void GetCSSRegisteredProperties(
+      GlobalObject& aGlobal, Document& aDocument,
+      nsTArray<InspectorCSSPropertyDefinition>& aResult);
 };
 
 }  // namespace mozilla::dom

@@ -41,16 +41,16 @@ class BlockReflowState {
           mCanHaveOverflowMarkers(false) {}
 
     // Set in the BlockReflowState constructor when reflowing a "block margin
-    // root" frame (i.e. a frame with the NS_BLOCK_MARGIN_ROOT flag set, for
-    // which margins apply by default).
+    // root" frame (i.e. a frame with any of the NS_BLOCK_BFC_STATE_BITS flag
+    // set, for which margins apply by default).
     //
     // The flag is also set when reflowing a frame whose computed BStart border
     // padding is non-zero.
     bool mIsBStartMarginRoot : 1;
 
     // Set in the BlockReflowState constructor when reflowing a "block margin
-    // root" frame (i.e. a frame with the NS_BLOCK_MARGIN_ROOT flag set, for
-    // which margins apply by default).
+    // root" frame (i.e. a frame with any of the NS_BLOCK_BFC_STATE_BITS flag
+    // set, for which margins apply by default).
     //
     // The flag is also set when reflowing a frame whose computed BEnd border
     // padding is non-zero.
@@ -79,7 +79,7 @@ class BlockReflowState {
     // Set when mLineAdjacentToTop is valid.
     bool mHasLineAdjacentToTop : 1;
 
-    // Set when the block has the equivalent of NS_BLOCK_FLOAT_MGR.
+    // Set when the block has the equivalent of NS_BLOCK_*_BFC.
     bool mBlockNeedsFloatManager : 1;
 
     // Set when nsLineLayout::LineIsEmpty was true at the end of reflowing
@@ -98,7 +98,8 @@ class BlockReflowState {
                    nsBlockFrame* aFrame, bool aBStartMarginRoot,
                    bool aBEndMarginRoot, bool aBlockNeedsFloatManager,
                    const nscoord aConsumedBSize,
-                   const nscoord aEffectiveContentBoxBSize);
+                   const nscoord aEffectiveContentBoxBSize,
+                   const nscoord aInset = 0);
 
   /**
    * Get the available reflow space (the area not occupied by floats)
@@ -243,9 +244,9 @@ class BlockReflowState {
   // the block.
 
   // The block frame that is using this object
-  nsBlockFrame* mBlock;
+  nsBlockFrame* const mBlock;
 
-  nsPresContext* mPresContext;
+  nsPresContext* const mPresContext;
 
   const ReflowInput& mReflowInput;
 
@@ -301,6 +302,10 @@ class BlockReflowState {
     return mContentArea.Size(wm).ConvertTo(aWM, wm);
   }
 
+  // Amount of inset to apply during line-breaking, used by text-wrap:balance
+  // to adjust line-breaks for more consistent lengths throughout the block.
+  nscoord mInsetForBalance;
+
   // Physical size. Use only for physical <-> logical coordinate conversion.
   nsSize mContainerSize;
   const nsSize& ContainerSize() const { return mContainerSize; }
@@ -345,7 +350,7 @@ class BlockReflowState {
 
   // mBlock's computed logical border+padding with pre-reflow skip sides applied
   // (See the constructor and nsIFrame::PreReflowBlockLevelLogicalSkipSides).
-  LogicalMargin mBorderPadding;
+  const LogicalMargin mBorderPadding;
 
   // The overflow areas of all floats placed so far
   OverflowAreas mFloatOverflowAreas;
@@ -383,7 +388,7 @@ class BlockReflowState {
   // placed, since we're on a nowrap context.
   nsTArray<nsIFrame*> mNoWrapFloats;
 
-  nscoord mMinLineHeight;
+  const nscoord mMinLineHeight;
 
   int32_t mLineNumber;
 

@@ -23,12 +23,16 @@ UNIFIED_SOURCES = [
     "TestFlatten.cpp",
     "TestForwardDecls.cpp",
     "TestOriginParser.cpp",
+    "TestOriginScope.cpp",
     "TestPersistenceType.cpp",
     "TestQMResult.cpp",
     "TestQuotaCommon.cpp",
     "TestQuotaManager.cpp",
     "TestResultExtensions.cpp",
     "TestScopedLogExtraInfo.cpp",
+    "TestStorageConnection.cpp",
+    "TestStringifyUtils.cpp",
+    "TestTelemetry.cpp",
     "TestUsageInfo.cpp",
 ]
 

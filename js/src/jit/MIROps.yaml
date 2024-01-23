@@ -156,6 +156,13 @@
 #   - attribute not specified (default): no code generated
 #   - true: allows cloning
 #
+# can_consume_float32
+# ===================
+# Indicates whether this instruction's operands can have MIRType::Float32.
+# Possible values:
+#   - attribute not specified (default): no code generated
+#   - true: canConsumeFloat32 returns true
+#
 
 # TODO(no-TI): try to remove this instruction.
 - name: Start
@@ -211,7 +218,14 @@
 
 - name: Throw
   operands:
-    ins: Value
+    value: Value
+  alias_set: custom
+  possibly_calls: true
+
+- name: ThrowWithStack
+  operands:
+    value: Value
+    stack: Value
   alias_set: custom
   possibly_calls: true
 
@@ -877,9 +891,11 @@
   operands:
     input: Int32
     base: Int32
+  arguments:
+    lowerCase: bool
   result_type: String
   movable: true
-  congruent_to: if_operands_equal
+  congruent_to: custom
   alias_set: none
 
 - name: NumberParseInt
@@ -903,6 +919,15 @@
 - name: Concat
   gen_boilerplate: false
 
+- name: LinearizeString
+  operands:
+    string: String
+  result_type: String
+  movable: true
+  congruent_to: if_operands_equal
+  # Strings are immutable, so there is no implicit dependency.
+  alias_set: none
+
 - name: LinearizeForCharAccess
   operands:
     string: String
@@ -911,6 +936,26 @@
   movable: true
   congruent_to: if_operands_equal
   # Strings are immutable, so there is no implicit dependency.
+  alias_set: none
+
+- name: LinearizeForCodePointAccess
+  operands:
+    string: String
+    index: Int32
+  result_type: String
+  movable: true
+  congruent_to: if_operands_equal
+  # Strings are immutable, so there is no implicit dependency.
+  alias_set: none
+
+- name: ToRelativeStringIndex
+  operands:
+    index: Int32
+    length: Int32
+  result_type: Int32
+  movable: true
+  folds_to: custom
+  congruent_to: if_operands_equal
   alias_set: none
 
 - name: CharCodeAt
@@ -927,26 +972,57 @@
   can_recover: true
   clone: true
 
-# Similar to CharCodeAt, but also supports out-of-bounds access.
-- name: CharCodeAtMaybeOutOfBounds
+# Similar to CharCodeAt, but returns a negative value on out-of-bounds access.
+- name: CharCodeAtOrNegative
   operands:
     string: String
     index: Int32
-  result_type: Value
+  result_type: Int32
   movable: true
   congruent_to: if_operands_equal
   # Strings are immutable, so there is no implicit dependency.
   alias_set: none
 
-# Like CharCodeAtMaybeOutOfBounds, this operation also supports out-of-bounds access.
-- name: CharAtMaybeOutOfBounds
+- name: CodePointAt
   operands:
     string: String
     index: Int32
-  result_type: String
+  result_type: Int32
+  movable: true
+  folds_to: custom
+  congruent_to: if_operands_equal
+  # Strings are immutable, so there is no implicit dependency.
+  alias_set: none
+  compute_range: custom
+  clone: true
+
+# Similar to CodePointAt, but returns a negative value on out-of-bounds access.
+- name: CodePointAtOrNegative
+  operands:
+    string: String
+    index: Int32
+  result_type: Int32
   movable: true
   congruent_to: if_operands_equal
   # Strings are immutable, so there is no implicit dependency.
+  alias_set: none
+
+# Return the input if non-negative, otherwise return NaN.
+- name: NegativeToNaN
+  operands:
+    input: Int32
+  result_type: Value
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
+
+# Return the input if non-negative, otherwise return undefined.
+- name: NegativeToUndefined
+  operands:
+    input: Int32
+  result_type: Value
+  movable: true
+  congruent_to: if_operands_equal
   alias_set: none
 
 - name: FromCharCode
@@ -959,6 +1035,26 @@
   can_recover: true
   clone: true
 
+# Similar to FromCharCode, but returns the empty string if the input is negative.
+- name: FromCharCodeEmptyIfNegative
+  operands:
+    code: Int32
+  result_type: String
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
+  can_recover: true
+  clone: true
+
+# Similar to FromCharCode, but returns the |undefined| if the input is negative.
+- name: FromCharCodeUndefinedIfNegative
+  operands:
+    code: Int32
+  result_type: Value
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
+
 - name: FromCodePoint
   operands:
     codePoint: Int32
@@ -969,7 +1065,27 @@
   alias_set: none
   clone: true
 
+- name: StringIncludes
+  operands:
+    string: String
+    searchString: String
+  result_type: Boolean
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
+  possibly_calls: true
+
 - name: StringIndexOf
+  operands:
+    string: String
+    searchString: String
+  result_type: Int32
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
+  possibly_calls: true
+
+- name: StringLastIndexOf
   operands:
     string: String
     searchString: String
@@ -1001,6 +1117,26 @@
 
 - name: StringConvertCase
   gen_boilerplate: false
+
+- name: CharCodeConvertCase
+  gen_boilerplate: false
+
+- name: StringTrimStartIndex
+  operands:
+    string: String
+  result_type: Int32
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
+
+- name: StringTrimEndIndex
+  operands:
+    string: String
+    start: Int32
+  result_type: Int32
+  movable: true
+  congruent_to: if_operands_equal
+  alias_set: none
 
 - name: StringSplit
   operands:
@@ -1192,8 +1328,10 @@
     begin: Int32
     length: Int32
   result_type: String
+  folds_to: custom
   congruent_to: if_operands_equal
   alias_set: none
+  movable: true
   can_recover: true
 
 - name: ModuleMetadata
@@ -1271,6 +1409,7 @@
   result_type: Int32
   movable: true
   congruent_to: if_operands_equal
+  folds_to: custom
   alias_set: custom
   compute_range: custom
   clone: true
@@ -1500,6 +1639,35 @@
   # might coerce the elements of the Array to strings. This coercion might
   # cause the evaluation of JavaScript code.
 
+# Object.prototype.keys. Used to elide it when possible.
+- name: ObjectKeys
+  operands:
+    object: Object
+  result_type: Object
+
+  # We can recover Object.keys on bailout as long as the object is not escaped
+  # or that the object is not mutated by any aliased calls in-between the
+  # instruction and the recovered location, as the recovered keys array might be
+  # different.
+  can_recover: custom
+
+# Used to fold Object.keys(obj).length into a single operation.
+#
+# This should not be used with a Proxy, as proxies can have a user-defined
+# `ownKeys` function which can have arbitrary outputs.
+#
+# This MIR node is created by folding an MObjectKeys with an MArrayLength, as
+# part of MArrayLength::foldsTo.
+- name: ObjectKeysLength
+  operands:
+    object: Object
+  result_type: Int32
+  movable: false
+  congruent_to: if_operands_equal
+  alias_set: custom
+  compute_range: custom
+  clone: true
+
 - name: LoadUnboxedScalar
   gen_boilerplate: false
 
@@ -1574,6 +1742,15 @@
   congruent_to: custom
   alias_set: custom
   might_alias: custom
+
+- name: GuardFuse
+  arguments:
+    fuseIndex: RealmFuses::FuseIndex
+  result_type: None
+  guard: true
+  movable: true
+  congruent_to: custom
+  alias_set: custom
 
 - name: GuardMultipleShapes
   operands:
@@ -2157,6 +2334,11 @@
     completionKind: uint8_t
   possibly_calls: true
 
+- name: OptimizeGetIteratorCache
+  operands:
+    value: Value
+  result_type: Boolean
+
 - name: InCache
   gen_boilerplate: false
 
@@ -2302,6 +2484,8 @@
   folds_to: custom
   congruent_to: if_operands_equal
   alias_set: none
+  type_policy: none
+  can_consume_float32: true
 
 - name: HasClass
   gen_boilerplate: false
@@ -2350,9 +2534,14 @@
 - name: AsyncResolve
   operands:
     generator: Object
-    valueOrReason: Value
-  arguments:
-    resolveKind: AsyncFunctionResolveKind
+    value: Value
+  result_type: Object
+
+- name: AsyncReject
+  operands:
+    generator: Object
+    reason: Value
+    stack: Value
   result_type: Object
 
 # Returns from this function to the previous caller; this looks like a regular
@@ -2918,6 +3107,17 @@
 - name: WasmBoundsCheck
   gen_boilerplate: false
 
+- name: WasmBoundsCheckRange32
+  operands:
+    index: Int32
+    length: Int32
+    limit: Int32
+  arguments:
+    bytecodeOffset: wasm::BytecodeOffset
+  result_type: Int32
+  congruent_to: if_operands_equal
+  type_policy: none
+
 - name: WasmExtendU32Index
   operands:
     input: Int32
@@ -3134,6 +3334,9 @@
   gen_boilerplate: false
 
 - name: WasmRefIsSubtypeOfAbstract
+  gen_boilerplate: false
+
+- name: WasmNewStructObject
   gen_boilerplate: false
 
 #ifdef FUZZING_JS_FUZZILLI

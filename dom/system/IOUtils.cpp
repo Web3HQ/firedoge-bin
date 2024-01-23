@@ -9,8 +9,9 @@
 #include <cstdint>
 
 #include "ErrorList.h"
+#include "TypedArray.h"
 #include "js/ArrayBuffer.h"
-#include "js/ColumnNumber.h"  // JS::ColumnNumberZeroOrigin
+#include "js/ColumnNumber.h"  // JS::ColumnNumberOneOrigin
 #include "js/JSON.h"
 #include "js/Utility.h"
 #include "js/experimental/TypedData.h"
@@ -29,6 +30,7 @@
 #include "mozilla/Span.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/TextUtils.h"
+#include "mozilla/Try.h"
 #include "mozilla/Unused.h"
 #include "mozilla/Utf8.h"
 #include "mozilla/dom/BindingUtils.h"
@@ -291,7 +293,7 @@ static bool AssertParentProcessWithCallerLocationImpl(GlobalObject& aGlobal,
 
   JS::AutoFilename scriptFilename;
   uint32_t lineNo = 0;
-  JS::ColumnNumberZeroOrigin colNo;
+  JS::ColumnNumberOneOrigin colNo;
 
   NS_ENSURE_TRUE(
       JS::DescribeScriptedCaller(cx, &scriptFilename, &lineNo, &colNo), false);
@@ -299,7 +301,7 @@ static bool AssertParentProcessWithCallerLocationImpl(GlobalObject& aGlobal,
   NS_ENSURE_TRUE(scriptFilename.get(), false);
 
   reason.AppendPrintf(" Called from %s:%d:%d.", scriptFilename.get(), lineNo,
-                      colNo.zeroOriginValue());
+                      colNo.oneOriginValue());
   return false;
 }
 
@@ -526,9 +528,7 @@ already_AddRefed<Promise> IOUtils::Write(GlobalObject& aGlobal,
         nsCOMPtr<nsIFile> file = new nsLocalFile();
         REJECT_IF_INIT_PATH_FAILED(file, aPath, promise);
 
-        aData.ComputeState();
-        auto buf =
-            Buffer<uint8_t>::CopyFrom(Span(aData.Data(), aData.Length()));
+        Maybe<Buffer<uint8_t>> buf = aData.CreateFromData<Buffer<uint8_t>>();
         if (buf.isNothing()) {
           promise->MaybeRejectWithOperationError(
               "Out of memory: Could not allocate buffer while writing to file");
@@ -543,7 +543,7 @@ already_AddRefed<Promise> IOUtils::Write(GlobalObject& aGlobal,
 
         DispatchAndResolve<uint32_t>(
             state->mEventQueue, promise,
-            [file = std::move(file), buf = std::move(*buf),
+            [file = std::move(file), buf = buf.extract(),
              opts = opts.unwrap()]() { return WriteSync(file, buf, opts); });
       });
 }
@@ -574,11 +574,6 @@ already_AddRefed<Promise> IOUtils::WriteUTF8(GlobalObject& aGlobal,
       });
 }
 
-static bool AppendJsonAsUtf8(const char16_t* aData, uint32_t aLen, void* aStr) {
-  nsCString* str = static_cast<nsCString*>(aStr);
-  return AppendUTF16toUTF8(Span<const char16_t>(aData, aLen), *str, fallible);
-}
-
 /* static */
 already_AddRefed<Promise> IOUtils::WriteJSON(GlobalObject& aGlobal,
                                              const nsAString& aPath,
@@ -605,10 +600,9 @@ already_AddRefed<Promise> IOUtils::WriteJSON(GlobalObject& aGlobal,
 
         JSContext* cx = aGlobal.Context();
         JS::Rooted<JS::Value> rootedValue(cx, aValue);
-        nsCString utf8Str;
-
-        if (!JS_Stringify(cx, &rootedValue, nullptr, JS::NullHandleValue,
-                          AppendJsonAsUtf8, &utf8Str)) {
+        nsString string;
+        if (!nsContentUtils::StringifyJSON(cx, aValue, string,
+                                           UndefinedIsNullStringLiteral)) {
           JS::Rooted<JS::Value> exn(cx, JS::UndefinedValue());
           if (JS_GetPendingException(cx, &exn)) {
             JS_ClearPendingException(cx);
@@ -624,8 +618,12 @@ already_AddRefed<Promise> IOUtils::WriteJSON(GlobalObject& aGlobal,
 
         DispatchAndResolve<uint32_t>(
             state->mEventQueue, promise,
-            [file = std::move(file), utf8Str = std::move(utf8Str),
-             opts = opts.unwrap()]() {
+            [file = std::move(file), string = std::move(string),
+             opts = opts.unwrap()]() -> Result<uint32_t, IOError> {
+              nsAutoCString utf8Str;
+              if (!CopyUTF16toUTF8(string, utf8Str, fallible)) {
+                return Err(IOError(NS_ERROR_OUT_OF_MEMORY));
+              }
               return WriteSync(file, AsBytes(Span(utf8Str)), opts);
             });
       });
@@ -1033,10 +1031,9 @@ already_AddRefed<Promise> IOUtils::SetMacXAttr(GlobalObject& aGlobal,
         nsCOMPtr<nsIFile> file = new nsLocalFile();
         REJECT_IF_INIT_PATH_FAILED(file, aPath, promise);
 
-        aValue.ComputeState();
         nsTArray<uint8_t> value;
 
-        if (!value.AppendElements(aValue.Data(), aValue.Length(), fallible)) {
+        if (!aValue.AppendDataTo(value)) {
           RejectJSPromise(
               promise,
               IOError(NS_ERROR_OUT_OF_MEMORY)
@@ -2777,51 +2774,51 @@ void SyncReadFile::ReadBytesInto(const Uint8Array& aDestArray,
     return aRv.ThrowOperationError("SyncReadFile is closed");
   }
 
-  aDestArray.ComputeState();
-
-  auto rangeEnd = CheckedInt64(aOffset) + aDestArray.Length();
-  if (!rangeEnd.isValid()) {
-    return aRv.ThrowOperationError("Requested range overflows i64");
-  }
-
-  if (rangeEnd.value() > mSize) {
-    return aRv.ThrowOperationError(
-        "Requested range overflows SyncReadFile size");
-  }
-
-  uint32_t readLen{aDestArray.Length()};
-  if (readLen == 0) {
-    return;
-  }
-
-  if (nsresult rv = mStream->Seek(PR_SEEK_SET, aOffset); NS_FAILED(rv)) {
-    return aRv.ThrowOperationError(
-        FormatErrorMessage(rv, "Could not seek to position %lld", aOffset));
-  }
-
-  Span<char> toRead(reinterpret_cast<char*>(aDestArray.Data()), readLen);
-
-  uint32_t totalRead = 0;
-  while (totalRead != readLen) {
-    // Read no more than INT32_MAX on each call to mStream->Read, otherwise it
-    // returns an error.
-    uint32_t bytesToReadThisChunk =
-        std::min<uint32_t>(readLen - totalRead, INT32_MAX);
-
-    uint32_t bytesRead = 0;
-    if (nsresult rv =
-            mStream->Read(toRead.Elements(), bytesToReadThisChunk, &bytesRead);
-        NS_FAILED(rv)) {
-      return aRv.ThrowOperationError(FormatErrorMessage(
-          rv, "Encountered an unexpected error while reading file stream"));
+  aDestArray.ProcessFixedData([&](const Span<uint8_t>& aData) {
+    auto rangeEnd = CheckedInt64(aOffset) + aData.Length();
+    if (!rangeEnd.isValid()) {
+      return aRv.ThrowOperationError("Requested range overflows i64");
     }
-    if (bytesRead == 0) {
+
+    if (rangeEnd.value() > mSize) {
       return aRv.ThrowOperationError(
-          "Reading stopped before the entire array was filled");
+          "Requested range overflows SyncReadFile size");
     }
-    totalRead += bytesRead;
-    toRead = toRead.From(bytesRead);
-  }
+
+    size_t readLen{aData.Length()};
+    if (readLen == 0) {
+      return;
+    }
+
+    if (nsresult rv = mStream->Seek(PR_SEEK_SET, aOffset); NS_FAILED(rv)) {
+      return aRv.ThrowOperationError(
+          FormatErrorMessage(rv, "Could not seek to position %lld", aOffset));
+    }
+
+    Span<char> toRead = AsWritableChars(aData);
+
+    size_t totalRead = 0;
+    while (totalRead != readLen) {
+      // Read no more than INT32_MAX on each call to mStream->Read,
+      // otherwise it returns an error.
+      uint32_t bytesToReadThisChunk =
+          std::min(readLen - totalRead, size_t(INT32_MAX));
+
+      uint32_t bytesRead = 0;
+      if (nsresult rv = mStream->Read(toRead.Elements(), bytesToReadThisChunk,
+                                      &bytesRead);
+          NS_FAILED(rv)) {
+        return aRv.ThrowOperationError(FormatErrorMessage(
+            rv, "Encountered an unexpected error while reading file stream"));
+      }
+      if (bytesRead == 0) {
+        return aRv.ThrowOperationError(
+            "Reading stopped before the entire array was filled");
+      }
+      totalRead += bytesRead;
+      toRead = toRead.From(bytesRead);
+    }
+  });
 }
 
 void SyncReadFile::Close() { mStream = nullptr; }
@@ -2834,10 +2831,9 @@ static nsCString FromUnixString(const IOUtils::UnixString& aString) {
     return aString.GetAsUTF8String();
   }
   if (aString.IsUint8Array()) {
-    const auto& u8a = aString.GetAsUint8Array();
-    u8a.ComputeState();
-    // Cast to deal with char signedness
-    return nsCString(reinterpret_cast<const char*>(u8a.Data()), u8a.Length());
+    nsCString data;
+    Unused << aString.GetAsUint8Array().AppendDataTo(data);
+    return data;
   }
   MOZ_CRASH("unreachable");
 }
@@ -2890,7 +2886,7 @@ uint32_t IOUtils::LaunchProcess(GlobalObject& aGlobal,
   static_assert(sizeof(pid) <= sizeof(uint32_t),
                 "WebIDL long should be large enough for a pid");
   Result<Ok, mozilla::ipc::LaunchError> err =
-      base::LaunchApp(argv, options, &pid);
+      base::LaunchApp(argv, std::move(options), &pid);
   if (err.isErr()) {
     aRv.Throw(NS_ERROR_FAILURE);
     return 0;

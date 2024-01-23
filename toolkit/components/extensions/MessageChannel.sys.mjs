@@ -4,6 +4,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+// @ts-nocheck TODO bug 1580774: Remove this file and its uses.
+
 /**
  * This module provides wrappers around standard message managers to
  * simplify bidirectional communication. It currently allows a caller to
@@ -127,9 +129,6 @@ const LOW_PRIORITY_TIMEOUT_MS = 250;
 const MESSAGE_MESSAGES = "MessageChannel:Messages";
 const MESSAGE_RESPONSE = "MessageChannel:Response";
 
-// ESLint can't tell that these are referenced, so tell it that they're
-// exported to make it happy.
-/* exported _deferredResult, _makeDeferred */
 var _deferredResult;
 var _makeDeferred = (resolve, reject) => {
   // We use arrow functions here and refer to the outer variables via

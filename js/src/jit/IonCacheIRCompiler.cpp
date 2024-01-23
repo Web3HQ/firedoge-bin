@@ -54,7 +54,8 @@ IonCacheIRCompiler::IonCacheIRCompiler(JSContext* cx, TempAllocator& alloc,
       ic_(ic),
       ionScript_(ionScript),
       savedLiveRegs_(false),
-      localTracingSlots_(0) {
+      localTracingSlots_(0),
+      perfSpewer_(ic->pc()) {
   MOZ_ASSERT(ic_);
   MOZ_ASSERT(ionScript_);
 }
@@ -119,7 +120,8 @@ void CacheRegisterAllocator::saveIonLiveRegisters(MacroAssembler& masm,
   // Step 2. Figure out the size of our live regs.  This is consistent with
   // the fact that we're using storeRegsInMask to generate the save code and
   // PopRegsInMask to generate the restore code.
-  size_t sizeOfLiveRegsInBytes = masm.PushRegsInMaskSizeInBytes(liveRegs);
+  size_t sizeOfLiveRegsInBytes =
+      MacroAssembler::PushRegsInMaskSizeInBytes(liveRegs);
 
   MOZ_ASSERT(sizeOfLiveRegsInBytes > 0);
 
@@ -545,6 +547,21 @@ bool IonCacheIRCompiler::init() {
       allocator.initInputLocation(0, ic->iter(), JSVAL_TYPE_OBJECT);
       break;
     }
+    case CacheKind::OptimizeGetIterator: {
+      auto* ic = ic_->asOptimizeGetIteratorIC();
+      Register output = ic->output();
+
+      available.add(output);
+      available.add(ic->temp());
+
+      liveRegs_.emplace(ic->liveRegs());
+      outputUnchecked_.emplace(
+          TypedOrValueRegister(MIRType::Boolean, AnyRegister(output)));
+
+      MOZ_ASSERT(numInputs == 1);
+      allocator.initInputLocation(0, ic->value());
+      break;
+    }
     case CacheKind::Call:
     case CacheKind::TypeOf:
     case CacheKind::ToBool:
@@ -645,6 +662,7 @@ void IonCacheIRCompiler::assertFloatRegisterAvailable(FloatRegister reg) {
     case CacheKind::ToPropertyKey:
     case CacheKind::OptimizeSpreadCall:
     case CacheKind::CloseIter:
+    case CacheKind::OptimizeGetIterator:
       MOZ_CRASH("No float registers available");
     case CacheKind::SetProp:
     case CacheKind::SetElem:
@@ -1139,7 +1157,8 @@ bool IonCacheIRCompiler::emitCallNativeGetterResult(
   masm.passABIArg(argJSContext);
   masm.passABIArg(argUintN);
   masm.passABIArg(argVp);
-  masm.callWithABI(DynamicFunction<JSNative>(target->native()), MoveOp::GENERAL,
+  masm.callWithABI(DynamicFunction<JSNative>(target->native()),
+                   ABIType::General,
                    CheckUnsafeCallWithABI::DontCheckHasExitFrame);
 
   // Test for failure.
@@ -1258,7 +1277,7 @@ bool IonCacheIRCompiler::emitProxyGetResult(ObjOperandId objId,
   masm.passABIArg(argId);
   masm.passABIArg(argVp);
   masm.callWithABI<Fn, ProxyGetProperty>(
-      MoveOp::GENERAL, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
+      ABIType::General, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
 
   // Test for failure.
   masm.branchIfFalseBool(ReturnReg, masm.exceptionLabel());
@@ -1511,11 +1530,7 @@ bool IonCacheIRCompiler::emitLoadStringCharResult(StringOperandId strId,
 
   // Load StaticString for this char. For larger code units perform a VM call.
   Label vmCall;
-  masm.boundsCheck32PowerOfTwo(scratch1, StaticStrings::UNIT_STATIC_LIMIT,
-                               &vmCall);
-  masm.movePtr(ImmPtr(&cx_->staticStrings().unitStaticTable), scratch2);
-  masm.loadPtr(BaseIndex(scratch2, scratch1, ScalePointer), scratch2);
-
+  masm.lookupStaticString(scratch1, scratch2, cx_->staticStrings(), &vmCall);
   masm.jump(&done);
 
   if (handleOOB) {
@@ -1619,7 +1634,8 @@ bool IonCacheIRCompiler::emitCallNativeSetter(ObjOperandId receiverId,
   masm.passABIArg(argJSContext);
   masm.passABIArg(argUintN);
   masm.passABIArg(argVp);
-  masm.callWithABI(DynamicFunction<JSNative>(target->native()), MoveOp::GENERAL,
+  masm.callWithABI(DynamicFunction<JSNative>(target->native()),
+                   ABIType::General,
                    CheckUnsafeCallWithABI::DontCheckHasExitFrame);
 
   // Test for failure.
@@ -1941,12 +1957,12 @@ void IonIC::attachCacheIRStub(JSContext* cx, const CacheIRWriter& writer,
 
   size_t bytesNeeded = stubInfo->stubDataOffset() + stubInfo->stubDataSize();
 
-  // Allocate the IonICStub in the optimized stub space. Ion stubs and
+  // Allocate the IonICStub in the JitZone's stub space. Ion stubs and
   // CacheIRStubInfo instances for Ion stubs can be purged on GC. That's okay
   // because the stub code is rooted separately when we make a VM call, and
   // stub code should never access the IonICStub after making a VM call. The
   // IonICStub::poison method poisons the stub to catch bugs in this area.
-  ICStubSpace* stubSpace = cx->zone()->jitZone()->optimizedStubSpace();
+  ICStubSpace* stubSpace = cx->zone()->jitZone()->stubSpace();
   void* newStubMem = stubSpace->alloc(bytesNeeded);
   if (!newStubMem) {
     return;
@@ -2299,5 +2315,11 @@ bool IonCacheIRCompiler::emitRegExpBuiltinExecTestResult(
 
 bool IonCacheIRCompiler::emitRegExpHasCaptureGroupsResult(
     ObjOperandId regexpId, StringOperandId inputId) {
+  MOZ_CRASH("Call ICs not used in ion");
+}
+
+bool IonCacheIRCompiler::emitLoadStringAtResult(StringOperandId strId,
+                                                Int32OperandId indexId,
+                                                bool handleOOB) {
   MOZ_CRASH("Call ICs not used in ion");
 }

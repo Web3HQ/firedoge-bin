@@ -41,6 +41,7 @@ TEST_HARNESS_BINS = [
     "crashinject",
     "geckodriver",
     "http3server",
+    "content_analysis_sdk_agent",
     "minidumpwriter",
     "pk12util",
     "screenshot",
@@ -108,7 +109,7 @@ ARCHIVE_FILES = {
             "source": buildconfig.topsrcdir,
             "base": "",
             "manifests": [
-                "testing/marionette/harness/marionette_harness/tests/unit-tests.ini"
+                "testing/marionette/harness/marionette_harness/tests/unit-tests.toml"
             ],
             # We also need the manifests and harness_unit tests
             "pattern": "testing/marionette/harness/marionette_harness/tests/**",
@@ -250,7 +251,7 @@ ARCHIVE_FILES = {
         {
             "source": buildconfig.topsrcdir,
             "base": "testing",
-            "pattern": "cppunittest.ini",
+            "pattern": "cppunittest.toml",
             "dest": "cppunittest",
         },
         {
@@ -286,6 +287,13 @@ ARCHIVE_FILES = {
             "base": "dist/xpi-stage",
             "pattern": "specialpowers/**",
             "dest": "mochitest/extensions",
+        },
+        # Needed by Windows a11y browser tests.
+        {
+            "source": buildconfig.topobjdir,
+            "base": "accessible/interfaces/ia2",
+            "pattern": "IA2Typelib.tlb",
+            "dest": "mochitest",
         },
     ],
     "mozharness": [
@@ -331,8 +339,18 @@ ARCHIVE_FILES = {
         },
         {
             "source": buildconfig.topsrcdir,
+            "base": "testing/mozbase/mozsystemmonitor",
+            "pattern": "mozsystemmonitor/**",
+        },
+        {
+            "source": buildconfig.topsrcdir,
             "base": "third_party/python/six",
             "pattern": "six.py",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "third_party/python/toml",
+            "pattern": "**",
         },
         {
             "source": buildconfig.topsrcdir,
@@ -447,8 +465,10 @@ ARCHIVE_FILES = {
                 "chrome/**",
                 "chrome.manifest",
                 "components/**",
+                "content_analysis_sdk_agent",
                 "http3server",
                 "*.ini",
+                "*.toml",
                 "localization/**",
                 "modules/**",
                 "update.locale",
@@ -689,7 +709,7 @@ if buildconfig.substs.get("commtopsrcdir"):
     marionette_comm = {
         "source": commtopsrcdir,
         "base": "",
-        "manifest": "testing/marionette/unit-tests.ini",
+        "manifest": "testing/marionette/unit-tests.toml",
         "dest": "marionette/tests/comm",
     }
     ARCHIVE_FILES["common"].append(marionette_comm)
@@ -808,7 +828,7 @@ def find_manifest_dirs(topsrcdir, manifests):
     for p in manifests:
         p = os.path.join(topsrcdir, p)
 
-        if p.endswith(".ini"):
+        if p.endswith(".ini") or p.endswith(".toml"):
             test_manifest = TestManifest()
             test_manifest.read(p)
             dirs |= set([os.path.dirname(m) for m in test_manifest.manifests()])

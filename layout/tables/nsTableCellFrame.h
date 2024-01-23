@@ -101,9 +101,9 @@ class nsTableCellFrame : public nsContainerFrame,
   void BuildDisplayList(nsDisplayListBuilder* aBuilder,
                         const nsDisplayListSet& aLists) override;
 
-  virtual nsresult ProcessBorders(nsTableFrame* aFrame,
-                                  nsDisplayListBuilder* aBuilder,
-                                  const nsDisplayListSet& aLists);
+  virtual void ProcessBorders(nsTableFrame* aFrame,
+                              nsDisplayListBuilder* aBuilder,
+                              const nsDisplayListSet& aLists);
 
   nscoord GetMinISize(gfxContext* aRenderingContext) override;
   nscoord GetPrefISize(gfxContext* aRenderingContext) override;
@@ -209,32 +209,17 @@ class nsTableCellFrame : public nsContainerFrame,
 
   nsTableCellFrame* GetNextCell() const {
     nsIFrame* sibling = GetNextSibling();
-#ifdef DEBUG
-    if (sibling) {
-      nsTableCellFrame* cellFrame = do_QueryFrame(sibling);
-      MOZ_ASSERT(cellFrame, "How do we have a non-cell sibling?");
-    }
-#endif  // DEBUG
+    MOZ_ASSERT(
+        !sibling || static_cast<nsTableCellFrame*>(do_QueryFrame(sibling)),
+        "How do we have a non-cell sibling?");
     return static_cast<nsTableCellFrame*>(sibling);
   }
 
   virtual LogicalMargin GetBorderWidth(WritingMode aWM) const;
 
-  virtual ImgDrawResult PaintBackground(gfxContext& aRenderingContext,
-                                        const nsRect& aDirtyRect, nsPoint aPt,
-                                        uint32_t aFlags);
-
   void DecorateForSelection(DrawTarget* aDrawTarget, nsPoint aPt);
 
   bool ComputeCustomOverflow(mozilla::OverflowAreas& aOverflowAreas) override;
-
-  bool IsFrameOfType(uint32_t aFlags) const override {
-    if (aFlags & eSupportsAspectRatio) {
-      return false;
-    }
-
-    return nsContainerFrame::IsFrameOfType(aFlags & ~(nsIFrame::eTablePart));
-  }
 
   void InvalidateFrame(uint32_t aDisplayItemKey = 0,
                        bool aRebuildDisplayItems = true) override;
@@ -327,13 +312,9 @@ class nsBCTableCellFrame final : public nsTableCellFrame {
   nsresult GetFrameName(nsAString& aResult) const override;
 #endif
 
-  ImgDrawResult PaintBackground(gfxContext& aRenderingContext,
-                                const nsRect& aDirtyRect, nsPoint aPt,
-                                uint32_t aFlags) override;
-
  private:
   // These are the entire width of the border (the cell edge contains only
-  // the inner half, per the macros in nsTablePainter.h).
+  // the inner half).
   BCPixelSize mBStartBorder;
   BCPixelSize mIEndBorder;
   BCPixelSize mBEndBorder;
@@ -343,12 +324,9 @@ class nsBCTableCellFrame final : public nsTableCellFrame {
 // Implemented here because that's a sane-ish way to make the includes work out.
 inline nsTableCellFrame* nsTableRowFrame::GetFirstCell() const {
   nsIFrame* firstChild = mFrames.FirstChild();
-#ifdef DEBUG
-  if (firstChild) {
-    nsTableCellFrame* cellFrame = do_QueryFrame(firstChild);
-    MOZ_ASSERT(cellFrame, "How do we have a non-cell sibling?");
-  }
-#endif  // DEBUG
+  MOZ_ASSERT(
+      !firstChild || static_cast<nsTableCellFrame*>(do_QueryFrame(firstChild)),
+      "How do we have a non-cell child?");
   return static_cast<nsTableCellFrame*>(firstChild);
 }
 

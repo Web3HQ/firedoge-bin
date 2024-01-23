@@ -26,8 +26,10 @@
 #include "mozilla/dom/MediaController.h"
 #include "mozilla/dom/WindowGlobalChild.h"
 #include "mozilla/dom/ChromeUtils.h"
+#include "mozilla/dom/UseCounterMetrics.h"
 #include "mozilla/dom/ipc/IdType.h"
 #include "mozilla/dom/ipc/StructuredCloneData.h"
+#include "mozilla/glean/GleanMetrics.h"
 #include "mozilla/Components.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/ServoCSSParser.h"
@@ -36,12 +38,15 @@
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/Variant.h"
+#include "mozilla/ipc/ProtocolUtils.h"
 #include "nsContentUtils.h"
 #include "nsDocShell.h"
 #include "nsDocShellLoadState.h"
 #include "nsError.h"
 #include "nsFrameLoader.h"
 #include "nsFrameLoaderOwner.h"
+#include "nsICookieManager.h"
+#include "nsICookieService.h"
 #include "nsQueryObject.h"
 #include "nsNetUtil.h"
 #include "nsSandboxFlags.h"
@@ -55,6 +60,8 @@
 #include "nsISharePicker.h"
 #include "nsIURIMutator.h"
 #include "nsIWebProgressListener.h"
+#include "nsScriptSecurityManager.h"
+#include "nsIOService.h"
 
 #include "mozilla/dom/DOMException.h"
 #include "mozilla/dom/DOMExceptionBinding.h"
@@ -63,9 +70,14 @@
 #include "mozilla/dom/JSWindowActorBinding.h"
 #include "mozilla/dom/JSWindowActorParent.h"
 
+#include "mozilla/net/NeckoParent.h"
+#include "mozilla/net/PCookieServiceParent.h"
+#include "mozilla/net/CookieServiceParent.h"
+
 #include "SessionStoreFunctions.h"
 #include "nsIXPConnect.h"
 #include "nsImportModule.h"
+#include "nsIXULRuntime.h"
 
 #include "mozilla/dom/PBackgroundSessionStorageCache.h"
 
@@ -82,7 +94,6 @@ WindowGlobalParent::WindowGlobalParent(
     uint64_t aOuterWindowId, FieldValues&& aInit)
     : WindowContext(aBrowsingContext, aInnerWindowId, aOuterWindowId,
                     std::move(aInit)),
-      mIsInitialDocument(false),
       mSandboxFlags(0),
       mDocumentHasLoaded(false),
       mDocumentHasUserInteracted(false),
@@ -109,7 +120,7 @@ already_AddRefed<WindowGlobalParent> WindowGlobalParent::CreateDisconnected(
                              aInit.context().mOuterWindowId, std::move(fields));
   wgp->mDocumentPrincipal = aInit.principal();
   wgp->mDocumentURI = aInit.documentURI();
-  wgp->mIsInitialDocument = aInit.isInitialDocument();
+  wgp->mIsInitialDocument = Some(aInit.isInitialDocument());
   wgp->mBlockAllMixedContent = aInit.blockAllMixedContent();
   wgp->mUpgradeInsecureRequests = aInit.upgradeInsecureRequests();
   wgp->mSandboxFlags = aInit.sandboxFlags();
@@ -370,9 +381,48 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvInternalLoad(
   return IPC_OK();
 }
 
-IPCResult WindowGlobalParent::RecvUpdateDocumentURI(nsIURI* aURI) {
+IPCResult WindowGlobalParent::RecvUpdateDocumentURI(NotNull<nsIURI*> aURI) {
   // XXX(nika): Assert that the URI change was one which makes sense (either
-  // about:blank -> a real URI, or a legal push/popstate URI change?)
+  // about:blank -> a real URI, or a legal push/popstate URI change):
+  if (StaticPrefs::dom_security_setdocumenturi()) {
+    nsAutoCString scheme;
+    if (NS_FAILED(aURI->GetScheme(scheme))) {
+      return IPC_FAIL(this, "Setting DocumentURI without scheme.");
+    }
+
+    nsCOMPtr<nsIIOService> ios = do_GetIOService();
+    if (!ios) {
+      return IPC_FAIL(this, "Cannot get IOService");
+    }
+    nsCOMPtr<nsIProtocolHandler> handler;
+    ios->GetProtocolHandler(scheme.get(), getter_AddRefs(handler));
+    if (!handler) {
+      return IPC_FAIL(this, "Setting DocumentURI with unknown protocol.");
+    }
+
+    auto isLoadableViaInternet = [](nsIURI* uri) {
+      return (uri && (net::SchemeIsHTTP(uri) || net::SchemeIsHTTPS(uri)));
+    };
+
+    if (isLoadableViaInternet(aURI)) {
+      nsCOMPtr<nsIURI> principalURI = mDocumentPrincipal->GetURI();
+      if (mDocumentPrincipal->GetIsNullPrincipal()) {
+        nsCOMPtr<nsIPrincipal> precursor =
+            mDocumentPrincipal->GetPrecursorPrincipal();
+        if (precursor) {
+          principalURI = precursor->GetURI();
+        }
+      }
+
+      if (isLoadableViaInternet(principalURI) &&
+          !nsScriptSecurityManager::SecurityCompareURIs(principalURI, aURI)) {
+        return IPC_FAIL(this,
+                        "Setting DocumentURI with a different Origin than "
+                        "principal URI");
+      }
+    }
+  }
+
   mDocumentURI = aURI;
   return IPC_OK();
 }
@@ -539,13 +589,14 @@ void WindowGlobalParent::NotifyContentBlockingEvent(
     const nsACString& aTrackingOrigin,
     const nsTArray<nsCString>& aTrackingFullHashes,
     const Maybe<ContentBlockingNotifier::StorageAccessPermissionGrantedReason>&
-        aReason) {
+        aReason,
+    const Maybe<ContentBlockingNotifier::CanvasFingerprinter>&
+        aCanvasFingerprinter,
+    const Maybe<bool> aCanvasFingerprinterKnownText) {
   MOZ_ASSERT(NS_IsMainThread());
   DebugOnly<bool> isCookiesBlocked =
       aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_TRACKER ||
-      aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER ||
-      (aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_FOREIGN &&
-       StaticPrefs::network_cookie_rejectForeignWithExceptions_enabled());
+      aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER;
   MOZ_ASSERT_IF(aBlocked, aReason.isNothing());
   MOZ_ASSERT_IF(!isCookiesBlocked, aReason.isNothing());
   MOZ_ASSERT_IF(isCookiesBlocked && !aBlocked, aReason.isSome());
@@ -559,7 +610,8 @@ void WindowGlobalParent::NotifyContentBlockingEvent(
   }
 
   Maybe<uint32_t> event = GetContentBlockingLog()->RecordLogParent(
-      aTrackingOrigin, aEvent, aBlocked, aReason, aTrackingFullHashes);
+      aTrackingOrigin, aEvent, aBlocked, aReason, aTrackingFullHashes,
+      aCanvasFingerprinter, aCanvasFingerprinterKnownText);
 
   // Notify the OnContentBlockingEvent if necessary.
   if (event) {
@@ -601,6 +653,11 @@ already_AddRefed<JSActor> WindowGlobalParent::InitJSActor(
 }
 
 bool WindowGlobalParent::IsCurrentGlobal() {
+  if (mozilla::SessionHistoryInParent() && BrowsingContext() &&
+      BrowsingContext()->IsInBFCache()) {
+    return false;
+  }
+
   return CanSend() && BrowsingContext()->GetCurrentWindowGlobal() == this;
 }
 
@@ -714,7 +771,7 @@ class CheckPermitUnloadRequest final : public PromiseNativeHandler,
                                        public nsITimerCallback {
  public:
   CheckPermitUnloadRequest(WindowGlobalParent* aWGP, bool aHasInProcessBlocker,
-                           nsIContentViewer::PermitUnloadAction aAction,
+                           nsIDocumentViewer::PermitUnloadAction aAction,
                            std::function<void(bool)>&& aResolver)
       : mResolver(std::move(aResolver)),
         mWGP(aWGP),
@@ -800,10 +857,10 @@ class CheckPermitUnloadRequest final : public PromiseNativeHandler,
 
     auto action = mAction;
     if (StaticPrefs::dom_disable_beforeunload()) {
-      action = nsIContentViewer::eDontPromptAndUnload;
+      action = nsIDocumentViewer::eDontPromptAndUnload;
     }
-    if (action != nsIContentViewer::ePrompt) {
-      SendReply(action == nsIContentViewer::eDontPromptAndUnload);
+    if (action != nsIDocumentViewer::ePrompt) {
+      SendReply(action == nsIDocumentViewer::eDontPromptAndUnload);
       return;
     }
 
@@ -872,7 +929,7 @@ class CheckPermitUnloadRequest final : public PromiseNativeHandler,
 
   uint32_t mPendingRequests = 0;
 
-  nsIContentViewer::PermitUnloadAction mAction;
+  nsIDocumentViewer::PermitUnloadAction mAction;
 
   State mState = State::UNINITIALIZED;
 
@@ -908,7 +965,7 @@ already_AddRefed<Promise> WindowGlobalParent::PermitUnload(
 
   auto request = MakeRefPtr<CheckPermitUnloadRequest>(
       this, /* aHasInProcessBlocker */ false,
-      nsIContentViewer::PermitUnloadAction(aAction),
+      nsIDocumentViewer::PermitUnloadAction(aAction),
       [promise](bool aAllow) { promise->MaybeResolve(aAllow); });
   request->Run(/* aIgnoreProcess */ nullptr, aTimeout);
 
@@ -918,7 +975,7 @@ already_AddRefed<Promise> WindowGlobalParent::PermitUnload(
 void WindowGlobalParent::PermitUnload(std::function<void(bool)>&& aResolver) {
   RefPtr<CheckPermitUnloadRequest> request = new CheckPermitUnloadRequest(
       this, /* aHasInProcessBlocker */ false,
-      nsIContentViewer::PermitUnloadAction::ePrompt, std::move(aResolver));
+      nsIDocumentViewer::PermitUnloadAction::ePrompt, std::move(aResolver));
   request->Run();
 }
 
@@ -1102,6 +1159,7 @@ void WindowGlobalParent::FinishAccumulatingPageUseCounters() {
     }
 
     Telemetry::Accumulate(Telemetry::TOP_LEVEL_CONTENT_DOCUMENTS_DESTROYED, 1);
+    glean::use_counter::top_level_content_documents_destroyed.Add();
 
     bool any = false;
     for (int32_t c = 0; c < eUseCounter_Count; ++c) {
@@ -1117,6 +1175,7 @@ void WindowGlobalParent::FinishAccumulatingPageUseCounters() {
                       Telemetry::GetHistogramName(id), urlForLogging->get());
       }
       Telemetry::Accumulate(id, 1);
+      IncrementUseCounter(uc, /* aIsPage = */ true);
     }
 
     if (!any) {
@@ -1258,7 +1317,7 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvSetSingleChannelId(
 }
 
 mozilla::ipc::IPCResult WindowGlobalParent::RecvSetDocumentDomain(
-    nsIURI* aDomain) {
+    NotNull<nsIURI*> aDomain) {
   if (mSandboxFlags & SANDBOXED_DOMAIN) {
     // We're sandboxed; disallow setting domain
     return IPC_FAIL(this, "Sandbox disallows domain setting.");
@@ -1276,7 +1335,7 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvSetDocumentDomain(
     }
   }
 
-  if (!aDomain || !Document::IsValidDomain(uri, aDomain)) {
+  if (!Document::IsValidDomain(uri, aDomain)) {
     // Error: illegal domain
     return IPC_FAIL(
         this, "Setting domain that's not a suffix of existing domain value.");
@@ -1385,21 +1444,21 @@ IPCResult WindowGlobalParent::RecvDiscoverIdentityCredentialFromExternalSource(
   return IPC_OK();
 }
 
-IPCResult WindowGlobalParent::RecvHasStorageAccessPermission(
-    HasStorageAccessPermissionResolver&& aResolve) {
+IPCResult WindowGlobalParent::RecvGetStorageAccessPermission(
+    GetStorageAccessPermissionResolver&& aResolve) {
   WindowGlobalParent* top = TopWindowContext();
   if (!top) {
     return IPC_FAIL_NO_REASON(this);
   }
   nsIPrincipal* topPrincipal = top->DocumentPrincipal();
   nsIPrincipal* principal = DocumentPrincipal();
-  bool result;
+  uint32_t result;
   nsresult rv = AntiTrackingUtils::TestStoragePermissionInParent(
       topPrincipal, principal, &result);
-  NS_ENSURE_SUCCESS(
-      rv, IPC_FAIL(
-              this,
-              "Storage Access Permission: Failed to test storage permission."));
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    aResolve(nsIPermissionManager::UNKNOWN_ACTION);
+    return IPC_OK();
+  }
 
   aResolve(result);
   return IPC_OK();
@@ -1490,6 +1549,10 @@ void WindowGlobalParent::ActorDestroy(ActorDestroyReason aWhy) {
 
         if (mDocumentURI && (net::SchemeIsHTTP(mDocumentURI) ||
                              net::SchemeIsHTTPS(mDocumentURI))) {
+          GetContentBlockingLog()->ReportCanvasFingerprintingLog(
+              DocumentPrincipal());
+          GetContentBlockingLog()->ReportFontFingerprintingLog(
+              DocumentPrincipal());
           GetContentBlockingLog()->ReportEmailTrackingLog(DocumentPrincipal());
         }
       }
@@ -1612,6 +1675,26 @@ void WindowGlobalParent::SetShouldReportHasBlockedOpaqueResponse(
       mShouldReportHasBlockedOpaqueResponse = true;
     }
   }
+}
+
+IPCResult WindowGlobalParent::RecvSetCookies(
+    const nsCString& aBaseDomain, const OriginAttributes& aOriginAttributes,
+    nsIURI* aHost, bool aFromHttp, const nsTArray<CookieStruct>& aCookies) {
+  // Get CookieServiceParent via
+  // ContentParent->NeckoParent->CookieServiceParent.
+  ContentParent* contentParent = GetContentParent();
+  NS_ENSURE_TRUE(contentParent, IPC_OK());
+
+  net::PNeckoParent* neckoParent =
+      LoneManagedOrNullAsserts(contentParent->ManagedPNeckoParent());
+  NS_ENSURE_TRUE(neckoParent, IPC_OK());
+  net::PCookieServiceParent* csParent =
+      LoneManagedOrNullAsserts(neckoParent->ManagedPCookieServiceParent());
+  NS_ENSURE_TRUE(csParent, IPC_OK());
+  auto* cs = static_cast<net::CookieServiceParent*>(csParent);
+
+  return cs->SetCookies(aBaseDomain, aOriginAttributes, aHost, aFromHttp,
+                        aCookies, GetBrowsingContext());
 }
 
 NS_IMPL_CYCLE_COLLECTION_INHERITED(WindowGlobalParent, WindowContext,

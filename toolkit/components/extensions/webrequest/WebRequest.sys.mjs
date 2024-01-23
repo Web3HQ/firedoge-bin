@@ -1,6 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+// @ts-nocheck Defer for now.
 
 const { nsIHttpActivityObserver, nsISocketTransport } = Ci;
 
@@ -165,7 +166,6 @@ class HeaderChanger {
 
   applyChanges(headers, opts = {}) {
     if (!this.validateHeaders(headers)) {
-      /* globals uneval */
       Cu.reportError(`Invalid header array: ${uneval(headers)}`);
       return;
     }

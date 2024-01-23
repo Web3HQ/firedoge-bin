@@ -1,6 +1,11 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
+Services.scriptloader.loadSubScript(
+  "chrome://mochitests/content/browser/toolkit/components/shopping/test/browser/head.js",
+  this
+);
+
 const { sinon } = ChromeUtils.importESModule(
   "resource://testing-common/Sinon.sys.mjs"
 );
@@ -58,11 +63,6 @@ const MOCK_POPULATED_DATA = {
   },
 };
 
-const MOCK_ERROR_OBJ = {
-  status: 422,
-  error: "Unprocessable entity",
-};
-
 const MOCK_INVALID_KEY_OBJ = {
   invalidHighlight: {
     negative: ["This is an invalid highlight and should not be visible"],
@@ -83,13 +83,21 @@ const MOCK_UNANALYZED_PRODUCT_RESPONSE = {
 const MOCK_STALE_PRODUCT_RESPONSE = {
   ...MOCK_POPULATED_DATA,
   product_id: "ABCD123",
+  grade: "A",
+  needs_analysis: true,
+};
+
+const MOCK_UNGRADED_PRODUCT_RESPONSE = {
+  ...MOCK_UNPOPULATED_DATA,
+  product_id: "ABCD123",
   needs_analysis: true,
 };
 
 const MOCK_NOT_ENOUGH_REVIEWS_PRODUCT_RESPONSE = {
   ...MOCK_UNPOPULATED_DATA,
   product_id: "ABCD123",
-  needs_analysis: true,
+  needs_analysis: false,
+  not_enough_reviews: true,
 };
 
 const MOCK_ANALYZED_PRODUCT_RESPONSE = {
@@ -123,6 +131,7 @@ const MOCK_RECOMMENDED_ADS_RESPONSE = [
     grade: "A",
     adjusted_rating: 4.6,
     sponsored: true,
+    image_blob: new Blob(new Uint8Array(), { type: "image/jpeg" }),
   },
 ];
 
@@ -159,10 +168,10 @@ function verifyFooterVisible(shoppingContainer) {
 }
 
 function verifyFooterHidden(shoppingContainer) {
-  ok(!shoppingContainer.settingsEl, "Got the shopping-settings element");
+  ok(!shoppingContainer.settingsEl, "Do not render shopping-settings element");
   ok(
     !shoppingContainer.analysisExplainerEl,
-    "Got the analysis-explainer element"
+    "Do not render the analysis-explainer element"
   );
 }
 
@@ -181,10 +190,11 @@ function getAnalysisDetails(browser, data) {
       "highlightsEl",
       "settingsEl",
       "shoppingMessageBarEl",
+      "loadingEl",
     ]) {
       returnState[el] =
         !!shoppingContainer[el] &&
-        ContentTaskUtils.is_visible(shoppingContainer[el]);
+        ContentTaskUtils.isVisible(shoppingContainer[el]);
     }
     returnState.shoppingMessageBarType =
       shoppingContainer.shoppingMessageBarEl?.getAttribute("type");
@@ -203,12 +213,12 @@ function getSettingsDetails(browser, data) {
     await shoppingSettings.updateComplete;
     let returnState = {
       settingsEl:
-        !!shoppingSettings && ContentTaskUtils.is_visible(shoppingSettings),
+        !!shoppingSettings && ContentTaskUtils.isVisible(shoppingSettings),
     };
     for (let el of ["recommendationsToggleEl", "optOutButtonEl"]) {
       returnState[el] =
         !!shoppingSettings[el] &&
-        ContentTaskUtils.is_visible(shoppingSettings[el]);
+        ContentTaskUtils.isVisible(shoppingSettings[el]);
     }
     return returnState;
   });

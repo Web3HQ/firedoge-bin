@@ -187,8 +187,8 @@ function getHTMLEditorIMESupport(aWindow)
 const kIsWin = (navigator.platform.indexOf("Win") == 0);
 const kIsMac = (navigator.platform.indexOf("Mac") == 0);
 
-const kLFLen = (kIsWin && !AppConstants.EARLY_BETA_OR_EARLIER) ? 2 : 1;
-const kLF = (kIsWin && !AppConstants.EARLY_BETA_OR_EARLIER) ? "\r\n" : "\n";
+const kLFLen = (kIsWin && false) ? 2 : 1;
+const kLF = (kIsWin && false) ? "\r\n" : "\n";
 
 function checkQueryContentResult(aResult, aMessage)
 {
@@ -6705,10 +6705,8 @@ function runCSSTransformTest()
       return;
     }
     lastCharRectTranslatedAsArray = synthesizeQueryTextRectArray(textarea.value.length - 1, textarea.value.length);
-    if (!checkQueryContentResult(lastCharRectTranslatedAsArray, "runCSSTransformTest: lastCharRectTranslatedAsArray, " + textarea.style.transform) ||
-        !checkRectArray(lastCharRectTranslatedAsArray, [lastCharRectTranslated], "runCSSTransformTest: lastCharRectTranslatedAsArray, " + textarea.style.transform)) {
-      return;
-    }
+    checkQueryContentResult(lastCharRectTranslatedAsArray, "runCSSTransformTest: lastCharRectTranslatedAsArray, " + textarea.style.transform);
+    checkRectArray(lastCharRectTranslatedAsArray, [lastCharRectTranslated], "runCSSTransformTest: lastCharRectTranslatedAsArray, " + textarea.style.transform);
   } finally {
     textarea.style.transform = "";
   }
@@ -10000,7 +9998,6 @@ async function runIMEContentObserverTest()
         break;
       case "p":
       case "div":
-        // eslint-disable-next-line no-unsanitized/property
         aElement.innerHTML = "<" + aDefaultParagraphSeparator + "></" + aDefaultParagraphSeparator + ">";
         sel.collapse(aElement.firstChild, 0);
         offsetAtContainer = offsetAtStart + kLFLen;
@@ -10828,8 +10825,6 @@ async function runPasswordMaskDelayTest() {
 
 async function runInputModeTest()
 {
-  await SpecialPowers.setBoolPref("dom.forms.inputmode", true);
-
   let result = [];
 
   function handler(aEvent)
@@ -10860,8 +10855,6 @@ async function runInputModeTest()
   textarea.value = "";
   textarea.removeEventListener("compositionupdate", handler, true);
   textarea.removeEventListener("compositionend", handler, true);
-
-  await SpecialPowers.clearUserPref("dom.forms.inputmode");
 }
 
 
