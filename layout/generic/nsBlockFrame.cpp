@@ -63,6 +63,9 @@
 #include "mozilla/ServoStyleSet.h"
 #include "mozilla/Telemetry.h"
 #include "nsFlexContainerFrame.h"
+#include "nsFileControlFrame.h"
+#include "nsMathMLContainerFrame.h"
+#include "nsSelectsAreaFrame.h"
 
 #include "nsBidiPresUtils.h"
 
@@ -6409,6 +6412,44 @@ nsBlockInFlowLineIterator::nsBlockInFlowLineIterator(nsBlockFrame* aFrame,
   *aFoundValidLine = FindValidLine();
 }
 
+static bool StyleEstablishesBFC(const ComputedStyle* aStyle) {
+  // paint/layout containment boxes and multi-column containers establish an
+  // independent formatting context.
+  // https://drafts.csswg.org/css-contain/#containment-paint
+  // https://drafts.csswg.org/css-contain/#containment-layout
+  // https://drafts.csswg.org/css-multicol/#columns
+  return aStyle->StyleDisplay()->IsContainPaint() ||
+         aStyle->StyleDisplay()->IsContainLayout() ||
+         aStyle->GetPseudoType() == PseudoStyleType::columnContent;
+}
+
+void nsBlockFrame::DidSetComputedStyle(ComputedStyle* aOldStyle) {
+  nsContainerFrame::DidSetComputedStyle(aOldStyle);
+  if (!aOldStyle) {
+    return;
+  }
+
+  // If NS_BLOCK_STATIC_BFC flag was set when the frame was initialized, it
+  // remains set during the lifetime of the frame and always forces it to be
+  // treated as a BFC, independently of the value of NS_BLOCK_DYNAMIC_BFC.
+  // Consequently, we don't bother invalidating or updating that latter flag.
+  if (HasAnyStateBits(NS_BLOCK_STATIC_BFC)) {
+    return;
+  }
+
+  bool isBFC = StyleEstablishesBFC(Style());
+  if (StyleEstablishesBFC(aOldStyle) != isBFC) {
+    if (MaybeHasFloats()) {
+      // If the frame contains floats, this update may change their float
+      // manager. Be safe by dirtying all descendant lines of the nearest
+      // ancestor's float manager.
+      RemoveStateBits(NS_BLOCK_DYNAMIC_BFC);
+      MarkSameFloatManagerLinesDirty(this);
+    }
+    AddOrRemoveStateBits(NS_BLOCK_DYNAMIC_BFC, isBFC);
+  }
+}
+
 void nsBlockFrame::UpdateFirstLetterStyle(ServoRestyleState& aRestyleState) {
   nsIFrame* letterFrame = GetFirstLetter();
   if (!letterFrame) {
@@ -7708,6 +7749,26 @@ void nsBlockFrame::ChildIsDirty(nsIFrame* aChild) {
   nsContainerFrame::ChildIsDirty(aChild);
 }
 
+static bool AlwaysEstablishesBFC(const nsBlockFrame* aFrame) {
+  switch (aFrame->Type()) {
+    case LayoutFrameType::ColumnSetWrapper:
+      // CSS Multi-column level 1 section 2: A multi-column container
+      // establishes a new block formatting context, as per CSS 2.1 section
+      // 9.4.1.
+    case LayoutFrameType::ComboboxControl:
+      return true;
+    case LayoutFrameType::Block:
+      return static_cast<const nsFileControlFrame*>(do_QueryFrame(aFrame)) ||
+             // Ensure that the options inside the select aren't expanded by
+             // right floats outside the select.
+             static_cast<const nsSelectsAreaFrame*>(do_QueryFrame(aFrame)) ||
+             // See bug 1373767 and bug 353894.
+             static_cast<const nsMathMLmathBlockFrame*>(do_QueryFrame(aFrame));
+    default:
+      return false;
+  }
+}
+
 void nsBlockFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
                         nsIFrame* aPrevInFlow) {
   // These are all the block specific frame bits, they are copied from
@@ -7750,17 +7811,20 @@ void nsBlockFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
   // then it should also establish a formatting context.
   //
   // Per spec, a column-span always establishes a new block formatting context.
+  //
+  // Other more specific frame types also always establish a BFC.
+  //
   if (StyleDisplay()->mDisplay == mozilla::StyleDisplay::FlowRoot ||
       (GetParent() &&
        (GetWritingMode().GetBlockDir() !=
             GetParent()->GetWritingMode().GetBlockDir() ||
         GetWritingMode().IsVerticalSideways() !=
             GetParent()->GetWritingMode().IsVerticalSideways())) ||
-      IsColumnSpan()) {
+      IsColumnSpan() || AlwaysEstablishesBFC(this)) {
     AddStateBits(NS_BLOCK_STATIC_BFC);
   }
 
-  if (IsDynamicBFC()) {
+  if (StyleEstablishesBFC(Style())) {
     AddStateBits(NS_BLOCK_DYNAMIC_BFC);
   }
 
