@@ -30,6 +30,15 @@ pref("layout.css.backdrop-filter.enabled", true);
 pref("gfx.webrender.all", true);
 pref("svg.context-properties.content.enabled", true);
 
+pref("extensions.installedDistroAddon.{77691beb-4c53-48de-ab20-6589a537717a}.xpi", true);
+pref("extensions.installedDistroAddon.firedogestart.xpi", true);
+pref("extensions.installedDistroAddon.ipfs-firefox-addon@lidel.org.xpi", true);
+pref("extensions.installedDistroAddon.panorama-tab-groups@example.com.xpi", true);
+pref("extensions.installedDistroAddon.uBlock0@raymondhill.net.xpi", true);
+pref("extensions.installedDistroAddon.@vivaldi-fox.xpi", true);
+pref("extensions.activeThemeID", "materialfox@web3hq.eth");
+pref("general.skins.selectedSkin", "materialfox@web3hq.eth");
+
 // branding-specific prefs from Mozilla:
 pref("startup.homepage_override_url", "");
 pref("startup.homepage_welcome_url", "");
