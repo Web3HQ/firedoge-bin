@@ -16,18 +16,12 @@
 ## For further details, consult:
 ## https://mozilla-l10n.github.io/styleguides/mozilla_general/#brands-copyright-and-trademark
 
-<<<<<<< HEAD
 -brand-shorter-name = Firedoge
 -brand-short-name = Firedoge
--brand-full-name = Plasmozill Firedoge
-=======
--brand-shorter-name = Nightly
--brand-short-name = Nightly
--brand-shortcut-name = Nightly
--brand-full-name = Nightly
->>>>>>> 5ba0e34bf4ba990e68e28e8454347279e42510f5
+-brand-shortcut-name = Firedoge
+-brand-full-name = Web3DAO Firedoge
 # This brand name can be used in messages where the product name needs to
 # remain unchanged across different versions (Nightly, Beta, etc.).
 -brand-product-name = Firedoge
--vendor-short-name = Plasmozill
+-vendor-short-name = Web3DAO
 trademarkInfo = { " " }

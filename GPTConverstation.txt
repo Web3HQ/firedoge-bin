@@ -1,0 +1,24 @@
+This folder, is Firefox source's "browser" directory. I want to know: I've already changed the name (from "Nightly" to "Firedoge") and vendor, but I'm still scratching my head how to change the build not to have a "firefox" executable but "firedoge" instead.
+
+
+
+
+
+
+
+
+To change the build to produce an executable named "firedoge" instead of "firefox," you need to modify the build configuration files where the executable name is defined. Here's what you need to do:
+
+1. Update the MOZ_APP_NAME variable in the configuration files to "firedoge". This variable is used throughout the build system to determine the name of the executable.
+
+2. In the app/moz.build file, you will find the GeckoProgram function call that specifies the name of the executable. Change the argument from CONFIG["MOZ_APP_NAME"] to "firedoge".
+
+Here's the change you need to make in app/moz.build:
+
+    GeckoProgram("firedoge", linkage=browser_linkage)
+    
+3. Ensure that all references to the old executable name "firefox" are updated to "firedoge" in any build scripts or additional configuration files.
+
+4. After making these changes, you will need to rebuild the application for the changes to take effect.
+
+Remember to update any documentation or scripts that reference the old "firefox" executable to use the new "firedoge" name.
