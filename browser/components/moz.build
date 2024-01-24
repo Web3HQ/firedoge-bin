@@ -66,8 +66,7 @@ DIRS += [
     "textrecognition",
     "translations",
     "uitour",
-    "urlbar",
-    "homepage",
+    "urlbar"
 ]
 
 DIRS += ["build"]
