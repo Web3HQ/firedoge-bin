@@ -1,3 +1,5 @@
+./mach run --jsdebugger #doesn't work anymore now that bin has changed from "firefox" to "firedoge", probably bc jsdebugger cmd wasn't changed as well
+
 Firefox->Firedoge customization works reference:
 https://github.com/mozilla/gecko-dev/commit/6d2a4e81c444ed2060844c1d76fd24a744b999e0
 https://github.com/mozilla/gecko-dev/commit/f58d4b4e84d965dcc90ef24510ccf5055054db30

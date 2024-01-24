@@ -41,7 +41,7 @@ pref("general.skins.selectedSkin", "materialfox@web3hq.eth");
 
 // branding-specific prefs from Mozilla:
 pref("startup.homepage_override_url", "");
-pref("startup.homepage_welcome_url", "");
+pref("startup.homepage_welcome_url", "resource:///components/homepage/index.html");
 pref("startup.homepage_welcome_url.additional", "");
 // The time interval between checks for a new version (in seconds)
 pref("app.update.interval", 86400); // 24 hours

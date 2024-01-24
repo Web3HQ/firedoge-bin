@@ -1,153 +1,63 @@
-And, how to make extensions built-in, such as MetaMask?
+About firefox-branding.js' pref("startup.homepage_welcome_url", "");
 
-Also, I want to put a Material theme both built-in and defaulted.
+How to add the homepage folder with its index.html built-in into my Firefox browser build?
 
 
 
 
 
 
-To make extensions like MetaMask built-in:
+To add a built-in homepage with its index.html to your Firefox browser build, follow these steps:
 
-1. Obtain the extension's .xpi file, which is the packaged extension.
-2. Place the .xpi file in the distribution/extensions directory within the Firefox source directory. If the directory doesn't exist, create it.
-3. The .xpi filename should be the extension's ID. For MetaMask, it would be something like webextension@metamask.io.xpi.
-4. Modify the pref file to set the extension as installed by default. For example, in firefox-branding.js or a similar preferences file, add:
+1. Create a directory within the Firefox source tree to hold your homepage files. For example, you might create a directory at browser/components/homepage.
 
-pref("extensions.installedDistroAddon.webextension@metamask.io", true);
+2. Place your index.html file and any associated assets (CSS, JavaScript, images, etc.) in this new directory.
 
-To apply a Material theme by default:
+3. Modify the pref file to set the default homepage URL to point to the built-in page using a resource URI. For example, in firefox-branding.js or a similar preferences file, add:
 
-1. Create a Material theme extension or obtain one that is compatible with Firefox.
-2. Follow the steps above to include the theme extension as a built-in extension.
-3. Set the default theme by modifying the pref file to specify the theme's ID. For example:
+pref("startup.homepage_welcome_url", "resource:///components/homepage/index.html");
 
-pref("extensions.activeThemeID", "material-theme@yourdomain.com");
+4. Update the chrome.manifest file in the Firefox source to include a resource directive that maps the resource:///components/homepage/ URI to the physical location of your homepage files within the source tree. Add the following line to chrome.manifest:
 
-4. Ensure that the theme is enabled by default for new profiles by setting the appropriate preference:
+resource homepage /browser/components/homepage/
 
-pref("general.skins.selectedSkin", "material-theme@yourdomain.com");
+5. Rebuild Firefox to include the new homepage in the build.
 
-After making these changes, rebuild Firefox to see the extensions and theme integrated and set by default.
+6. Test the build to ensure that the new homepage is displayed when opening a new window or tab, as specified by the startup.homepage_welcome_url preference.
 
+By following these steps, your custom homepage will be built into Firefox and set as the default homepage.
 
 
 
 
 
 
+How to set what will be the default branding, nightly or a custom one?
 
-But where to place the theme folder? How to name it? Theme came from GitHub (@https://github.com/muckSponge/MaterialFox.git ).
+How to make a Windows (with installer) and a .deb build?
 
+To set the default branding to either "nightly" or a custom one, you need to modify the mozconfig file used during the build process. Here's how to specify the branding:
 
+1. Open the mozconfig file for your build.
+2. Add the following line to use the nightly branding:
 
+   ac_add_options --with-branding=browser/branding/nightly
+   
+Or, to use a custom branding, replace nightly with the path to your custom branding directory:
 
+   ac_add_options --with-branding=browser/branding/your_branding_directory
+   
+To make a Windows build with an installer:
 
+1. Ensure you're on a Windows machine, as the installer build depends on Windows-specific tools.
+2. Run mach package after a successful build to create the installer. The installer will be located in $OBJDIR/dist/install/sea/.
+3. If you need to build the stub installer, add export MOZ_STUB_INSTALLER=1 to your mozconfig.
+4. For official branding, add ac_add_options --with-branding=browser/branding/official to your mozconfig.
 
+To make a .deb build for Debian-based systems:
 
+1. Ensure you have the necessary Debian packaging tools installed.
+2. Navigate to the objdir and run make package.
+3. This will create a .deb package in the objdir/dist/ directory.
 
-
-To integrate the MaterialFox theme from GitHub into your Firefox build and set it as the default theme, follow these steps:
-
-1. Clone the MaterialFox repository from GitHub.
-
-2. Place the theme's files into the browser/extensions/{theme_id} directory within the Firefox source directory, where {theme_id} is the ID of the MaterialFox theme. If you don't have the ID, you can typically find it in the theme's manifest file (manifest.json) under the applications.gecko.id key.
-
-3. Since MaterialFox is a userChrome.css theme, you'll need to ensure that the userChrome.css file and any associated resources are placed in a location where Firefox can load them from. This might involve modifying the build system to include these files in the final build output.
-
-4. To set the theme as the default, you'll need to modify the preferences file as mentioned in the previous response. Set the extensions.activeThemeID preference to the ID of the MaterialFox theme.
-
-5. Update the chrome.manifest file (if present) in the Firefox source to register the theme so that it's recognized by the browser.
-
-6. Rebuild Firefox to include the theme in the build.
-
-7. Test the build to ensure that the MaterialFox theme is applied by default.
-
-Remember to check the MaterialFox repository for any build instructions or scripts that might be included for integrating the theme with Firefox. Since MaterialFox is a userChrome.css theme, it may require additional steps to integrate compared to standard WebExtension themes.
-
-
-
-
-
-
-
-
-About extensions coming built-in: I'm sorry, but I see no "distribution/extensions" directory.
-
-
-
-
-
-
-
-
-
-To include extensions as built-in within your Firefox build, you may not find a distribution/extensions directory by default. You will need to create this directory yourself within the Firefox source directory. Here's how to do it:
-
-1. Navigate to the root of your Firefox source directory.
-2. Create a new directory called distribution if it doesn't already exist.
-3. Inside the distribution directory, create another directory called extensions.
-
-Now you can place your extension .xpi files in the distribution/extensions directory. The .xpi file should be named with the extension's ID. For example, for MetaMask, you would name the file webextension@metamask.io.xpi.
-
-After placing the .xpi files in the distribution/extensions directory and setting the appropriate preferences, as previously described, rebuild Firefox. The extensions will then be included as built-in extensions in your custom Firefox build.
-
-
-
-
-
-
-"5. Update the chrome.manifest file (if present) in the Firefox source to register the theme so that it's recognized by the browser."
-
-Where?
-
-How on earth to turn muckSponge's MaterialFox into a extension so the userChrome.css will be recognized and made default theme within my custom Firefox build?
-
-
-
-
-
-To turn MaterialFox into an extension and make userChrome.css recognized as the default theme within your custom Firefox build, you need to package it as a Firefox theme extension. Here's a high-level overview of the steps:
-
-1. Create a manifest.json file for the MaterialFox theme, which describes the theme and its files. This file should be placed at the root of the theme's directory.
-
-2. Package the theme directory into a .xpi file, which is a ZIP file with a different extension. You can do this by zipping the contents of the theme directory and renaming the .zip file to .xpi.
-
-3. Place the .xpi file in the distribution/extensions directory within the Firefox source directory. If the directory doesn't exist, create it.
-
-4. Name the .xpi file using the theme's ID, which you define in the manifest.json.
-
-5. Set the default theme in the preferences file (firefox-branding.js or similar) using the theme's ID.
-
-Here's an example of what the manifest.json might look like:
-
-{
-  "manifest_version": 2,
-  "name": "MaterialFox",
-  "version": "1.0",
-  "theme": {
-    "images": {
-      "theme_frame": "path/to/frame/image.png",
-      "additional_backgrounds": ["path/to/other/images.png"]
-    },
-    "colors": {
-      "frame": "rgb(255, 255, 255)",
-      "tab_background_text": "rgb(0, 0, 0)"
-    }
-  },
-  "applications": {
-    "gecko": {
-      "id": "materialfox@yourdomain.com"
-    }
-  }
-}
-
-After creating the manifest.json, you would zip the contents of the MaterialFox directory and rename the .zip file to materialfox@yourdomain.com.xpi.
-
-To set the theme as the default, add the following preference:
-
-pref("extensions.activeThemeID", "materialfox@yourdomain.com");
-
-The chrome.manifest file is no longer used in recent versions of Firefox, so you don't need to update it. Instead, Firefox now uses the manifest.json file within each extension to understand how to load and use the extension.
-
-Rebuild Firefox after these changes, and the MaterialFox theme should be included as the default theme in your custom build.
+Remember to include the Visual C++ Redistributable 1 in your mozconfig for Windows builds, and to follow the Debian packaging guidelines for .deb packages.

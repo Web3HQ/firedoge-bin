@@ -5,3 +5,5 @@
 # This file is included by all browser mozconfigs
 
 . "$topsrcdir/build/mozconfig.common"
+
+ac_add_options --with-branding=browser/branding/firedoge
