@@ -36,8 +36,11 @@ pref("extensions.installedDistroAddon.ipfs-firefox-addon@lidel.org.xpi", true);
 pref("extensions.installedDistroAddon.panorama-tab-groups@example.com.xpi", true);
 pref("extensions.installedDistroAddon.uBlock0@raymondhill.net.xpi", true);
 pref("extensions.installedDistroAddon.@vivaldi-fox.xpi", true);
+//-
 pref("extensions.activeThemeID", "materialfox@web3hq.eth");
 pref("general.skins.selectedSkin", "materialfox@web3hq.eth");
+
+pref("general.useragent.override", "Mozilla/5.0 (X11-Wayland; Ubuntu; Floflis/25; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0 Firedoge/124.0");
 
 // branding-specific prefs from Mozilla:
 pref("startup.homepage_override_url", "");
